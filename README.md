@@ -25,17 +25,38 @@
 
 需要先装好 **DeepSeek Harness（dsh）** 并能打开网页界面（web profile）。
 
+### 方式一：npm 一键安装（推荐）
+
 ```bash
 npx dsh-craft-your-textbook
 ```
 
-脚本会自动完成三步：
+脚本自动完成三步：
 
 1. 把插件装进 dsh 的 web profile（等价于 `dsh plugin --profile web add dsh-craft-your-textbook`）
 2. 把 `dsh-craft-your-textbook` 写进 profile 的 bundles 列表（没有它宿主不会挂载插件）
 3. 把「造书模式」preset 装到 `~/.dsh/.agent-presets/textbook/`
 
 装到别的 profile：`npx dsh-craft-your-textbook --profile tui`
+
+### 方式二：从 GitHub 直装（不经过 npm）
+
+```bash
+# 1) 安装插件（拉取 GitHub 仓库 main 分支；包已预构建，无需构建授权）
+dsh plugin --profile web add github:xx-hub/dsh-craft-your-textbook
+
+# 2) 安装「造书模式」preset（dsh 不会自动装插件的 preset，手动拷一次即可）
+mkdir -p ~/.dsh/.agent-presets/textbook
+cp ~/.dsh/profiles/web/node_modules/dsh-craft-your-textbook/preset/*.yml ~/.dsh/.agent-presets/textbook/
+
+# 3) 重启 dsh
+```
+
+想固定版本（后续往 main 推送不会悄悄改内容）可以锁定 commit：
+
+```bash
+dsh plugin --profile web add github:xx-hub/dsh-craft-your-textbook#<commit>
+```
 
 ## 打开
 
