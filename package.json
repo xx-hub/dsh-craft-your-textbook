@@ -1,0 +1,61 @@
+{
+  "name": "dsh-craft-your-textbook",
+  "version": "1.0.0",
+  "description": "造书工作台：把教材 PDF 加工成「AI 教学蓝本」的 6 阶段流水线（dsh 插件包）。主 AI 亲手跑流水线，用户只做四件事：上传材料、确认探查结果、在关卡拍板、抽查提意见。全程中文，无需技术知识。",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json",
+    "./client": "./lib/client.js",
+    "./workflow": "./src/workflow.js",
+    "./agent-tool": "./src/agent-tool.js",
+    "./mineru": "./src/mineru.js"
+  },
+  "bin": {
+    "dsh-craft-your-textbook": "scripts/setup.mjs"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "src",
+    "lib/client.js",
+    "resources",
+    "preset",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "pack": "npm pack"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh",
+    "plugin",
+    "textbook",
+    "教材",
+    "教育",
+    "AI教学"
+  ],
+  "dependencies": {
+    "adm-zip": "^0.6.0",
+    "jsonrepair": "^3.15.0",
+    "react": "^18.2.0"
+  }
+}

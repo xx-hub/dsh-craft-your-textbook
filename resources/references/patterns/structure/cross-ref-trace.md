@@ -1,0 +1,47 @@
+# 行内回溯引用（Cross-Reference Trace）
+
+## 解决什么教学问题
+章与章之间怎么做知识回扣——是用行内回溯标注、连接表、还是主题低音线。
+
+## 什么时候用 / 什么时候不用
+- 用：几乎所有书（I4 跨章引用是不变量）
+- 不用：完全独立的文集/参考书
+- 典型搭配：foundation-chapter（后续章回溯地基）、recurring-leitmotif（主题低音线也是一种跨章回扣方式）
+
+## 长什么样（结构示例）
+
+PMP 行内回溯（human-readable，技术回根）：
+```markdown
+**判断依据**：回溯**团队绩效域**（营造协作环境）与**十二原则之原则6 展现领导力行为**。
+```
+
+英语教材连接表（blueprint，连接表板块）：
+```markdown
+## 与后续单元的连接
+| 本单元知识点 | 在后续单元如何使用 | 关联强度 |
+|---|---|---|
+| be 动词 am/is/are | Unit 3 复数 are / Unit 5 过去式 was/were | 强 |
+```
+
+CPA 行内交叉引用（human-readable，自然语言）：
+```markdown
+独立性这条低音，我们会在全书里反复听到，到第 20 章再系统地展开。
+```
+
+三种形式：
+1. **行内回溯标签**（PMP 风格）：在 judgment-card 里加一行"回溯 Ch2 原则6"，blueprint/human-readable 都适用
+2. **连接表**（英语教材风格）：章末一张表列本章知识点→后续章节，blueprint 风格
+3. **自然语言交叉引用**（CPA 风格）：prose 里"正如第 X 章讨论过的""我们会在第 Y 章看到"，最适合 human-readable
+
+## 已知陷阱
+- 回溯指向不存在的章/概念 → 跨章审计必扫
+- 每句都回溯打断阅读 → 只在关键判断处回溯
+- human-readable 用 blueprint 风格的行内标签 → 破坏 prose 流畅感
+
+## 变体
+- blueprint：可以用 emoji 标记 + 连接表
+- human-readable：自然语言交叉引用为主，关键判断可加技术回根
+- 与 recurring-leitmotif 区别：leitmotif 是主题重复（"职业怀疑"在全书出现），cross-ref-trace 是具体指向某章某节
+
+## 不要这样用
+- cross-ref-trace 替代章节内部的讲解——跨章引用是回扣不是内容载体

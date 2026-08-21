@@ -1,0 +1,16 @@
+# 造书工作台 bundle 补丁层：在 web profile 里挂载三个插件行。
+# 本文件由 dsh-craft-your-textbook 的 "dsh": {"bundle": {"patch": ...}} 声明导出，
+# 由 dsh 的 profile 机制按 bundles 顺序应用（last-write-wins）。
+
+- insert:
+    # 后端：6 阶段状态机 + 书项目账本（sidecar JSONL）+ 自有 HTTP 路由（上传/事件/下载）
+    - id: textbook-workflow
+      name: 'dsh-craft-your-textbook/workflow'
+
+    # 后端：MinerU PDF→Markdown 转换工具（token 走凭据/环境变量）
+    - id: textbook-mineru
+      name: 'dsh-craft-your-textbook/mineru'
+
+    # 前端：造书工作台界面（roster 行；name 必须是包名本身，包需声明 dsh.client）
+    - id: ui-textbook-run
+      name: 'dsh-craft-your-textbook'
