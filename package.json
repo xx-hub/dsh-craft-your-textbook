@@ -1,6 +1,6 @@
 {
   "name": "dsh-craft-your-textbook",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "造书工作台：把教材 PDF 加工成「AI 教学蓝本」的 6 阶段流水线（dsh 插件包）。主 AI 亲手跑流水线，用户只做四件事：上传材料、确认探查结果、在关卡拍板、抽查提意见。全程中文，无需技术知识。",
   "type": "module",
   "main": "./src/index.js",

@@ -426,7 +426,7 @@ export function StatusCard(props) {
         ? createElement('p', { style: { margin: '4px 0 0', fontSize: '13px', opacity: 0.9 } },
             '💡 MinerU Token 可能失效，可到工作台「MinerU Token」处点「重新设置」换新 Token。')
         : null,
-      createElement('button', { style: S.bigBtn(true), onClick: onResume, disabled: busy }, '🔁 重试'),
+      createElement('button', { style: S.bigBtn(true), onClick: onResume, disabled: busy }, '▶️ 让 AI 接着干'),
       // F28（2026-08-20 走查）：上传错了给「删书重来」入口——两步确认（第一态→确认态），
       // 确认按钮只受 busy 置灰；删除后回向导可马上建一本新书。仅在父级传入删除回调时显示。
       typeof onDeleteStart === 'function'
@@ -488,10 +488,22 @@ export function StatusCard(props) {
       chapterProgress = { done: Math.min(done, total), total }
     }
   }
-  // 计时 + 卡顿警告（F31，2026-08-20）：AI 流式干活（aiActive=true：partialActive 或账本 3 分钟内有动）
-  // 时抑制「可能卡住了」报警，改显示「AI 正在干活」；仅 aiActive=false 且账本超 8 分钟才报警。
+  // 计时 + 卡顿警告（F31，2026-08-20；计时口径 F47，2026-08-23）：
+  //  - 步骤计时按「这一步自己的开始时间」算：最近一条步骤开始事件（stage-start / agent-start）
+  //    的时间就是这一步起点，期间不断发 progress/进度事件不会把计时清零、也不会串到上一步。
+  //  - 卡顿判定仍看「账面多久没动静」（idleMs）：AI 流式干活（aiActive=true）抑制「可能卡住了」。
+  //  - 只显示一行计时（🤖 / ⏱ 二选一），不再和「AI 正在干活」重复各显一行。
+  const stepStart = (() => {
+    const list = events ?? []
+    for (let i = list.length - 1; i >= 0; i--) {
+      const type = list[i]?.type
+      if (type === 'textbook/stage-start' || type === 'textbook/agent-start') return list[i]?.time
+    }
+    return null
+  })()
   const lastTime = lastEvent?.time ?? meta.updatedAt ?? Date.now()
-  const elapsedMs = Math.max(0, Date.now() - lastTime)
+  const stepElapsedMs = Math.max(0, Date.now() - (stepStart ?? lastTime))
+  const idleMs = Math.max(0, Date.now() - lastTime)
   const fmt = (ms) => {
     const s = Math.floor(ms / 1000)
     const m = Math.floor(s / 60)
@@ -502,7 +514,7 @@ export function StatusCard(props) {
     parts.push(`${s % 60} 秒`)
     return parts.join(' ')
   }
-  const stale = !aiActive && elapsedMs > 8 * 60 * 1000
+  const stale = !aiActive && idleMs > 8 * 60 * 1000
   return createElement('div', { style: S.focus },
     createElement('strong', { style: { fontSize: '14px' } }, `⏳ ${label || '准备中…'}`),
     extra !== ''
@@ -530,13 +542,15 @@ export function StatusCard(props) {
           ),
         )
       : null,
-    createElement('p', { style: { margin: '6px 0 0', fontSize: '12px', opacity: 0.7 } }, `⏱ 这一步已进行 ${fmt(elapsedMs)}`),
     stale
       ? createElement('div', { style: { marginTop: '8px', padding: '8px 10px', border: '1px solid #d4a72c', borderRadius: '8px', background: 'var(--dsw-warn-soft, #fff8e1)' } },
-          createElement('span', { style: { fontSize: '13px' } }, `⚠️ 已经 ${fmt(elapsedMs)} 没有新动静了，可能卡住了。到对话页确认一下：如果真卡住了，在对话里发一句「继续」（或点这里重试）唤醒 AI。`),
-          createElement('button', { style: { ...S.bigBtn(true), marginLeft: '8px', padding: '4px 12px' }, onClick: onResume, disabled: busy }, '🔁 重试'),
+          createElement('span', { style: { fontSize: '13px' } }, `⚠️ 已经 ${fmt(idleMs)} 没有新动静了，可能卡住了。到对话页确认一下：如果真卡住了，在对话里发一句「继续」，或点右边让 AI 接着干（它只会从断点继续，不会重做已完成的部分）。`),
+          createElement('button', { style: { ...S.bigBtn(true), marginLeft: '8px', padding: '4px 12px' }, onClick: onResume, disabled: busy }, '🔁 让 AI 接着干'),
         )
-      : createElement('p', { style: { margin: '6px 0 0', fontSize: '12px', opacity: 0.85 } }, `🤖 AI 正在干活，已进行 ${fmt(elapsedMs)}`),
+      : createElement('p', { style: { margin: '6px 0 0', fontSize: '12px', opacity: aiActive ? 0.85 : 0.7 } },
+          aiActive
+            ? `🤖 AI 正在干活 · 这一步已进行 ${fmt(stepElapsedMs)}`
+            : `⏱ 这一步已进行 ${fmt(stepElapsedMs)}`),
     createElement('p', { style: { margin: '6px 0 0', opacity: 0.8 } }, '主 AI 正在亲手做这一步（下方对话台里能看到它现场干活）；轮到你需要拍板/确认时会亮起 ⚡，你随时可以在对话里问它。'),
   )
 }

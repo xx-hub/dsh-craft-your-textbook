@@ -309,14 +309,14 @@ function waived(projectId, item) {
   return (meta.waivers ?? []).some((w) => w.item === item && typeof w.userNote === 'string' && w.userNote.trim() !== '')
 }
 
-/** 事件 → 主对话播报文本（null 表示不值得播报，如转换中间进度）。 */
+/** 事件 → 主对话播报文本（null 表示不值得播报，只进项目时间线）。
+ *  频率收紧：主 AI 现场讲话已覆盖的过程性事件（子代理起止/交办/进度/抽查/AI 报告）
+ *  一律不播；用户新增的风格意见是自己刚点的，也不播（机器收回才值得告知）。 */
 function announceText(event) {
   const data = event.data ?? {}
   switch (event.type) {
     case 'textbook/phase-start': return `🏁 阶段开始：${data.label ?? data.phase}`
     case 'textbook/phase-end': return `✅ 阶段完成：${data.label ?? data.phase}`
-    case 'textbook/agent-start': return `🔧 AI 开始：${data.label ?? ''}`
-    case 'textbook/agent-end': return `✅ AI 完成：${data.label ?? ''}`
     case 'textbook/gate-proposal':
       return `📋 请你拍板 · 第 ${data.gate} 关 · 方案 v${data.version}：${data.title ?? ''}（工作台里可看完整方案）`
     case 'textbook/gate-decision':
@@ -332,14 +332,17 @@ function announceText(event) {
     }
     case 'textbook/delivery': return '🎉 书做好了！工作台里可以预览和下载。'
     case 'textbook/hint': return typeof data.text === 'string' && data.text !== '' ? `💡 ${data.text}` : null
-    // 交办/进度/抽查/AI 报告：主 AI 自己在对话里讲话（现场干活），机器不再重复播报。
+    // 交办/进度/子代理起止/抽查/AI 报告：主 AI 自己在对话里讲话（现场干活），机器不再重复播报。
     case 'textbook/stage-start':
     case 'textbook/progress':
     case 'textbook/review':
     case 'textbook/ai-report':
+    case 'textbook/agent-start':
+    case 'textbook/agent-end':
       return null
     case 'textbook/style-note':
-      return data.revoked === true ? `🎨 风格线收回了一条意见（${String(data.styleNote?.text ?? '').slice(0, 40)}）` : `🎨 已记入风格线：${String(data.styleNote?.text ?? '').slice(0, 60)}`
+      if (data.revoked !== true) return null
+      return `🎨 风格线收回了一条意见（${String(data.styleNote?.text ?? '').slice(0, 40)}）`
     case 'textbook/intervention': return `📮 已留言：${String(data.text ?? '').slice(0, 60)}（不打断 AI 手里的活，下个停靠点处理）`
     case 'textbook/intervention-done': return null
     case 'textbook/waiver': return `✅ 已按你的特殊要求放行：${WAIVER_ITEMS[data.item]?.label ?? data.item}`
@@ -358,72 +361,67 @@ function announceText(event) {
   }
 }
 
-/** 把一条旁白追加到主会话（对话流里能看到机器在干什么）。
- *  必须补全 turn/step 序列：前端把每条 assistant 消息按"assistant-step"渲染，
- *  缺 turn 会导致整页崩溃（此前出过"invalid turn undefined"）。 */
+/** 把一条机器播报追加到主会话（对话流里能看到机器在干什么）。
+ *  形态：plugin 来源的 user/message「notice 注入行」——客户端把它归类为上下文行
+ *  （折叠一行摘要 + 可展开全文），节点身份用消息 id，与回合体系完全解耦。
+ *  旧实现伪造完整 turn 信封（turn/start→turn/end，号码取日志最大值+1），与真实
+ *  主 AI 自己的回合计数冲突：客户端把重复的 assistant-step:${turn}:${step} 当致命
+ *  错误抛出，且异常发生在推送管道里——之后到达的一切事件都进不了聊天视图（对话
+ *  冻结、刷新重放也复崩）。已废弃该形态；存量信封组由 fix-announce.mjs 清理。
+ *  安全闸保留：AI 回合进行中绝不注入。notice 虽不占回合号，但落在「assistant 工具
+ *  调用」与「tool 结果」之间仍会破坏下轮请求的消息相邻性（模型接口会以
+ *  insufficient tool messages following tool_calls 拒绝）。回合中的播报直接放弃
+ *  （工作台时间线里仍可见），等回合收口后的播报照常注入。 */
 function announceToSession(ctx, sessionId, text) {
-  const debug = (msg) => {
-    try {
-      if (process.env.TEXTBOOK_ANNOUNCE_DEBUG !== '1') return
-      const home = process.env.DSH_HOME
-      if (typeof home === 'string' && home !== '') appendFileSync(join(home, 'announce-debug.log'), `${new Date().toISOString()} ${msg}\n`)
-    } catch { /* 诊断失败忽略 */ }
-  }
   try {
     const session = ctx.get('sessions')?.get?.(sessionId)
-    debug(`lookup ${sessionId} -> ${session === undefined ? 'undefined' : 'ok'}`)
     if (session === undefined) return
-    // 安全闸：AI 回合进行中（最后一个 turn/start 之后没有 turn/end）绝不注入合成消息。
-    // 原因：本函数常在工作台动作的 HTTP 处理器里同步执行，而那多半是 AI 的工具调用--
-    // 此时注入的合成回合会落在「assistant 工具调用」与「tool 结果」之间，
-    // 下一轮请求会被模型接口直接拒绝（insufficient tool messages following tool_calls）。
-    // 回合中的播报直接放弃（工作台事件流里仍可见），等回合收口后的播报照常注入。
     let lastTurnStart = -1
     let lastTurnEnd = -1
-    for (let i = 0; i < (session.events ?? []).length; i += 1) {
-      const type = session.events[i]?.type
+    const events = session.events ?? []
+    for (let i = 0; i < events.length; i += 1) {
+      const type = events[i]?.type
       if (type === 'turn/start') lastTurnStart = i
       else if (type === 'turn/end') lastTurnEnd = i
     }
-    if (lastTurnStart > lastTurnEnd) {
-      debug(`skip announce (agent turn in flight): ${text.slice(0, 60)}`)
-      return
-    }
-    let provider = 'dsh'
-    let model = 'workbench'
-    try {
-      const defaultModel = ctx.get('agentDefaultModel')
-      const resolved = typeof defaultModel?.currentSelection === 'function' ? defaultModel.currentSelection() : defaultModel
-      if (resolved?.provider !== undefined) provider = resolved.provider
-      if (resolved?.model !== undefined) model = resolved.model
-    } catch { /* 保持默认 */ }
-    // 新开一个 turn：号码 = 现有最大 turn + 1。
-    let maxTurn = 0
-    for (const event of session.events ?? []) {
-      if (event.type === 'turn/start' && typeof event.data?.turn === 'number' && event.data.turn > maxTurn) {
-        maxTurn = event.data.turn
-      }
-    }
-    const turn = maxTurn + 1
-    session.append('turn/start', { turn })
-    session.append('step/start', { turn, step: 1 })
-    session.append('assistant/message', {
-      turn,
-      step: 1,
-      message: {
-        id: `tb-announce-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-        role: 'assistant',
-        source: { kind: 'model', provider, model },
-        content: [{ type: 'text', text }],
-      },
+    if (lastTurnStart > lastTurnEnd) return
+    const firstLine = (text.split('\n', 1)[0] ?? text).trim()
+    // user/message 的 data 就是消息本身（不是 assistant/message 的 {message:...} 包裹）。
+    // 写错形状会让宿主模型请求构建时读 data.source.kind 崩（.kind undefined），已修。
+    session.append('user/message', {
+      id: `tb-note-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      role: 'user',
+      source: { kind: 'plugin', plugin: 'dsh-craft-your-textbook', form: 'notice', summary: `工作台：${firstLine.slice(0, 60)}` },
+      content: [{ type: 'text', text }],
     }, { surfaceOp: 'append' })
-    session.append('step/end', { turn, step: 1 })
-    session.append('turn/end', { turn, reason: { kind: 'completed' } })
-    debug(`appended turn ${turn}: ${text.slice(0, 60)}`)
   } catch (error) {
-    debug(`error: ${String(error instanceof Error ? error.message : error)}`)
     ctx.logger.warn(`textbook: 主对话播报失败: ${String(error instanceof Error ? error.message : error)}`)
   }
+}
+
+/** 播报入口：低价值事件只进项目时间线；相邻事件合并成一条注入行
+ *  （如「✅ 阶段完成：源探查 → 🏁 阶段开始：教学设计」）。
+ *  暂存按 project 记（进程内即可；跨重启最多丢一次合并机会，无实质影响）。 */
+const pendingPhaseEnd = new Map()
+function announceEventToSession(ctx, projectId, meta, event) {
+  const sessionId = meta.session
+  if (typeof sessionId !== 'string' || sessionId === '') return
+  if (event.type === 'textbook/phase-end') {
+    pendingPhaseEnd.set(projectId, { text: announceText(event), time: event.time })
+    return
+  }
+  const text = announceText(event)
+  if (text === null) return
+  const held = pendingPhaseEnd.get(projectId)
+  pendingPhaseEnd.delete(projectId)
+  if (held !== undefined && held.text !== null) {
+    if (event.type === 'textbook/phase-start' && event.time - held.time < 60_000) {
+      announceToSession(ctx, sessionId, `${held.text} → ${text}`)
+      return
+    }
+    announceToSession(ctx, sessionId, held.text)
+  }
+  announceToSession(ctx, sessionId, text)
 }
 
 function appendEvent(projectId, type, data) {
@@ -445,12 +443,9 @@ function appendEvent(projectId, type, data) {
       appendFileSync(processLogPath(projectId), `### ${time}\n${entry}\n\n`)
     }
   } catch { /* 过程记录失败不影响主流程 */ }
-  // 主对话播报：让用户在对话流里看到机器在干什么（AI 过程嵌入主对话）。
+  // 主对话播报：让用户在对话流里看到机器在干什么（notice 注入行，不再伪造回合）。
   try {
-    const announce = announceText(event)
-    if (announce !== null && hostCtx !== null && meta.session !== undefined) {
-      announceToSession(hostCtx, meta.session, announce)
-    }
+    if (hostCtx !== null) announceEventToSession(hostCtx, projectId, meta, event)
   } catch { /* 播报失败不影响主流程 */ }
   return event
 }
@@ -2157,13 +2152,44 @@ async function handleAction(ctx, req, res) {
         return
       }
       case 'resume': {
-        // 重试/继续：机器在等 AI（pendingStage）→ 重新唤醒；否则重新推状态机。
+        // 重试/继续（F48，2026-08-23 语义修正）：优先像「戳一下 AI」一样，只给活的主 AI 发一条
+        // 「从断点继续」的短提醒——不重发整段交办、不重做当前环节；没有活的主 AI 或发不出去时
+        // 才退回旧逻辑：机器在等 AI（pendingStage）→ 重新交办唤醒；否则重新推状态机。
         assertSessionOwned(project, sessionId)
         const resumeMeta = readMeta(project)
         if (resumeMeta === null) throw new Error(`unknown project ${JSON.stringify(project)}`)
-        if (resumeMeta.pause !== null && resumeMeta.pause !== undefined) {
+        const clearedPause = resumeMeta.pause !== null && resumeMeta.pause !== undefined
+        if (clearedPause) {
           resumeMeta.pause = null
           appendEvent(project, 'textbook/resume', {})
+        }
+        const agent = (ctx.get('agents') ?? ctx.agents)?.get?.(resumeMeta.session)
+        if (resumeMeta.demo !== true && agent !== undefined) {
+          try {
+            const label = stageLabel(resumeMeta.pendingStage, resumeMeta.pendingGate ?? null)
+            const text = [
+              `【工作台继续 · ${label || '当前环节'}】`,
+              '用户点了「让 AI 接着干」。请接着把当前环节做完，不要重做已完成的部分：',
+              '1. 先调用 workbench_status 看真实状态（项目、阶段、待办、抽查意见）。',
+              '2. 若本环节还没领过任务，调用 workbench_act（action=stage-brief）领取说明后再继续；领过就直接从中断处继续。',
+              '3. 过程中用 workbench_act（action=progress）随时上报进度；完成后照常调用 stage-submit 交工。',
+              '铁律：先用大白话告诉用户你要接着做什么，再动手；需要用户拍板的事绝不自作主张。',
+            ].join('\n')
+            agent.followup({
+              id: `tb-resume-${Date.now().toString(36)}`,
+              role: 'user',
+              content: [{ type: 'text', text }],
+              source: { kind: 'plugin', plugin: 'dsh-craft-your-textbook', form: 'notice', summary: `工作台：用户点了「让 AI 接着干」（${label || '当前环节'}）` },
+            })
+            if (!clearedPause) appendEvent(project, 'textbook/resume', {})
+            resumeMeta.status = 'running'
+            resumeMeta.updatedAt = Date.now()
+            writeMeta(resumeMeta)
+            sendJson(res, 200, { ok: true, project, woke: 'continue' })
+            return
+          } catch (error) {
+            ctx.logger.warn(`textbook: 继续（followup）失败，退回旧重试路径: ${String(error instanceof Error ? error.message : error)}`)
+          }
         }
         if (resumeMeta.pendingStage !== null && resumeMeta.pendingStage !== undefined) {
           resumeMeta.status = 'running'
