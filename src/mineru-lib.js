@@ -14,6 +14,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
+import { isWithin } from './path-guard.js'
 import AdmZip from 'adm-zip'
 
 const API_BASE = 'https://mineru.net'
@@ -288,7 +289,7 @@ export async function convertPdfBatch(items, opts = {}, onStage = () => {}) {
           if (zipEntry.entryName.endsWith('full.md')) fullMd = zipEntry.getData()
           if (!zipEntry.isDirectory && !zipEntry.entryName.endsWith('/')) {
             const target = join(item.outDir, zipEntry.entryName)
-            if (target.startsWith(item.outDir + '\\') || target.startsWith(item.outDir + '/')) {
+            if (isWithin(item.outDir, target)) {
               mkdirSync(join(target, '..'), { recursive: true })
               writeFileSync(target, zipEntry.getData())
             }
@@ -421,7 +422,7 @@ export async function convertPdf(pdfPath, outDir, opts = {}, onStage = () => {})
     if (!entry.isDirectory && !entry.entryName.endsWith('/')) {
       // 图片等资源展开到 outDir，保持 zip 内相对路径。
       const target = join(outDir, entry.entryName)
-      if (target.startsWith(outDir + '\\') || target.startsWith(outDir + '/')) {
+      if (isWithin(outDir, target)) {
         mkdirSync(join(target, '..'), { recursive: true })
         writeFileSync(target, entry.getData())
       }
