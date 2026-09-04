@@ -13,7 +13,7 @@
 ## 必读文档矩阵（逐份读，一份都不能少）
 
 | # | 文件 | 路径 | 为什么读 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1 | 源探查报告 | `work/explore.md` | 材料清单+角色标签、结构观察、教学线索——正文该覆盖哪些、从哪来 |
 | 2 | 结构化知识地图 | `work/knowledge-map.json` | knowledgePoints / chapterSuggestion——知识点的权威清单 |
 | 3 | 章节骨架 | `work/outline.md` | 范例章声明的 title / outline / source / targetWords / points——本章承诺 |
@@ -59,6 +59,7 @@
 
 ## 铁律
 
+- **工具纪律（跨平台）**：文件 I/O 用文件工具（read / write / edit / glob / grep），不用 shell 读/写/搜文件；规则对 Windows / macOS / Linux 完全一致（单一事实源 `audit-and-testing.md §九 工具纪律`）。
 - **上下文干净**：从零读，不知道这本书怎么造的；不看建造日志、不看过程对话。
 - **只报告、不改文件**：不要动工作区任何正文文件；你唯一的产出是 `work/audit-<NN>.md`。
 - **每条 issue 给证据**：文件:行号 + 原文摘录；给不出证据的标注"未核实"。

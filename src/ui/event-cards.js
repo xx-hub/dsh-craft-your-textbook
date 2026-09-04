@@ -8,8 +8,8 @@
 
 import { createElement, useEffect, useRef, useState } from "react";
 import { S } from "./styles.js";
-// 双端共享领域件：六阶段全称、素材角色、角色识别兜底（单一事实来源）。
-import { PHASES, ROLES, guessRoleFromName } from "../domain-rules.js";
+// 双端共享领域件：六阶段全称、素材角色、角色识别兜底、事件含义表（单一事实来源）。
+import { PHASES, ROLES, guessRoleFromName, EVENT_META, MAX_UPLOAD_BYTES, uploadTooLargeMessage } from "../domain-rules.js";
 
 function cardText(event) {
 	const data = event.data ?? {};
@@ -50,50 +50,29 @@ function cardText(event) {
 			return `👀 抽查意见（${data.title ?? `第${data.chapter ?? "?"}章`}）：${data.comment ?? ""}`;
 		case "textbook/ai-report":
 			return `🛡️ AI 自查报告：${data.report ?? ""}`;
+		case "textbook/deep-modify":
+			return `✏️ 定点修改：${data.segment ?? ""}`;
+		case "textbook/deep-undo":
+			return `↩️ 撤销定点修改：${data.segment ?? ""}`;
+		case "textbook/pattern-added":
+			return `📇 已加自定义模式：${data.name ?? ""}`;
+		case "textbook/gold-chapter":
+			return `👑 金标准章：第 ${data.chapter ?? "?"} 章`;
+		case "textbook/chapters-review":
+			return `🔍 章节过目确认（${data.approved === true ? "通过" : "驳回"}）`;
+		case "textbook/final-approve":
+			return `✅ 终检认可${data.approved === true ? "" : `：${data.note ?? ""}`}`;
 		default:
-			return event.type;
+			// 兜底读 EVENT_META（label/emoji 双端共用）——绝不回落到 raw 机器串。
+			return `${EVENT_META[event.type]?.emoji ?? ""} ${EVENT_META[event.type]?.label ?? event.type}`.trim();
 	}
 }
 
 function cardIcon(event) {
-	switch (event.type) {
-		case "textbook/phase-start":
-			return "▶️";
-		case "textbook/phase-end":
-			return "🏁";
-		case "textbook/gate-proposal":
-			return "📋";
-		case "textbook/gate-decision":
-			return event.data?.approved === true ? "✅" : "↩️";
-		case "textbook/agent-start":
-			return "🤖";
-		case "textbook/agent-end":
-			return "🤖";
-		case "textbook/mineru-progress":
-			return "📄";
-		case "textbook/rollback":
-			return "⏪";
-		case "textbook/source-added":
-			return "📎";
-		case "textbook/hint":
-			return "💡";
-		case "textbook/error":
-			return "⚠️";
-		case "textbook/quality":
-			return "🛡️";
-		case "textbook/delivery":
-			return "🎉";
-		case "textbook/stage-start":
-			return "🤖";
-		case "textbook/progress":
-			return "⏳";
-		case "textbook/review":
-			return "👀";
-		case "textbook/ai-report":
-			return "🛡️";
-		default:
-			return "•";
-	}
+	// 「通过/驳回」变体按 data.approved 覆盖基准 emoji（EVENT_META 只放基准）。
+	if (event.type === "textbook/gate-decision" || event.type === "textbook/outline-decision")
+		return event.data?.approved === true ? "✅" : "↩️";
+	return EVENT_META[event.type]?.emoji ?? "•";
 }
 
 export { cardText, cardIcon };
@@ -158,7 +137,6 @@ export function WizardCard(props) {
 		busy,
 		suggestions,
 		suggestLoading,
-		onCancel,
 		onSuggest,
 	} = props;
 	const [name, setName] = useState("");
@@ -169,9 +147,16 @@ export function WizardCard(props) {
 	const [hint, setHint] = useState("");
 	const [error, setError] = useState(null);
 
+	// 书名/目标去前缀（前端兜底）：AI 建议偶尔带「开始：」「书名：」等口水前缀，填入前剥掉。
+	// 源头净化在 content-lib.js wizardSuggest（后端），这里防历史/其他来源漏网。
+	const stripPrefix = (s) =>
+		typeof s === "string"
+			? s.replace(/^\s*(?:开始|书名|建议|题目|目标)[:：]\s*/, "")
+			: s;
+
 	const pickSuggestion = (suggestion) => {
-		setName(suggestion.name ?? "");
-		setGoal(suggestion.goal ?? "");
+		setName(stripPrefix(suggestion.name ?? ""));
+		setGoal(stripPrefix(suggestion.goal ?? ""));
 		setScience(suggestion.science === true);
 		setError(null);
 	};
@@ -209,11 +194,6 @@ export function WizardCard(props) {
 				"strong",
 				{ style: { fontSize: "14px" } },
 				'📚 第一步 · 材料准备：先给书"建档"（10 秒），然后就能上传教材',
-			),
-			createElement(
-				"button",
-				{ style: { ...S.smallLink, float: "right" }, onClick: onCancel },
-				"取消",
 			),
 		),
 		createElement(
@@ -486,17 +466,45 @@ export function UploadArea(props) {
 		}
 		setUploading(true);
 		setError(null);
-		try {
-			for (const item of pending) {
-				await onUpload(item.file, item.role);
+		const failed = [];
+		for (const item of pending) {
+			// 超限直接标记失败（服务端 413 同一文案），不发起注定失败的大请求。
+			if (item.file.size > MAX_UPLOAD_BYTES) {
+				failed.push({
+					item,
+					message: uploadTooLargeMessage(),
+					retryable: false,
+				});
+				continue;
 			}
+			try {
+				await onUpload(item.file, item.role);
+			} catch (err) {
+				failed.push({
+					item,
+					message: String(err instanceof Error ? err.message : err),
+					retryable: err?.retryable !== false,
+				});
+			}
+		}
+		if (failed.length === 0) {
 			setPending([]);
 			dirtyRef.current = {};
-		} catch (err) {
-			setError(String(err instanceof Error ? err.message : err));
-		} finally {
-			setUploading(false);
+		} else {
+			// 只保留失败的项：重试不重传已成功落盘的（服务端已按文件名幂等，重复传也不会再加一条）。
+			const failedNames = new Set(failed.map((f) => f.item.name));
+			setPending((prev) => prev.filter((i) => failedNames.has(i.name)));
+			const first = failed[0];
+			const retryHint =
+				first.retryable === false ? "" : "；重试只会重传这一本";
+			const anyRetryable = failed.some((f) => f.retryable !== false);
+			setError(
+				failed.length === 1
+					? `上传失败：${first.item.name}（${first.message}${retryHint}）`
+					: `有 ${failed.length} 本上传失败（如 ${first.message}）${anyRetryable ? "，将仅重试失败项" : ""}`,
+			);
 		}
+		setUploading(false);
 	};
 
 	return createElement(
@@ -811,7 +819,7 @@ export function StatusCard(props) {
 	// 阶段在做什么（让人放心的说明）
 	const phase = meta.phase ?? 1;
 	const phaseDesc = {
-		2: "源探查：主 AI 正在通读你的教材，整理成源材料索引",
+		2: "源探查：AI 正在通读你的教材（材料多时会派小助手分头读），整理成源材料索引",
 		3: "教学设计：主 AI 正在起草设计关卡方案（已通过过的会自动跳过）",
 		4: "最佳范例章：主 AI 正在写第 1 章给你看效果",
 		5: "全章写作：小助手执笔 + 小助手自查 + 主 AI 终审，逐章推进",
@@ -971,7 +979,7 @@ export function StatusCard(props) {
 		createElement(
 			"p",
 			{ style: { margin: "6px 0 0", opacity: 0.8 } },
-			"主 AI 正在亲手做这一步（下方对话台里能看到它现场干活）；轮到你需要拍板/确认时会亮起 ⚡，你随时可以在对话里问它。",
+			"AI 正在推进这一步（可能亲自做，也可能派一批小助手在后台并行干，不一定会逐条刷到下方对话台里）；轮到你需要拍板/确认时会亮起 ⚡，随时可以在对话里问它。",
 		),
 	);
 }
@@ -991,6 +999,36 @@ export function DeliveryCard(props) {
 		styleNotes,
 	} = props;
 	const bookName = (meta?.name ?? "").trim() || "BOOK";
+	// 邀请码可点复制（与过程地图栏同款实现，2026-09）。
+	const [copied, setCopied] = useState(false);
+	const copyInvite = (e, code) => {
+		e.preventDefault();
+		e.stopPropagation();
+		const done = () => {
+			setCopied(true);
+			setTimeout(() => setCopied(false), 1600);
+		};
+		const fallback = () => {
+			try {
+				const ta = document.createElement("textarea");
+				ta.value = code;
+				ta.style.position = "fixed";
+				ta.style.opacity = "0";
+				document.body.appendChild(ta);
+				ta.select();
+				document.execCommand("copy");
+				document.body.removeChild(ta);
+				done();
+			} catch {
+				/* 老浏览器降级：无操作 */
+			}
+		};
+		if (navigator.clipboard && navigator.clipboard.writeText) {
+			navigator.clipboard.writeText(code).then(done, fallback);
+		} else {
+			fallback();
+		}
+	};
 	return createElement(
 		"div",
 		{ style: S.focus },
@@ -1119,21 +1157,245 @@ export function DeliveryCard(props) {
 				"💡 这本书怎么用",
 			),
 			createElement(
-				"p",
-				{ style: { margin: "0 0 4px" } },
-				`给 AI 老师上课 → 把下载的《${bookName}》.md 交给【破卷】（https://www.socratopia.app/r/SCR-FEJXMQ）作为教材进行学习。【建议】`,
+				"div",
+				{ style: { display: "flex", margin: "0 0 4px" } },
+				createElement(
+					"span",
+					{
+						style: {
+							flexShrink: 0,
+							width: "112px",
+							display: "flex",
+							justifyContent: "space-between",
+							alignItems: "baseline",
+						},
+					},
+					createElement("span", null, "给 AI 老师上课"),
+					createElement("span", null, "→"),
+				),
+				createElement(
+					"span",
+					{ style: { minWidth: 0 } },
+					`把下载的《${bookName}》.md 交给`,
+					createElement(
+						"a",
+						{
+							href: "https://www.socratopia.app/r/SCR-FEJXMQ",
+							target: "_blank",
+							rel: "noopener noreferrer",
+							style: {
+								color: "var(--dsw-accent, #4f6ef7)",
+								textDecoration: "underline",
+							},
+						},
+						"【破卷】",
+					),
+					"当教材来学。【建议】",
+				),
 			),
 			createElement(
-				"p",
-				{ style: { margin: "0 0 4px" } },
-				"给人读 → 直接阅读或打印。建议先复核一遍再用。",
+				"div",
+				{ style: { display: "flex", margin: "0 0 4px" } },
+				createElement(
+					"span",
+					{
+						style: {
+							flexShrink: 0,
+							width: "112px",
+							display: "flex",
+							justifyContent: "space-between",
+							alignItems: "baseline",
+						},
+					},
+					createElement("span", null, "给人读"),
+					createElement("span", null, "→"),
+				),
+				createElement(
+					"span",
+					{ style: { minWidth: 0 } },
+					"直接阅读或打印。建议先复核一遍再用。",
+				),
 			),
 			createElement(
 				"p",
 				{ style: { margin: "0" } },
-				"如果本项目对你有帮助，欢迎填写邀请码：SCR-FEJXMQ，可免费领取 100 万 tokens，全场官方造书免费学习。",
+				"如果本项目对你有帮助，欢迎填写邀请码：",
+				createElement(
+					"span",
+					{
+						onClick: (e) => copyInvite(e, "SCR-FEJXMQ"),
+						title: copied ? "已复制" : "点击复制邀请码",
+						style: {
+							background: "var(--dsw-accent-soft, #eef2ff)",
+							borderRadius: "4px",
+							padding: "1px 6px",
+							letterSpacing: "0.5px",
+							cursor: "pointer",
+							userSelect: "all",
+							color: "var(--dsw-accent, #4f6ef7)",
+						},
+					},
+					copied ? "✓ 已复制" : "SCR-FEJXMQ",
+				),
+				"，可免费领取 100 万 tokens，官方造书全场免费学。",
 			),
 		),
+	);
+}
+
+// ── 终检结果认可卡（2026-08-26 用户拍板：终检 = AI 对全书整体调整 + 用户对整体的最终认可） ──
+
+export function FinalApprovalCard(props) {
+	const {
+		checks,
+		onPreview,
+		preview,
+		busy,
+		aiReport,
+		styleNotes,
+		onApprove,
+		onReject,
+	} = props;
+	const [note, setNote] = useState("");
+	return createElement(
+		"div",
+		{ style: S.focus },
+		createElement("strong", { style: { fontSize: "14px" } }, "🛡️ 终检完成，等你对整本书把关"),
+		aiReport !== null && aiReport !== undefined && aiReport !== ""
+			? createElement(
+					"div",
+					{
+						style: {
+							margin: "10px 0",
+							padding: "8px 10px",
+							background: "var(--dsw-accent-soft, #eef2ff)",
+							borderRadius: "8px",
+							fontSize: "12px",
+						},
+					},
+					createElement("strong", null, "🤖 AI 自查说的："),
+					createElement(
+						"p",
+						{ style: { margin: "4px 0 0", whiteSpace: "pre-wrap" } },
+						aiReport,
+					),
+				)
+			: null,
+		createElement(
+			"div",
+			{ style: { margin: "10px 0" } },
+			(checks ?? []).map((check) =>
+				createElement(
+					"div",
+					{ key: check.name, style: { margin: "4px 0" } },
+					createElement("span", null, check.ok === true ? "✅" : "❌"),
+					` ${check.name}`,
+					createElement(
+						"span",
+						{ style: { opacity: 0.7, marginLeft: "6px", fontSize: "12px" } },
+						check.note ?? "",
+					),
+				),
+			),
+		),
+		(styleNotes ?? []).length > 0
+			? createElement(
+					"div",
+					{
+						style: {
+							margin: "10px 0",
+							padding: "8px 10px",
+							borderRadius: "8px",
+							border: "1px solid var(--dsw-border, #d0d7de)",
+						},
+					},
+					createElement(
+						"p",
+						{ style: { margin: "0 0 6px", fontWeight: 600 } },
+						"🎨 你的风格线条条有着落",
+					),
+					...(styleNotes ?? []).map((note, index) =>
+						createElement(
+							"div",
+							{
+								key: note.id ?? index,
+								style: { fontSize: "12px", margin: "3px 0" },
+							},
+							`${note.status === "superseded" ? "·（已收回）" : note.status === "conflict" ? "·（与设计冲突，理由见备注）" : "·"}${note.text}`,
+							note.note
+								? createElement(
+										"span",
+										{ style: { opacity: 0.6 } },
+										` -- ${note.note}`,
+									)
+								: null,
+						),
+					),
+				)
+			: null,
+		createElement(
+			"p",
+			{ style: { margin: "0 0 8px", fontSize: "12px", opacity: 0.75 } },
+			"这是你对整本书的最后一次把关：AI 已整体调整过、机器也兜底验过。满意就认可交付；要改的写一句意见，AI 会照着改整本后重新终检。",
+		),
+		createElement(
+			"textarea",
+			{
+				style: {
+					width: "100%",
+					minHeight: "64px",
+					padding: "8px",
+					borderRadius: "8px",
+					border: "1px solid var(--dsw-border, #d0d7de)",
+					fontSize: "13px",
+					boxSizing: "border-box",
+				},
+				placeholder: "不满意的话，在这里写一句改进意见（可选，写了才会走「不满意」分支）…",
+				value: note,
+				onChange: (e) => setNote(e.target.value),
+			},
+		),
+		createElement(
+			"div",
+			{ style: { display: "flex", gap: "10px", margin: "10px 0" } },
+			createElement(
+				"button",
+				{ style: S.bigBtn(true), onClick: onPreview, disabled: busy },
+				preview === null ? "👀 预览整本书" : "收起预览",
+			),
+			createElement(
+				"button",
+				{
+					style: { ...S.bigBtn(true), marginRight: "auto" },
+					onClick: () => onReject(note),
+					disabled: busy || note.trim() === "",
+					title: "写了改进意见才能走「不满意」",
+				},
+				"❌ 不满意，让 AI 改",
+			),
+			createElement(
+				"button",
+				{ style: S.bigBtn(true), onClick: () => onApprove(), disabled: busy },
+				"✅ 认可，交付",
+			),
+		),
+		preview !== null
+			? createElement(
+					"pre",
+					{
+						style: {
+							whiteSpace: "pre-wrap",
+							background: "var(--dsw-surface, #fff)",
+							borderRadius: "8px",
+							padding: "10px",
+							maxHeight: "300px",
+							overflow: "auto",
+							fontSize: "12px",
+						},
+					},
+					preview,
+				)
+			: null,
 	);
 }
 
@@ -1173,6 +1435,56 @@ export function GatePanel(props) {
 	const [note, setNote] = useState("");
 	// 2026-08-21：勾选「换个风格」时出现的粘贴窗口（目标文本 → 本书自定义模式）。
 	const [styleText, setStyleText] = useState("");
+	// 回退是重操作（会把状态拉回上一个拍板点、重做后续推进）：先确认再执行（A3 快赢）。
+	const [confirmRollback, setConfirmRollback] = useState(false);
+	const rollbackConfirm = () =>
+		createElement(
+			"div",
+			{
+				style: {
+					marginTop: "10px",
+					borderTop: "1px dashed var(--dsw-border, #d0d7de)",
+					paddingTop: "8px",
+				},
+			},
+			createElement(
+				"p",
+				{ style: { margin: "0 0 6px", fontWeight: 600 } },
+				"⏪ 回退到上一个拍板点？",
+			),
+			createElement(
+				"p",
+				{
+					style: {
+						margin: "0 0 6px",
+						fontSize: "12px",
+						color: "var(--dsw-danger, #cf222e)",
+					},
+				},
+				"这一步之后新推进的部分会被重做，但每个版本都留档、之后还能再回退。",
+			),
+			createElement(
+				"div",
+				{ style: { display: "flex", gap: "8px" } },
+				createElement(
+					"button",
+					{
+						style: { ...S.bigBtn(false), padding: "6px 14px" },
+						onClick: () => {
+							setConfirmRollback(false);
+							onRollback();
+						},
+						disabled: busy,
+					},
+					"确认回退",
+				),
+				createElement(
+					"button",
+					{ style: S.smallLink, onClick: () => setConfirmRollback(false) },
+					"取消",
+				),
+			),
+		);
 
 	if (gate === null) return null;
 
@@ -1192,7 +1504,7 @@ export function GatePanel(props) {
 				? createElement(
 						"p",
 						{ style: { margin: "6px 0 0", opacity: 0.8 } },
-						"之后随时能改：回退可以回到这一关之前的任何版本。",
+						"之后随时能改：可回退到上一个拍板点，或去左侧过程地图「定点修改」这一关。",
 					)
 				: createElement(
 						"p",
@@ -1204,9 +1516,18 @@ export function GatePanel(props) {
 				{ style: { marginTop: "8px" } },
 				createElement(
 					"button",
-					{ style: S.smallLink, onClick: () => onRollback() },
+					{
+						style: {
+							...S.projectBtn(false),
+							color: "var(--dsw-danger, #cf222e)",
+							borderColor: "var(--dsw-danger, #cf222e)",
+						},
+						onClick: () => setConfirmRollback(true),
+						disabled: busy,
+					},
 					"⏪ 回退到上一个拍板点",
 				),
+				confirmRollback ? rollbackConfirm() : null,
 			),
 		);
 	}
@@ -1461,9 +1782,18 @@ export function GatePanel(props) {
 			{ style: { marginTop: "10px" } },
 			createElement(
 				"button",
-				{ style: S.smallLink, onClick: () => onRollback(), disabled: busy },
+				{
+					style: {
+						...S.projectBtn(false),
+						color: "var(--dsw-danger, #cf222e)",
+						borderColor: "var(--dsw-danger, #cf222e)",
+					},
+					onClick: () => setConfirmRollback(true),
+					disabled: busy,
+				},
 				"⏪ 回退到上一个拍板点",
 			),
+			confirmRollback ? rollbackConfirm() : null,
 		),
 	);
 }

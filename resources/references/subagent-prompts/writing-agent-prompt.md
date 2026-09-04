@@ -23,6 +23,7 @@
 
 ## 纪律要点（必告知 agent）
 
+- **工具纪律（跨平台）**：文件 I/O 用文件工具（read / write / edit / glob / grep），shell 只留给真需要 shell 的场景且用前说明理由；规则对 Windows / macOS / Linux 完全一致，不点名单一 shell 名。单一事实源 `audit-and-testing.md §九 工具纪律`（别处不另写一份）。
 - **写作 agent 的自审不算审计**：完工后独立审计由主 agent 另派（普通章用 `subagent-prompts/audit-agent-prompt.md`；金标准章用 `subagent-prompts/gold-audit-prompt.md`）。你的自报清单不能替代独立审计。
 - **模型**：写作 = 标准档。聚焦本章，不做全书级判断。
 - **完工回报契约**：返回时写清楚——写了哪些文件、每章板块是否齐全、知识点清单是否全部打钩、对 style-spec 的遵守情况、有没有跳过/改动的板块、有没有需要主 agent 注意的存疑点。**不要在回报里写"已审计通过"。**

@@ -71,6 +71,30 @@ export function shouldForceBackToNow(prevAwaiting, awaiting, browsing) {
 	return awaiting && !prevAwaiting && browsing;
 }
 
+// 状态条「进度详情」：只取「当前这一步」内的最新 progress 事件。
+// 以最近一条 textbook/stage-start 为界（handoff 交办每一步都会落一条 stage-start，
+// 重启/重派会再落一条、取最近为准），界前的 progress 属于上一步——跨阶段残留会让
+// 状态条误导（2026-09 实测：源探查结束进设计关卡，探查期的「通读6本材料…」仍挂在
+// 「AI 干活中 · 设计提案·第 N 关」后面）。没有 stage-start（还没交办任何一步）时
+// 返回 ""，不显示无法归属的进度。
+export function stageScopedProgressDetail(events) {
+	const list = events ?? [];
+	let boundary = -1;
+	for (const event of list) {
+		if (event.type === "textbook/stage-start") boundary = event.seq;
+	}
+	if (boundary === -1) return "";
+	let progress = null;
+	for (const event of list) {
+		if (event.type === "textbook/progress" && event.seq > boundary)
+			progress = event;
+	}
+	if (progress === null) return "";
+	return `${progress.data?.label ?? ""}${
+		progress.data?.detail ? `：${progress.data.detail}` : ""
+	}`;
+}
+
 /** 把稿子按空行切成段（1 基编号 = 下标 + 1），丢掉空白段。 */
 export function splitParagraphs(text) {
 	return String(text ?? "")

@@ -349,12 +349,14 @@ export function ChatDesk(props) {
 				"button",
 				{
 					style: { ...S.smallLink, margin: "6px 0" },
+					title:
+						"AI 在对话里答应/说过的事，如果工作台还没显示，点这个提醒它记下来",
 					onClick: () =>
 						onNudge(
 							"工作台还没跟上，请把刚才答应的事落账（style-note/progress 等）",
 						),
 				},
-				"⏰ 提醒 AI 落账",
+				"⏰ 提醒 AI 记下来",
 			),
 		),
 	);

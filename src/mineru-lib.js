@@ -11,16 +11,23 @@
  * mineruToken 字段 → $DSH_HOME/.credentials.yaml 中 mineru_token 键（简易扫描）。
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, mkdtempSync, rmSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
+import { execFile as execFileCb } from 'node:child_process'
+import { promisify } from 'node:util'
 import { isWithin } from './path-guard.js'
 import AdmZip from 'adm-zip'
 
+const execFileAsync = promisify(execFileCb)
+
 const API_BASE = 'https://mineru.net'
 
-/** MinerU 精准解析 API 单份文件页数上限（官方文档：≤200 页）。 */
+/** MinerU 精准解析 API 单份文件页数上限（官方文档：≤200 页，超页服务端 auto_split）。 */
 export const MINERU_MAX_PAGES = 200
+
+/** MinerU 精准解析 API 单份文件大小上限（官方错误码 -60005：文件 >200MB 拒收）。 */
+export const MINERU_MAX_BYTES = 200 * 1024 * 1024
 
 /**
  * 本地轻量页数探测（不依赖第三方 PDF 库）。
@@ -55,11 +62,93 @@ export function planPageChunks(pageCount, chunkSize = MINERU_MAX_PAGES) {
   return chunks
 }
 
-/** 把 MinerU 英文/错误码报错归一成人话（页数超限 / Token 失效 / 其他原样）。 */
+/** 按大小规划切分段数：已知总字节与页数，估算每段页数使每段 < maxBytes 且 ≤ maxPages。
+ *  纯函数（可单测）；返回 [{ from, to }] 连续页区间，或 null（无需按大小切）。
+ *  预留 0.9 安全系数：页大小有波动，目标每段 ≈90% maxBytes，避免某段恰好超限被 -60005 拒收。 */
+export function planSizeChunks(pageCount, bytesPerPage, maxBytes = MINERU_MAX_BYTES, maxPages = MINERU_MAX_PAGES) {
+  if (!Number.isFinite(pageCount) || pageCount < 2) return null
+  if (!Number.isFinite(bytesPerPage) || bytesPerPage <= 0) return null
+  if (bytesPerPage * pageCount <= maxBytes) return null // 总量不超限
+  const partBytes = maxBytes * 0.9
+  let partPages = Math.floor(partBytes / bytesPerPage)
+  if (partPages < 1) partPages = 1
+  if (partPages > maxPages) partPages = maxPages
+  const chunks = []
+  for (let from = 1; from <= pageCount; from += partPages) {
+    chunks.push({ from, to: Math.min(from + partPages - 1, pageCount) })
+  }
+  return chunks
+}
+
+/** 探测可用的 Python + PyMuPDF（惰性缓存；不可用返回 null）。 */
+let _pythonWithFitz = null
+function pythonWithFitz() {
+  if (_pythonWithFitz === null) {
+    _pythonWithFitz = (async () => {
+      for (const cand of ['python', 'python3']) {
+        try {
+          await execFileAsync(cand, ['-c', 'import fitz'], { timeout: 15_000 })
+          return cand
+        } catch { /* 试下一个 */ }
+      }
+      return null
+    })()
+  }
+  return _pythonWithFitz
+}
+
+function cleanupTmpDir(dir) {
+  try { rmSync(dir, { recursive: true, force: true }) } catch { /* 忽略 */ }
+}
+
+/**
+ * 尝试用 Python(PyMuPDF) 把 >maxBytes 的 PDF 物理切成 <maxBytes 的分段。
+ * MinerU 的 -60005 是「文件 >200MB 拒收」，page_ranges 只按页解析、救不了上传大小，
+ * 必须真的切出小文件。任何一步不可用/失败都返回 null（调用方按不拆处理，交由
+ * MinerU 报 -60005 并给人话指引）。
+ * @returns { parts: string[], ranges: [{from,to}], tmpDir } | null
+ */
+export async function splitPdfBySize(pdfPath, pageCount, maxBytes = MINERU_MAX_BYTES) {
+  let size
+  try { size = statSync(pdfPath).size } catch { return null }
+  const ranges = planSizeChunks(pageCount, size / pageCount, maxBytes)
+  if (ranges === null) return null
+  const python = await pythonWithFitz()
+  if (python === null) return null
+  const tmpDir = mkdtempSync(join(tmpdir(), 'tb-mineru-size-'))
+  try {
+    const script = [
+      'import fitz,sys,os',
+      'src,outdir=sys.argv[1],sys.argv[2]',
+      'doc=fitz.open(src)',
+      'for r in sys.argv[3:]:',
+      ' a,b=(int(x) for x in r.split("-"))',
+      ' out=fitz.open()',
+      ' out.insert_pdf(doc,from_page=a-1,to_page=b-1)',
+      ' out.save(os.path.join(outdir,"part_%d_%d.pdf"%(a,b)))',
+    ].join('\n')
+    await execFileAsync(python, ['-c', script, pdfPath, tmpDir, ...ranges.map((r) => `${r.from}-${r.to}`)], { timeout: 600_000 })
+    const parts = []
+    for (const r of ranges) {
+      const file = join(tmpDir, `part_${r.from}_${r.to}.pdf`)
+      if (!existsSync(file)) { cleanupTmpDir(tmpDir); return null }
+      parts.push(file)
+    }
+    return { parts, ranges, tmpDir }
+  } catch {
+    cleanupTmpDir(tmpDir)
+    return null
+  }
+}
+
+/** 把 MinerU 英文/错误码报错归一成人话（页数超限 / 大小超限 / Token 失效 / 其他原样）。 */
 export function humanizeMineruError(raw) {
   const msg = String(raw ?? '').trim()
   if (/exceeds limit|page count exceeds|页数超过限制|文件页数超过限制|-60006|-30003/i.test(msg)) {
     return '这份 PDF 超过 MinerU 单份 200 页上限；若自动拆页解析未生效，请把 PDF 拆成几份（每份 <200 页）后分别上传，或换一本更薄的书。'
+  }
+  if (/file size exceeds|exceeds 200\s*mb|大小超过限制|文件大小超过|文件过大|-60005/i.test(msg)) {
+    return '这份 PDF 超过 MinerU 单份 200MB 上限（自动切分未能生效）；请把 PDF 拆成几份（每份 <200MB）后分别上传，或压缩后再试。'
   }
   if (/A0202|A0211|401|403|unauthor|token 错误|token 过期/i.test(msg)) {
     return 'MinerU Token 可能失效或未配置：可到工作台「MinerU Token」处点「重新设置」换新 Token 后重试。'
@@ -151,11 +240,14 @@ async function fetchJson(url, options) {
  * → 每份结果解压到各自 outDir（消除单文件版 full.md 互相覆盖的问题），
  * 且多文件并行解析，比逐本串行快得多。
  *
- * 超 200 页的书自动拆段：同一份 PDF 按 page_ranges（每段 ≤200 页）提交多份，
- * 各段 full.md 按页序合并成父书一份完整 md（合并结果带 splitParts 字段）。
+ * 自动拆段（先按大小、再按页数）：
+ *  - >200MB 的书：用 Python(PyMuPDF) 物理切成 <200MB 的分段分别提交
+ *    （MinerU 错误码 -60005 对 >200MB 直接拒收，page_ranges 只按页解析救不了大小）；
+ *  - >200 页的书：同一份 PDF 按 page_ranges（每段 ≤200 页）提交多份。
+ *  两种拆法各段 full.md 都按页序合并成父书一份完整 md（合并结果带 splitParts 字段）。
  *
  * @param items [{ file, name, outDir }] file=本地路径，name=提交名（与源文件名一致），outDir=结果目录
- * @param opts  { formula?, table?, language? }
+ * @param opts  { formula?, table?, language?, maxBytes? } maxBytes 供测试注入（默认 200MB）
  * @param onStage (stage: string) => void
  * @returns [{ name, ok, mdPath?, error?, splitParts? }] 单本失败不抛（调用方决定重试范围）；申请/上传/轮询整体失败抛错。
  */
@@ -164,273 +256,197 @@ export async function convertPdfBatch(items, opts = {}, onStage = () => {}) {
   const formula = opts.formula === true
   const table = opts.table !== false
   const language = opts.language ?? 'ch'
+  const maxBytes = Number.isFinite(opts.maxBytes) ? opts.maxBytes : MINERU_MAX_BYTES
   const results = []
   const mergeTable = new Map() // 拆分书的分段暂存表（key=原文件名）
   const failedParents = new Set() // 已报过失败的拆分书，避免重复错误行
+  const sizeTmpDirs = [] // 按大小切分产生的临时分段目录，收尾统一清理
 
-  // 预展开：>200 页的 PDF 拆成多个 page_ranges 分段（同一份文件上传多份，每份只解析一段页），
-  // 解析完再把各段 full.md 按页序合并成一份完整 md——下游源探查看到的仍是一本连续的书。
-  const expanded = []
-  for (const item of items) {
-    const pageCount = countPdfPages(item.file)
-    if (pageCount !== null && pageCount > MINERU_MAX_PAGES) {
-      const chunks = planPageChunks(pageCount)
-      const base = String(item.name ?? '').replace(/\.pdf$/i, '') || 'book'
-      chunks.forEach((chunk, idx) => {
-        expanded.push({
-          ...item,
-          name: `${base}.p${idx + 1}.pdf`,
-          pageRanges: `${chunk.from}-${chunk.to}`,
-          outDir: join(item.outDir, `_c${idx + 1}`),
-          _split: { idx: idx + 1, total: chunks.length, parentOutDir: item.outDir, parentName: item.name },
+  try {
+    // 预展开：先按大小物理切分，再按页数拆 page_ranges 分段；解析完按页序合并成
+    // 一份完整 md——下游源探查看到的仍是一本连续的书。
+    const expanded = []
+    for (const item of items) {
+      const pageCount = countPdfPages(item.file)
+      // 1) >maxBytes：物理切成 <maxBytes 的分段（每段也 ≤200 页），临时文件用完即清。
+      const sizeSplit = await splitPdfBySize(item.file, pageCount, maxBytes)
+      if (sizeSplit !== null) {
+        sizeTmpDirs.push(sizeSplit.tmpDir)
+        const base = String(item.name ?? '').replace(/\.pdf$/i, '') || 'book'
+        const sizeMB = Math.round(statSync(item.file).size / 1048576)
+        sizeSplit.ranges.forEach((r, idx) => {
+          expanded.push({
+            ...item,
+            file: sizeSplit.parts[idx],
+            name: `${base}.p${idx + 1}.pdf`,
+            outDir: join(item.outDir, `_s${idx + 1}`),
+            _split: { idx: idx + 1, total: sizeSplit.ranges.length, parentOutDir: item.outDir, parentName: item.name },
+          })
         })
-      })
-      onStage(`《${item.name}》共 ${pageCount} 页，超过 200 页：已拆成 ${chunks.length} 份解析（每份 ≤200 页，完成后自动合并）`)
-    } else {
-      expanded.push({ ...item })
-    }
-  }
-
-  // MinerU 单批申请上限 50 个；超出分多批串行处理。
-  const batchSize = 50
-  for (let start = 0; start < expanded.length; start += batchSize) {
-    const batch = expanded.slice(start, start + batchSize)
-    onStage(`申请上传通道（${start + 1}-${start + batch.length}/${expanded.length} 份）`)
-    const applied = await fetchJson(`${API_BASE}/api/v4/file-urls/batch`, {
-      method: 'POST',
-      headers: headers(token),
-      body: JSON.stringify({
-        files: batch.map((item) => {
-          const entry = { name: item.name, data_id: 'book-src' }
-          if (typeof item.pageRanges === 'string' && item.pageRanges !== '') entry.page_ranges = item.pageRanges
-          return entry
-        }),
-        model_version: 'vlm',
-        enable_formula: formula,
-        enable_table: table,
-        language,
-      }),
-      signal: AbortSignal.timeout(60_000),
-    })
-    if (applied.code !== 0 || applied.data === undefined) {
-      throw new Error(`申请上传失败: ${JSON.stringify(applied).slice(0, 200)}`)
-    }
-    const batchId = applied.data.batch_id
-    const urls = applied.data.file_urls ?? []
-    if (!Array.isArray(urls) || urls.length !== batch.length) {
-      throw new Error(`申请上传链接数量不符（${urls.length}/${batch.length}）`)
-    }
-    for (let i = 0; i < batch.length; i += 1) {
-      onStage(`上传 PDF（${start + i + 1}/${expanded.length} 份）`)
-      const first = urls[i]
-      const uploadUrl = typeof first === 'string' ? first : first?.url
-      if (uploadUrl === undefined) throw new Error('申请上传失败：没有返回上传地址')
-      const pdfBytes = readFileSync(batch[i].file)
-      const put = await fetch(uploadUrl, { method: 'PUT', body: pdfBytes, signal: AbortSignal.timeout(300_000) })
-      if (!put.ok) throw new Error(`上传 ${batch[i].name} 失败: HTTP ${put.status}`)
+        onStage(`《${item.name}》超过 ${Math.round(maxBytes / 1048576)}MB（约 ${sizeMB}MB）：已切成 ${sizeSplit.ranges.length} 份（每份 <${Math.round(maxBytes / 1048576)}MB）分别解析，完成后自动合并`)
+        continue
+      }
+      // 2) >200 页：page_ranges 分段（同一份文件上传多份，每份只解析一段页）。
+      if (pageCount !== null && pageCount > MINERU_MAX_PAGES) {
+        const chunks = planPageChunks(pageCount)
+        const base = String(item.name ?? '').replace(/\.pdf$/i, '') || 'book'
+        chunks.forEach((chunk, idx) => {
+          expanded.push({
+            ...item,
+            name: `${base}.p${idx + 1}.pdf`,
+            pageRanges: `${chunk.from}-${chunk.to}`,
+            outDir: join(item.outDir, `_c${idx + 1}`),
+            _split: { idx: idx + 1, total: chunks.length, parentOutDir: item.outDir, parentName: item.name },
+          })
+        })
+        onStage(`《${item.name}》共 ${pageCount} 页，超过 200 页：已拆成 ${chunks.length} 份解析（每份 ≤200 页，完成后自动合并）`)
+      } else {
+        expanded.push({ ...item })
+      }
     }
 
-    // 批量轮询，直到全部完成或出现失败。
-    let polled = null
-    let done = false
-    for (let attempt = 0; attempt < 240; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 5000))
-      polled = await fetchJson(`${API_BASE}/api/v4/extract-results/batch/${batchId}`, {
+    // MinerU 单批申请上限 50 个；超出分多批串行处理。
+    const batchSize = 50
+    for (let start = 0; start < expanded.length; start += batchSize) {
+      const batch = expanded.slice(start, start + batchSize)
+      onStage(`申请上传通道（${start + 1}-${start + batch.length}/${expanded.length} 份）`)
+      const applied = await fetchJson(`${API_BASE}/api/v4/file-urls/batch`, {
+        method: 'POST',
         headers: headers(token),
+        body: JSON.stringify({
+          files: batch.map((item) => {
+            const entry = { name: item.name, data_id: 'book-src' }
+            if (typeof item.pageRanges === 'string' && item.pageRanges !== '') entry.page_ranges = item.pageRanges
+            return entry
+          }),
+          model_version: 'vlm',
+          enable_formula: formula,
+          enable_table: table,
+          language,
+        }),
         signal: AbortSignal.timeout(60_000),
       })
-      const entries = polled.data?.extract_result ?? polled.data?.batch ?? []
-      const list = Array.isArray(entries) ? entries : []
-      const failed = list.find((entry) => entry?.state === 'failed')
-      if (failed !== undefined) {
-        throw new Error(`MinerU 转换失败（${failed.file_name ?? '?'}）: ${humanizeMineruError(failed.err_msg)}`)
+      if (applied.code !== 0 || applied.data === undefined) {
+        throw new Error(`申请上传失败: ${JSON.stringify(applied).slice(0, 200)}`)
       }
-      const doneCount = list.filter((entry) => entry?.state === 'done').length
-      if (doneCount === batch.length) { done = true; break }
-      onStage(`转换中（${doneCount}/${batch.length} 份完成）`)
-    }
-    if (!done) throw new Error('MinerU 转换超时（20 分钟）')
+      const batchId = applied.data.batch_id
+      const urls = applied.data.file_urls ?? []
+      if (!Array.isArray(urls) || urls.length !== batch.length) {
+        throw new Error(`申请上传链接数量不符（${urls.length}/${batch.length}）`)
+      }
+      for (let i = 0; i < batch.length; i += 1) {
+        onStage(`上传 PDF（${start + i + 1}/${expanded.length} 份）`)
+        const first = urls[i]
+        const uploadUrl = typeof first === 'string' ? first : first?.url
+        if (uploadUrl === undefined) throw new Error('申请上传失败：没有返回上传地址')
+        const pdfBytes = readFileSync(batch[i].file)
+        const put = await fetch(uploadUrl, { method: 'PUT', body: pdfBytes, signal: AbortSignal.timeout(300_000) })
+        if (!put.ok) throw new Error(`上传 ${batch[i].name} 失败: HTTP ${put.status}`)
+      }
 
-    // 下载解压：按 file_name 一一对应到各自子目录。
-    const entries = polled.data?.extract_result ?? polled.data?.batch ?? []
-    const byName = new Map()
-    for (const entry of Array.isArray(entries) ? entries : []) {
-      if (typeof entry?.file_name === 'string') byName.set(entry.file_name, entry)
-    }
-    for (const item of batch) {
-      const parentKey = item._split !== undefined ? item._split.parentName : item.name
-      const entry = byName.get(item.name)
-      if (entry === undefined) {
-        if (!failedParents.has(parentKey)) {
-          failedParents.add(parentKey)
-          results.push({ name: parentKey, ok: false, error: `结果缺少 ${item.name}` })
+      // 批量轮询，直到全部完成或出现失败。
+      let polled = null
+      let done = false
+      for (let attempt = 0; attempt < 240; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5000))
+        polled = await fetchJson(`${API_BASE}/api/v4/extract-results/batch/${batchId}`, {
+          headers: headers(token),
+          signal: AbortSignal.timeout(60_000),
+        })
+        const entries = polled.data?.extract_result ?? polled.data?.batch ?? []
+        const list = Array.isArray(entries) ? entries : []
+        const failed = list.find((entry) => entry?.state === 'failed')
+        if (failed !== undefined) {
+          throw new Error(`MinerU 转换失败（${failed.file_name ?? '?'}）: ${humanizeMineruError(failed.err_msg)}`)
         }
-        continue
+        const doneCount = list.filter((entry) => entry?.state === 'done').length
+        if (doneCount === batch.length) { done = true; break }
+        onStage(`转换中（${doneCount}/${batch.length} 份完成）`)
       }
-      const fileUrl = typeof entry.full_zip_url === 'string' ? entry.full_zip_url
-        : typeof entry.file_url === 'string' ? entry.file_url : entry.url
-      if (fileUrl === undefined) {
-        if (!failedParents.has(parentKey)) {
-          failedParents.add(parentKey)
-          results.push({ name: parentKey, ok: false, error: '转换完成但没有结果文件' })
+      if (!done) throw new Error('MinerU 转换超时（20 分钟）')
+
+      // 下载解压：按 file_name 一一对应到各自子目录。
+      const entries = polled.data?.extract_result ?? polled.data?.batch ?? []
+      const byName = new Map()
+      for (const entry of Array.isArray(entries) ? entries : []) {
+        if (typeof entry?.file_name === 'string') byName.set(entry.file_name, entry)
+      }
+      for (const item of batch) {
+        const parentKey = item._split !== undefined ? item._split.parentName : item.name
+        const entry = byName.get(item.name)
+        if (entry === undefined) {
+          if (!failedParents.has(parentKey)) {
+            failedParents.add(parentKey)
+            results.push({ name: parentKey, ok: false, error: `结果缺少 ${item.name}` })
+          }
+          continue
         }
-        continue
-      }
-      try {
-        onStage(`下载结果（${item.name}）`)
-        const zipRes = await fetch(fileUrl, { signal: AbortSignal.timeout(300_000) })
-        if (!zipRes.ok) throw new Error(`下载结果失败: HTTP ${zipRes.status}`)
-        const zipBytes = Buffer.from(await zipRes.arrayBuffer())
-        onStage(`解压整理（${item.name}）`)
-        mkdirSync(item.outDir, { recursive: true })
-        const zip = new AdmZip(zipBytes)
-        let fullMd = null
-        for (const zipEntry of zip.getEntries()) {
-          if (zipEntry.entryName.endsWith('full.md')) fullMd = zipEntry.getData()
-          if (!zipEntry.isDirectory && !zipEntry.entryName.endsWith('/')) {
-            const target = join(item.outDir, zipEntry.entryName)
-            if (isWithin(item.outDir, target)) {
-              mkdirSync(join(target, '..'), { recursive: true })
-              writeFileSync(target, zipEntry.getData())
+        const fileUrl = typeof entry.full_zip_url === 'string' ? entry.full_zip_url
+          : typeof entry.file_url === 'string' ? entry.file_url : entry.url
+        if (fileUrl === undefined) {
+          if (!failedParents.has(parentKey)) {
+            failedParents.add(parentKey)
+            results.push({ name: parentKey, ok: false, error: '转换完成但没有结果文件' })
+          }
+          continue
+        }
+        try {
+          onStage(`下载结果（${item.name}）`)
+          const zipRes = await fetch(fileUrl, { signal: AbortSignal.timeout(300_000) })
+          if (!zipRes.ok) throw new Error(`下载结果失败: HTTP ${zipRes.status}`)
+          const zipBytes = Buffer.from(await zipRes.arrayBuffer())
+          onStage(`解压整理（${item.name}）`)
+          mkdirSync(item.outDir, { recursive: true })
+          const zip = new AdmZip(zipBytes)
+          let fullMd = null
+          for (const zipEntry of zip.getEntries()) {
+            if (zipEntry.entryName.endsWith('full.md')) fullMd = zipEntry.getData()
+            if (!zipEntry.isDirectory && !zipEntry.entryName.endsWith('/')) {
+              const target = join(item.outDir, zipEntry.entryName)
+              if (isWithin(item.outDir, target)) {
+                mkdirSync(join(target, '..'), { recursive: true })
+                writeFileSync(target, zipEntry.getData())
+              }
             }
           }
-        }
-        if (fullMd === null) throw new Error('结果 zip 中没有 full.md')
-        writeFileSync(join(item.outDir, 'full.md'), fullMd)
-        if (item._split !== undefined) {
-          // 分段结果暂存，全部批次完成后按页序合并成父书。
-          let acc = mergeTable.get(parentKey)
-          if (acc === undefined) {
-            acc = { name: parentKey, ok: true, parts: [], parentOutDir: item._split.parentOutDir, total: item._split.total }
-            mergeTable.set(parentKey, acc)
+          if (fullMd === null) throw new Error('结果 zip 中没有 full.md')
+          writeFileSync(join(item.outDir, 'full.md'), fullMd)
+          if (item._split !== undefined) {
+            // 分段结果暂存，全部批次完成后按页序合并成父书。
+            let acc = mergeTable.get(parentKey)
+            if (acc === undefined) {
+              acc = { name: parentKey, ok: true, parts: [], parentOutDir: item._split.parentOutDir, total: item._split.total }
+              mergeTable.set(parentKey, acc)
+            }
+            acc.parts.push({ idx: item._split.idx, mdPath: join(item.outDir, 'full.md'), outDir: item.outDir })
+          } else {
+            results.push({ name: item.name, ok: true, mdPath: join(item.outDir, 'full.md') })
           }
-          acc.parts.push({ idx: item._split.idx, mdPath: join(item.outDir, 'full.md'), outDir: item.outDir })
-        } else {
-          results.push({ name: item.name, ok: true, mdPath: join(item.outDir, 'full.md') })
-        }
-      } catch (error) {
-        if (!failedParents.has(parentKey)) {
-          failedParents.add(parentKey)
-          results.push({ name: parentKey, ok: false, error: String(error instanceof Error ? error.message : error) })
+        } catch (error) {
+          if (!failedParents.has(parentKey)) {
+            failedParents.add(parentKey)
+            results.push({ name: parentKey, ok: false, error: String(error instanceof Error ? error.message : error) })
+          }
         }
       }
     }
-  }
 
-  // 合并拆分书的分段结果（按页序），写回父目录 full.md。
-  for (const acc of mergeTable.values()) {
-    if (acc.parts.length === 0 || acc.parts.length !== acc.total) {
-      results.push({ name: acc.name, ok: false, error: `《${acc.name}》分段解析未完成` })
-      continue
-    }
-    const merged = mergeSplitParts(acc.parts)
-    const mdPath = join(acc.parentOutDir, 'full.md')
-    mkdirSync(acc.parentOutDir, { recursive: true })
-    writeFileSync(mdPath, `<!-- 本书超过 200 页，已自动拆成 ${acc.total} 段解析后合并 -->\n\n${merged}\n`)
-    results.push({ name: acc.name, ok: true, mdPath, splitParts: acc.total })
-  }
-  onStage('完成')
-  return results
-}
-
-/**
- * 转换一份 PDF → outDir/full.md（含图片目录），全程回调进度 stage。
- * @param pdfPath  PDF 绝对路径
- * @param outDir   输出目录（自动创建）
- * @param opts     { formula?: boolean, table?: boolean, language?: string }
- * @param onStage  (stage: string) => void  进度回调
- * @returns full.md 绝对路径
- */
-export async function convertPdf(pdfPath, outDir, opts = {}, onStage = () => {}) {
-  const token = resolveMineruToken()
-  const fileName = basename(pdfPath)
-  const formula = opts.formula === true
-  const table = opts.table !== false
-  const language = opts.language ?? 'ch'
-
-  onStage('申请上传通道')
-  const applied = await fetchJson(`${API_BASE}/api/v4/file-urls/batch`, {
-    method: 'POST',
-    headers: headers(token),
-    body: JSON.stringify({
-      files: [{ name: fileName, data_id: 'book-src' }],
-      model_version: 'vlm',
-      enable_formula: formula,
-      enable_table: table,
-      language,
-    }),
-    signal: AbortSignal.timeout(60_000),
-  })
-  if (applied.code !== 0 || applied.data === undefined) {
-    throw new Error(`申请上传失败: ${JSON.stringify(applied).slice(0, 200)}`)
-  }
-  const batchId = applied.data.batch_id
-  // file_urls 是字符串数组（直接是 URL）；兼容个别版本的对象数组。
-  const firstUrl = applied.data.file_urls?.[0]
-  const uploadUrl = typeof firstUrl === 'string' ? firstUrl : firstUrl?.url
-  if (uploadUrl === undefined) throw new Error('申请上传失败：没有返回上传地址')
-
-  onStage('上传 PDF')
-  const pdfBytes = readFileSync(pdfPath)
-  const put = await fetch(uploadUrl, { method: 'PUT', body: pdfBytes, signal: AbortSignal.timeout(300_000) })
-  if (!put.ok) throw new Error(`上传 PDF 失败: HTTP ${put.status}`)
-
-  onStage('等待转换')
-  let result = null
-  for (let attempt = 0; attempt < 240; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 5000))
-    const polled = await fetchJson(`${API_BASE}/api/v4/extract-results/batch/${batchId}`, {
-      headers: headers(token),
-      signal: AbortSignal.timeout(60_000),
-    })
-    // 兼容 v4 的 extract_result 与旧版 batch 两种响应结构。
-    const entries = polled.data?.extract_result ?? polled.data?.batch ?? []
-    const entry = Array.isArray(entries) ? entries[0] : undefined
-    const state = typeof entry === 'object' && entry !== null ? entry.state : undefined
-    if (state === undefined && attempt >= 3) {
-      // 轮询结构对不上：别傻等 20 分钟，直接报错并带原始响应。
-      throw new Error(`MinerU 轮询响应结构异常: ${JSON.stringify(polled).slice(0, 300)}`)
-    }
-    if (state === 'done') { result = polled; break }
-    if (state === 'failed') {
-      const errMsg = typeof entry?.err_msg === 'string' && entry.err_msg !== '' ? entry.err_msg : JSON.stringify(polled.data)
-      throw new Error(`MinerU 转换失败: ${String(errMsg).slice(0, 200)}`)
-    }
-    if (attempt % 6 === 0) onStage(`转换中（${Math.round((attempt * 5) / 60)} 分钟）`)
-  }
-  if (result === null) throw new Error('MinerU 转换超时（20 分钟）')
-
-  onStage('下载结果')
-  const doneEntries = result.data?.extract_result ?? result.data?.batch ?? []
-  const doneEntry = Array.isArray(doneEntries) ? doneEntries[0] : undefined
-  const fileUrl = typeof doneEntry === 'object' && doneEntry !== null
-    ? (typeof doneEntry.full_zip_url === 'string' ? doneEntry.full_zip_url
-        : typeof doneEntry.file_url === 'string' ? doneEntry.file_url
-          : doneEntry.url)
-    : undefined
-  if (fileUrl === undefined) throw new Error('转换完成但没有结果文件')
-  const zipRes = await fetch(fileUrl, { signal: AbortSignal.timeout(300_000) })
-  if (!zipRes.ok) throw new Error(`下载结果失败: HTTP ${zipRes.status}`)
-  const zipBytes = Buffer.from(await zipRes.arrayBuffer())
-
-  onStage('解压整理')
-  mkdirSync(outDir, { recursive: true })
-  const zip = new AdmZip(zipBytes)
-  let fullMd = null
-  for (const entry of zip.getEntries()) {
-    if (entry.entryName.endsWith('full.md')) fullMd = entry.getData()
-    if (!entry.isDirectory && !entry.entryName.endsWith('/')) {
-      // 图片等资源展开到 outDir，保持 zip 内相对路径。
-      const target = join(outDir, entry.entryName)
-      if (isWithin(outDir, target)) {
-        mkdirSync(join(target, '..'), { recursive: true })
-        writeFileSync(target, entry.getData())
+    // 合并拆分书的分段结果（按页序），写回父目录 full.md。
+    for (const acc of mergeTable.values()) {
+      if (acc.parts.length === 0 || acc.parts.length !== acc.total) {
+        results.push({ name: acc.name, ok: false, error: `《${acc.name}》分段解析未完成` })
+        continue
       }
+      const merged = mergeSplitParts(acc.parts)
+      const mdPath = join(acc.parentOutDir, 'full.md')
+      mkdirSync(acc.parentOutDir, { recursive: true })
+      writeFileSync(mdPath, `<!-- 本书较大，已自动拆成 ${acc.total} 段解析后合并 -->\n\n${merged}\n`)
+      results.push({ name: acc.name, ok: true, mdPath, splitParts: acc.total })
     }
+    onStage('完成')
+    return results
+  } finally {
+    // 按大小切分产生的临时分段 PDF 用完即删（正常/异常路径都清理）。
+    for (const d of sizeTmpDirs) cleanupTmpDir(d)
   }
-  if (fullMd === null) throw new Error('结果 zip 中没有 full.md')
-  const mdPath = join(outDir, 'full.md')
-  writeFileSync(mdPath, fullMd)
-  onStage('完成')
-  return mdPath
 }

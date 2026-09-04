@@ -371,7 +371,7 @@ export function ChaptersCard(props) {
 		createElement(
 			"p",
 			{ style: { margin: "8px 0 0", fontSize: "12px", opacity: 0.7 } },
-			"📌 每章都自动存档，之后随时能回退到任意拍板点。",
+			"📌 每章都自动存档，随时能回到上一个拍板点；想改更早的决定，去左侧过程地图用「定点修改」。",
 		),
 	);
 }
@@ -480,7 +480,7 @@ export function ProcessMapRail(props) {
 			createElement(
 				"p",
 				{ style: { margin: "0 0 6px", fontSize: "12px", opacity: 0.7 } },
-				"🗺 过程地图（点任意一步回看/定点修改）",
+				"🗺 过程地图（点任意一步：回看，或改这一步的决定）",
 			),
 			...(segments ?? []).map(row),
 			createElement(
@@ -692,17 +692,32 @@ export function HistoryBrowser(props) {
 						),
 					)
 				: createElement(
-						"button",
-						{
-							style: {
-								...S.bigBtn(true),
-								background: "transparent",
-								color: "var(--dsw-danger, #cf222e)",
+						"div",
+						null,
+						createElement(
+							"p",
+							{
+								style: {
+									margin: "4px 0 6px",
+									fontSize: "12px",
+									opacity: 0.7,
+								},
 							},
-							onClick: () => setConfirming(true),
-							disabled: busy,
-						},
-						"✍️ 定点修改这一步",
+							"想改这一步当时怎么定的？AI 会从这里重做后面受影响的部分，旧版本都留档。",
+						),
+						createElement(
+							"button",
+							{
+								style: {
+									...S.bigBtn(true),
+									background: "transparent",
+									color: "var(--dsw-danger, #cf222e)",
+								},
+								onClick: () => setConfirming(true),
+								disabled: busy,
+							},
+							"✍️ 定点修改这一步",
+						),
 					)
 			: null,
 		undoable

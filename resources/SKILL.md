@@ -13,6 +13,7 @@ description: 让你具备"亲手为自己造一本教材"的能力——把源�
 本 skill 一旦命中即强制执行其流程约束，不可绕过。即便你"只是先看看""先探索一下项目结构""先问个澄清问题"，只要任务在本 skill 触发范围内，就必须先按本 skill 的 **Trigger Contract** 动作，再决定下一步。
 
 **三条 Iron Law（违反即返工）**：
+
 1. **先出设计，再写正文**——Phase 3 教学设计未定稿（三个用户确认关卡全部通过）之前，禁止写任何章正文。
 2. **先写金标准，再并行铺章**——没有一章通过四层审计 + 试教（条件触发）并回填 style-spec，禁止启动 Phase 5 的 subagent 并行。
 3. **交付前必拆脚手架**——带脚手架元信息（META、审计批注、未决 TODO、loader 指令外壳）的书不得交付；BOOK.md 必须是纯净可读本体。
@@ -23,13 +24,14 @@ description: 让你具备"亲手为自己造一本教材"的能力——把源�
 ## 这是什么
 
 造书 = 为学习者制备一份**教材**。有两种形态（触发后必选，见下"第一步：定路线"）：
+
 - **pure-blueprint**：给 AI 苏格拉底老师读的教学蓝本（pedagogical spec），结构化、含元指令
 - **human-readable**：给人读的流畅教材，AI 拿到也能直接教
 
 三方分工决定所有下游规则：
 
 | 角色 | 做什么 | 看到什么 |
-|---|---|---|
+| --- | --- | --- |
 | **用户（学习者）** | 跟 AI 老师对话学习 | 只看到对话（blueprint）或读教材+对话（human-readable） |
 | **AI 老师** | 读书，用引导式提问教学 | 读完整本书作为输入 |
 | **书（造物）** | 教学素材 | 是 AI 老师的输入，或人读的教材 |
@@ -49,6 +51,7 @@ description: 让你具备"亲手为自己造一本教材"的能力——把源�
 > "这本书是喂给 AI 苏格拉底老师教学用的教学蓝本（推荐——AI 教学精度最高），还是一本给人读的流畅教材（AI 也能直接拿它教，但教学约束更少）？"
 
 决策启发式：
+
 1. 用户原话含"我自己读/出版/给别人看/当书出/通读/给真人教师/我想先通读" → human-readable
 2. 书要喂给已成型的苏格拉底 AI 软件（Socratopia 等） → pure-blueprint
 3. 用户不确定 → 推荐 pure-blueprint 并等拍板
@@ -69,13 +72,13 @@ description: 让你具备"亲手为自己造一本教材"的能力——把源�
 这些念头出现即 **STOP**——你在合理化绕过流程：
 
 | 念头 | 现实 |
-|-|-|
+| - | - |
 | "我先快速看一眼源材料再说" | 没定路线前看源会被既有结构带偏；先问路线，再按 Phase 2 探查 |
 | "设计差不多了，先开写一章试试" | Phase 3 未过三关确认 = Iron Law 1 违例，返工 |
 | "金标准太慢，我并行写起来边写边审" | 没有 Gold-Standard 回填，并行 agent 必然漂移（Iron Law 2） |
 | "这张模式卡挺好直接套上去" | 模式是菜单不是套餐；必须回答"它解决本书哪个具体教学问题" |
 | "这几个教学问题通用，不用问用户拍板" | 用户确认关卡是 gate，不是建议；跳过即返工 |
-| "框架定好了，这里再加一章/附录很顺手" | Phase 3 定稿后防螺旋；先问"能不能塞进现有结构"，不能才提请用户 |
+| "框架定好了，这里再加一章/附录很顺手" | 防螺旋：AI 不得自行加章；先问"能不能塞进现有结构"，不能则提请用户拍板（用户要加章走定点修改/深改） |
 | "脚手架留在书里也无所谓" | 不带脚手架交付（Iron Law 3）；交付前必跑 strip |
 | "我记得这套流程怎么走" | skill 会演进，触发即读当前版本 |
 
@@ -96,7 +99,7 @@ description: 让你具备"亲手为自己造一本教材"的能力——把源�
 先出设计，再写正文；先写一章金标准审到满意，再并行铺开。平均每本书 5-7 轮审校。**触发后为每个 Phase 建 todo，逐个推进。**
 
 | 阶段 | 名称 | 做什么 | 产出 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **Phase 1** | 源材料准备 | PDF→MD（MinerU API）+ 复制脚本进项目 + 装依赖 | `sources-md/`、`scripts/` |
 | **Phase 2** | 源探查 | 所有有源书必走：摸源结构、角色标签、简码表、权威层级 | `源材料索引.md` 第一层 |
 | **Phase 3** | 教学设计 | **核心阶段**：五步设计（见下）+ 三个用户确认关卡 | META/OUTLINE/style-spec/源材料索引 |
@@ -147,13 +150,13 @@ Mode A（无源从零造）差异：Phase 2 跳过、幻觉 gate 更严，仅适
 - **金标准先行**（Iron Law 2）：没有金标准就并行 = agent 必然漂移
 - **一个 agent 只写一章**，避免长上下文漂移
 - **断言可追溯**：每写一条定义/公式/偏好判断，都能回源或回判断根
-- **防螺旋**：Phase 3 定稿后不允许加章/附录/机制板块，新需求先问"能不能塞进现有结构"
+- **防螺旋**：AI 不得自行加章/附录/机制板块，新需求先问"能不能塞进现有结构"；用户主动加章走定点修改（深改）
 - **交付前必拆脚手架**（Iron Law 3）
 
 ## 参考文件按需加载
 
 | 场景 | 参考文件 |
-|---|---|
+| --- | --- |
 | Phase 1 PDF 转换 | 见下方"Phase 1 前置"段落 + `scripts/01_pdf_to_md.py` docstring |
 | Phase 2 源探查 | `references/source-material.md` |
 | Phase 3 四文件契约 | `references/file-contracts.md` |
@@ -170,6 +173,7 @@ Mode A（无源从零造）差异：Phase 2 跳过、幻觉 gate 更严，仅适
 PDF→Markdown 默认走 MinerU 在线 API（`mineru.net`）。开跑前让用户完成：
 
 0. 定位 skill 脚本目录 + 装依赖：
+
    ```bash
    # 依次在用户级、项目级目录查找 skill 位置，取第一个命中
    SKILL_DIR=$(dirname "$({ find ~/.claude -name SKILL.md -path "*dsh-craft-your-textbook*" 2>/dev/null; find . -name SKILL.md -path "*dsh-craft-your-textbook*" 2>/dev/null; } | head -1)")
@@ -179,8 +183,9 @@ PDF→Markdown 默认走 MinerU 在线 API（`mineru.net`）。开跑前让用�
    fi
    pip install -r "$SKILL_DIR/scripts/requirements.txt"
    ```
+
    复制脚本：`cp "$SKILL_DIR/scripts/"*.py <项目根>/scripts/`
-1. 打开 https://mineru.net 注册申请 API Token
+1. 打开 <https://mineru.net> 注册申请 API Token
 2. 设环境变量：`export MINERU_TOKEN="你的token"`
 3. 运行 `python <项目根>/scripts/01_pdf_to_md.py <PDF路径> sources-md/`
 

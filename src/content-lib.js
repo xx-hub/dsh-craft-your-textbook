@@ -2,7 +2,7 @@
  * 造书内容生成库（v2 · 主 AI 嵌入工作流）
  *
  * 流水线（源探查/设计提案/章节骨架/范例章/铺章/自查/合并）真实模式已交由
- * 主对话 AI 亲手完成（宿主通过 workbench_act 的 stage-brief 派发方法论素材，
+ * 主对话 AI 统筹完成（可亲手做或派小助手；宿主通过 workbench_act 的 stage-brief 派发方法论素材，
  * 不在这里跑子代理）。本库保留：
  *  - demo 模式：演示书的流水线占位产出（明确标注演示内容，仅用于熟悉流程）
  *  - 向导与辅助：选书建议（wizard）、PDF 角色识别（roles）、每章字数建议（words）
@@ -12,7 +12,7 @@
  * 嵌入交办说明给主 AI。
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { jsonrepair } from "jsonrepair";
@@ -21,10 +21,29 @@ import { ROLES, guessRoleFromName } from "./domain-rules.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const RESOURCES_DIR = join(HERE, "..", "resources");
 
-/** 读 vendored 方法论文件；缺失时返回提示。 */
+/** 读 vendored 方法论文件；缺失时返回提示。
+ *  带 mtime+size 内容缓存（P0-2）：resources/ 是只读静态文件，命中缓存时返回内容与磁盘一致，
+ *  不改变产物内容；按文件变更（mtimeMs/size）失效，无陈旧风险。 */
+const resourceCache = new Map(); // rel -> { mtimeMs, size, text }
 export function resourceText(rel) {
+	const p = join(RESOURCES_DIR, rel);
 	try {
-		return readFileSync(join(RESOURCES_DIR, rel), "utf8");
+		const stat = statSync(p);
+		const cached = resourceCache.get(rel);
+		if (
+			cached !== undefined &&
+			cached.mtimeMs === stat.mtimeMs &&
+			cached.size === stat.size
+		) {
+			return cached.text;
+		}
+		const text = readFileSync(p, "utf8");
+		resourceCache.set(rel, {
+			mtimeMs: stat.mtimeMs,
+			size: stat.size,
+			text,
+		});
+		return text;
 	} catch {
 		return `（方法论文件缺失: ${rel}）`;
 	}
@@ -37,13 +56,13 @@ const DEMO_MARK = "【演示内容 · 仅用于熟悉流程，非真实产出】
 /**
  * 派发一个一次性子代理，返回其最终文本。
  * runtime: { ctx, demo, dir, project, getParent }
- * timeoutMs：单任务硬超时（默认 15 分钟；超时自动报错）。
+ * timeoutMs：单任务硬超时（默认 30 分钟——P2-10 从 15 分钟放宽，避免长章写作被硬超时打断；超时自动报错）。
  */
 async function runSubagent(
 	runtime,
 	label,
 	promptText,
-	timeoutMs = 15 * 60 * 1000,
+	timeoutMs = 30 * 60 * 1000,
 ) {
 	const parent = await runtime.getParent();
 	const run = await runtime.ctx.subagents.start("spawn", {
@@ -278,6 +297,13 @@ function demoOutline() {
 // 规则兜底 guessRoleFromName 与角色五分类（原 ROLE_LIST）已收编至
 // ./domain-rules.js —— 领域规则单一事实来源，前后端共用。
 
+// 书名/目标净化：LLM 偶尔给 name 加「开始：」「书名：」等口水前缀，后端源头剥掉。
+// 前端 pickSuggestion（event-cards.js）另有兜底剥离，防其他来源漏网。
+const cleanSuggestionText = (s) =>
+	typeof s === "string"
+		? s.replace(/^\s*(?:开始|书名|建议|题目|目标)[:：]\s*/, "")
+		: s;
+
 async function wizardSuggest(runtime, params) {
 	const hint =
 		typeof params.hint === "string" && params.hint.trim() !== ""
@@ -338,6 +364,7 @@ ${contextBlock}
    · 背景是学习者/年级/学科（如三年级、古诗）→ 推荐对应的教材书。
 2. 背景没填写：给 3 个不同方向的通用建议。
 3. 严禁无视背景、一律按"中小学生教材"输出。
+4. name 只写书名本身（如「初中数学·有理数」），严禁带「开始：」「书名：」「建议：」等任何前缀；goal 同理，严禁带「目标：」等前缀。
 
 输出严格 JSON（不要解释、不要代码块）：
 {"suggestions":[{"name":"书名（具体、贴近教材）","goal":"学完要能做到什么（一句话，具体可检验，措辞贴合用户身份）","science":true或false}]}
@@ -345,8 +372,15 @@ ${contextBlock}
 字符串内部严禁使用英文双引号，引用一律用「」。`;
 	const raw = await runSubagent(runtime, "选书建议", prompt);
 	const parsed = parseJsonLoose(raw);
-	if (Array.isArray(parsed.suggestions) && parsed.suggestions.length > 0)
-		return parsed;
+	if (Array.isArray(parsed.suggestions) && parsed.suggestions.length > 0) {
+		return {
+			suggestions: parsed.suggestions.map((sg) => ({
+				...sg,
+				name: cleanSuggestionText(sg.name),
+				goal: cleanSuggestionText(sg.goal),
+			})),
+		};
+	}
 	throw new Error("建议格式不对");
 }
 

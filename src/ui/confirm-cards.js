@@ -7,6 +7,7 @@
 import { createElement, useEffect, useState } from "react";
 import { S } from "./styles.js";
 import { exploreReportBlocks } from "./md-render.js";
+import { normalizeTeachingFocus } from "../domain-rules.js";
 
 // ── 探查结果确认卡（探源 → 用户看一眼再继续） ───────────────────────────────
 
@@ -37,7 +38,9 @@ export function ExploreConfirmCard(props) {
 		reportText,
 	} = props;
 	const sum = exploreSummary ?? {};
-	const focus = Array.isArray(sum.teachingFocus) ? sum.teachingFocus : [];
+	// 契约是 teachingFocus:[string]，但 AI 曾产出对象数组——归一化兜底，
+	// 杜绝 `· ${item}` 把对象渲染成 [object Object]（2026-09 修复）。
+	const focus = normalizeTeachingFocus(sum.teachingFocus);
 	const [showPoints, setShowPoints] = useState(false);
 	const [showSections, setShowSections] = useState(false);
 	const [rejecting, setRejecting] = useState(false);

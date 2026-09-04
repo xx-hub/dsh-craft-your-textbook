@@ -104,7 +104,7 @@ export function ActivityLine(props) {
 						{
 							style: S.smallLink,
 							onClick: onNudge,
-							title: "给主 AI 发一条催办 notice（不打断它手里的活、不取消）",
+							title: "给主 AI 发一条提醒，让它继续推进（不打断它正在做的事，也不会取消）",
 						},
 						"[戳一下 AI]",
 					),
@@ -351,7 +351,7 @@ export function StylePanel(props) {
 			? createElement(
 					"p",
 					{ style: { margin: "6px 0 0", fontSize: "12px", opacity: 0.7 } },
-					"还没有风格意见；在对话里跟 AI 提要求，它会记成风格线。",
+					"还没有风格意见。",
 				)
 			: list.map((note, index) =>
 					createElement(
@@ -375,6 +375,11 @@ export function StylePanel(props) {
 							: null,
 					),
 				),
+		createElement(
+			"p",
+			{ style: { margin: "6px 0 0", fontSize: "12px", opacity: 0.7 } },
+			"想再记一条？在对话里直接跟 AI 说，它会记成风格线；写每一章都照着办。",
+		),
 	);
 }
 
@@ -444,6 +449,11 @@ export function IntervenePanel(props) {
 						),
 					),
 				),
+		createElement(
+			"p",
+			{ style: { margin: "6px 0 0", fontSize: "12px", opacity: 0.7 } },
+			"想给 AI 留言？在对话里直接跟 AI 说，它会记成留言，到下个停靠点处理（不打断它正在写的章）。",
+		),
 	);
 }
 

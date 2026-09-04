@@ -34,8 +34,13 @@ import {
 	splitParagraphs,
 	paragraphHint,
 	diffParagraphs,
+	stageScopedProgressDetail,
 } from "./ui/rules.js";
-import { goldChapterNo } from "./domain-rules.js";
+// 展示派生（事件→文件、阶段→产物、stage→界面文案）集中放卡片域 view-rules.js，
+// 壳只留薄绑定；领域源仍是 domain-rules。
+import { stageHuman, phaseProduct, workPathForEvent, focusCardKey } from "./ui/view-rules.js";
+// 上传上限与超限文案（前后端共享单一事实源，见 domain-rules.js）。
+import { MAX_UPLOAD_BYTES, uploadTooLargeMessage } from "./domain-rules.js";
 // 最小 markdown 渲染。
 import {
 	READER_PARA_STYLE,
@@ -51,6 +56,7 @@ import {
 	UploadArea,
 	StatusCard,
 	DeliveryCard,
+	FinalApprovalCard,
 	rejectPayload,
 	GatePanel,
 	MineruTokenCard,
@@ -89,7 +95,7 @@ import {
 	PatternPanel,
 } from "./ui/panels.js";
 
-export const inject = ["slots"];
+export const inject = ["slots", "sessions"];
 
 // ── 导出表面（与拆分前 lib/client.js 完全一致，冒烟测试穿过这些名字）────────
 
@@ -111,6 +117,7 @@ export {
 	UploadArea,
 	StatusCard,
 	DeliveryCard,
+	FinalApprovalCard,
 	rejectPayload,
 	GatePanel,
 	MineruTokenCard,
@@ -182,7 +189,6 @@ function WorkbenchView(props) {
 	const [busy, setBusy] = useState(false);
 	const [loading, setLoading] = useState(true);
 	const [showHistory, setShowHistory] = useState(false);
-	const [showWizard, setShowWizard] = useState(false);
 	const [suggestions, setSuggestions] = useState([]);
 	const [suggestLoading, setSuggestLoading] = useState(false);
 	const [deletingId, setDeletingId] = useState(null);
@@ -420,70 +426,6 @@ function WorkbenchView(props) {
 		}
 	};
 
-	// 事件卡片 → 结果文件（只在实际存在的文件上给"查看"入口）。
-	const workPathForEvent = (event) => {
-		const data = event.data ?? {};
-		const candidates = [];
-		const label = data.label ?? "";
-		if (
-			event.type === "textbook/agent-end" ||
-			event.type === "textbook/agent-start"
-		) {
-			if (label === "源探查") candidates.push("work/explore.md");
-			else if (label === "合并成书" || label === "最后检查（质量门）")
-				candidates.push("work/book.md");
-			else if (label === "整理章节骨架") candidates.push("work/outline.md");
-			else if (label === "最佳范例章" || label.startsWith("最佳范例章"))
-				candidates.push(
-					`work/chapter-${String(goldChapterNo(meta)).padStart(2, "0")}.md`,
-				);
-			else if (label.startsWith("写第")) {
-				const match = /写第(\d+)章/.exec(label);
-				if (match !== null)
-					candidates.push(
-						`work/chapter-${String(Number(match[1])).padStart(2, "0")}.md`,
-					);
-			} else if (label.startsWith("自查第")) {
-				const match = /自查第(\d+)章/.exec(label);
-				if (match !== null)
-					candidates.push(
-						`work/audit-${String(Number(match[1])).padStart(2, "0")}.md`,
-					);
-			}
-		} else if (event.type === "textbook/phase-end") {
-			const phase = Number(data.phase);
-			if (phase === 2) candidates.push("work/explore.md");
-			else if (phase === 4)
-				candidates.push(
-					`work/chapter-${String(goldChapterNo(meta)).padStart(2, "0")}.md`,
-				);
-			else if (phase === 5 || phase === 6) candidates.push("work/book.md");
-		}
-		const hit = candidates.find((path) =>
-			workFiles.some((f) => f.path === path),
-		);
-		if (hit === undefined) return null;
-		return {
-			path: hit,
-			label: workFiles.find((f) => f.path === hit)?.label ?? hit,
-		};
-	};
-
-	// 阶段 → 结果（顶部分段按钮可点击查看）。阶段 1 是"材料清单"面板（非文件）。
-	const phaseProduct = (phase) => {
-		if (phase === 1) return { path: "__materials__", label: "第一步·材料" };
-		const map = {
-			2: "work/explore.md",
-			3: "work/outline.md",
-			4: `work/chapter-${String(goldChapterNo(meta)).padStart(2, "0")}.md`,
-			5: "work/book.md",
-			6: "work/book.md",
-		};
-		const path = map[phase];
-		if (path === undefined) return null;
-		return workFiles.find((f) => f.path === path) ?? null;
-	};
-
 	async function poll() {
 		const projectId = activeRef.current;
 		if (projectId === null) {
@@ -637,9 +579,9 @@ function WorkbenchView(props) {
 		return () => clearTimeout(timer);
 	}, [awaitBanner]);
 
-	// 向导打开时：请求 AI 建议（人类只做确认）。
+	// 无书进向导时：请求 AI 建议（人类只做确认）。
 	useEffect(() => {
-		if (!showWizard) return;
+		if (meta !== null || loading) return;
 		let alive = true;
 		setSuggestLoading(true);
 		fetchJson("/textbook/action", {
@@ -665,7 +607,7 @@ function WorkbenchView(props) {
 		return () => {
 			alive = false;
 		};
-	}, [showWizard]);
+	}, [meta, loading]);
 
 	// 「✨ AI 建议」与「换一批」：带学习者的背景重新请求建议。
 	const requestSuggest = async (hintText) => {
@@ -828,7 +770,6 @@ function WorkbenchView(props) {
 				// 创建成功：立即切换到新书（修复"建完没反应、以为失败又点一次"的问题）。
 				activeRef.current = json.project;
 				setActiveId(json.project);
-				setShowWizard(false);
 				void loadAll(json.project).catch((err) =>
 					setError(String(err instanceof Error ? err.message : err)),
 				);
@@ -840,6 +781,12 @@ function WorkbenchView(props) {
 	};
 
 	const uploadSource = async (file, role) => {
+		// 超限直接拒（服务端会回 413；先在这里拦，避免白传一份注定失败的大文件）。
+		if (file.size > MAX_UPLOAD_BYTES) {
+			const err = new Error(uploadTooLargeMessage());
+			err.retryable = false;
+			throw err;
+		}
 		const bytes = await file.arrayBuffer();
 		const url = `/textbook/upload?${sess()}&project=${encodeURIComponent(activeRef.current)}&name=${encodeURIComponent(file.name)}&role=${encodeURIComponent(role)}`;
 		const res = await fetch(url, { method: "POST", body: bytes });
@@ -851,7 +798,12 @@ function WorkbenchView(props) {
 		}
 		if (!res.ok)
 			throw new Error((json !== null && json.error) || `HTTP ${res.status}`);
-		await loadAll(activeRef.current);
+		try {
+			await loadAll(activeRef.current);
+		} catch {
+			// 服务端已落盘，刷新失败（如瞬时 Failed to fetch）不当作上传失败，
+			// 否则 pending 不清空、用户重传整批 → 后端幂等前会产生重复条目。
+		}
 	};
 
 	// AI 识别每本 PDF 的角色（一次请求识别全部）。
@@ -918,31 +870,20 @@ function WorkbenchView(props) {
 		.reverse()
 		.find((event) => event.type === "textbook/ai-report");
 	const aiReport = aiReportEvent?.data?.report ?? null;
-	const progressEvent = [...events]
-		.reverse()
-		.find((event) => event.type === "textbook/progress");
-	const progressDetail =
-		progressEvent !== undefined
-			? `${progressEvent.data?.label ?? ""}${progressEvent.data?.detail ? `：${progressEvent.data.detail}` : ""}`
-			: "";
-	const STAGE_HUMAN = {
-		explore: "源探查",
-		outline: "章节骨架",
-		gold: "最佳范例章",
-		chapters: "铺章",
-		merge: "合并成书",
-		final: "最后检查",
-	};
+	// 进度详情只认「当前这一步」内的 progress（以最近一条 stage-start 为界）：
+	// 源探查结束进设计关卡后，探查期的通读进度不再残留到「AI 干活中」状态条。
+	const progressDetail = stageScopedProgressDetail(events);
 	const pendingStageLabel =
 		pendingStageView === "gate"
 			? `设计提案·第 ${pendingGateView ?? "?"} 关`
-			: (STAGE_HUMAN[pendingStageView] ?? "");
+			: stageHuman(pendingStageView);
 	const humanTurn =
 		meta !== null &&
 		(meta.status === "awaiting-explore" ||
 			meta.status === "awaiting-outline" ||
 			meta.status === "awaiting-gold" ||
 			meta.status === "awaiting-chapters-review" ||
+			meta.status === "awaiting-final-approval" ||
 			(gate !== null && gate.status === "awaiting") ||
 			(meta.phase === 1 && gate === null));
 	const needsConfigText =
@@ -993,27 +934,10 @@ function WorkbenchView(props) {
 		}
 	};
 
-	// 门控：只在「造书模式」会话显示工作台；未知（null）时放行（新会话首次加载）。
-	if (sessionPreset !== null && sessionPreset !== "textbook") {
-		return createElement(
-			"div",
-			{ style: S.container },
-			createElement("p", { style: S.title }, "造书工作台"),
-			createElement(
-				"div",
-				{ style: S.card },
-				createElement(
-					"p",
-					{ style: { margin: "0 0 6px" } },
-					"本会话不是「造书模式」，工作台不在这里显示。",
-				),
-				createElement(
-					"p",
-					{ style: { margin: "0", opacity: 0.8 } },
-					"使用方式：新建会话时，在模式里选择「造书模式」，工作台就会出现在那个会话里。",
-				),
-			),
-		);
+	// 门控（防御纵深）：动态注册已确保页签只在造书会话出现；组件内再兜底——
+	// sessionPreset !== "textbook" 一律不渲染真实工作台（含 null 未解析窗口，杜绝闪现）。
+	if (sessionPreset !== "textbook") {
+		return null;
 	}
 
 	// 顶栏介入工具条（布局 A：地图栏与焦点区之上；只在有活动书时出现——无书时是向导/加载态）。
@@ -1036,7 +960,7 @@ function WorkbenchView(props) {
 		createElement(
 			"p",
 			{ style: S.hint },
-			"本会话独立使用，一个会话只造一本书。主 AI 亲手推进流水线，轮到你要拍板/确认时亮起 ⚡；每个拍板点都自动存档，随时能改。",
+			"本会话独立使用，一个会话只造一本书。主 AI 统筹推进流水线（亲自做或派小助手分头干），轮到你要拍板/确认时亮起 ⚡；每个拍板点都自动存档，随时能改。",
 		),
 		createElement(MineruTokenCard, {
 			mineruSet,
@@ -1060,7 +984,6 @@ function WorkbenchView(props) {
 								if (json?.project) {
 									activeRef.current = json.project;
 									setActiveId(json.project);
-									setShowWizard(false);
 									void loadAll(json.project);
 								}
 							});
@@ -1068,14 +991,9 @@ function WorkbenchView(props) {
 						busy,
 						suggestions,
 						suggestLoading,
-						onCancel: () => setShowWizard(false),
 						onSuggest: (hintText) => requestSuggest(hintText),
 					})
-				: createElement(
-						"p",
-						{ style: S.hint },
-						'还没有书项目，点"＋ 新建书"开始。',
-					),
+				: null,
 	);
 	// 有书时的三区主体：左地图栏 | 右列（上焦点区独立滚动 + 下对话台固定底部）。
 	// 写成函数延迟构造：meta 为 null（向导/加载态）时不该碰 meta 字段，避免空指针。
@@ -1275,7 +1193,7 @@ function WorkbenchView(props) {
 								status: meta.status,
 								humanTurn,
 								onSelect: (phase) => {
-									const product = phaseProduct(phase);
+									const product = phaseProduct(phase, meta, workFiles);
 									if (product === null) return;
 									if (phase === 1) {
 										setShowMaterials(true);
@@ -1284,7 +1202,7 @@ function WorkbenchView(props) {
 									}
 									viewWork(product);
 								},
-								productOf: phaseProduct,
+								productOf: (p) => phaseProduct(p, meta, workFiles),
 							})
 						: null,
 					createElement(StatusStrip, {
@@ -1323,17 +1241,20 @@ function WorkbenchView(props) {
 								`📁 书文件夹：${bookDir}`,
 							)
 						: null,
-					gate !== null && gate.status === "awaiting"
-						? createElement(GatePanel, {
-								gate,
-								onDecide: decide,
-								onRollback: rollback,
-								busy,
-								error: null,
-								onAddPattern: analyzePattern,
-							})
-						: meta.status === "awaiting-explore"
-							? createElement(ExploreConfirmCard, {
+					(() => {
+						// 焦点区主卡路由（抽成 focusCardKey 纯函数：view-rules.js，可独立测试）。
+						switch (focusCardKey(meta, gate)) {
+							case "gate":
+								return createElement(GatePanel, {
+									gate,
+									onDecide: decide,
+									onRollback: rollback,
+									busy,
+									error: null,
+									onAddPattern: analyzePattern,
+								});
+							case "explore":
+								return createElement(ExploreConfirmCard, {
 									meta,
 									exploreSummary,
 									project: activeId,
@@ -1342,115 +1263,136 @@ function WorkbenchView(props) {
 									onViewReport: () =>
 										viewWork({ path: "work/explore.md", label: "源探查报告" }),
 									busy,
-								})
-							: meta.status === "awaiting-outline"
-								? createElement(OutlineConfirmCard, {
-										meta,
-										busy,
-										onConfirm: confirmOutline,
-									})
-								: meta.status === "awaiting-gold"
-									? createElement(GoldTable, {
-											meta,
-											busy,
-											goldDrafts,
-											goldDraftVersion,
-											postAction,
-											onSuggestWords: async () => {
-												const json = await fetchJson("/textbook/action", {
-													method: "POST",
-													headers: {
-														"Content-Type": "application/json",
-														Accept: "application/json",
-													},
-													body: JSON.stringify({
-														action: "suggest-words",
-														session: sessionRef.current,
-														project: activeRef.current,
-														goal: meta.goal,
-														route: meta.route,
-														science: meta.science,
-														chapterCount: (meta.outline?.chapters ?? []).length,
-													}),
-												});
-												return json.suggestion ?? null;
+								});
+							case "outline":
+								return createElement(OutlineConfirmCard, {
+									meta,
+									busy,
+									onConfirm: confirmOutline,
+								});
+							case "gold":
+								return createElement(GoldTable, {
+									meta,
+									busy,
+									goldDrafts,
+									goldDraftVersion,
+									postAction,
+									onSuggestWords: async () => {
+										const json = await fetchJson("/textbook/action", {
+											method: "POST",
+											headers: {
+												"Content-Type": "application/json",
+												Accept: "application/json",
 											},
-											fetchText: (path) =>
-												fetch(
-													`/textbook/file?${sess()}&project=${encodeURIComponent(activeRef.current)}&path=${encodeURIComponent(path)}`,
-												).then((res) => {
-													if (!res.ok) throw new Error(`HTTP ${res.status}`);
-													return res.text();
-												}),
-										})
-									: meta.status === "delivered"
-										? createElement(DeliveryCard, {
-												project: activeId,
+											body: JSON.stringify({
+												action: "suggest-words",
 												session: sessionRef.current,
-												checks,
-												onPreview: togglePreview,
-												preview,
-												busy,
-												meta,
-												aiReport,
-												styleNotes: meta.styleNotes, // 风格线落实清单：从 meta 传入，内部 ?? [] 兜底（旧账本无此字段）
-											})
-										: meta.phase === 5 && meta.demo !== true
-											? createElement(ChaptersCard, {
-													meta,
-													chapterStatus,
-													pendingReviews,
-													progressDetail,
-													reviewMode:
-														meta.status === "awaiting-chapters-review",
-													onApproveAll: () => {
-														void postAction({
-															action: "chapters-review-confirm",
-															approved: true,
-														});
-													},
-													onView: (n) =>
-														viewWork({
-															path: `work/chapter-${String(n).padStart(2, "0")}.md`,
-															label: `第 ${n} 章`,
-														}),
-													onReview: submitReview,
-													busy,
-													events, // F17 章级「完成」态推导用（agent-end 事件 → 第N章）
-													workFiles, // F17 「看看这章」置灰用（chapter 文件不在产物清单就禁用）
-													project: activeId,
-													session: sessionRef.current,
-													postAction, // F39 过目态内联展开/段级三键
-												})
-											: meta.phase === 1
-												? createElement(UploadArea, {
-														sources: meta.sources ?? [],
-														converting: meta.converting === true,
-														onUpload: uploadSource,
-														onConvert: convert,
-														onIdentify: identifyRoles,
-														busy,
-													})
-												: createElement(StatusCard, {
-														meta,
-														lastEvent,
-														events,
-														needsConfig: needsConfigText,
-														onResume: resume,
-														busy,
-														pendingStageLabel,
-														progressDetail,
-														// F31：AI 流式干活（partialActive）或账本 3 分钟内有动 → 抑制「可能卡住了」误报（口径同活性行 L2759）。
-														aiActive:
-															partialActive ||
-															(meta?.status === "running" &&
-																Date.now() - (meta.updatedAt ?? 0) <
-																	3 * 60 * 1000),
-														// F28：error 态删书重来入口——复用既有 deletingId/deleteBook 两步删除机制（与业务头同源）。
-														onDeleteStart: () => setDeletingId(activeId),
-														onDeleteConfirm: () => deleteBook(activeId),
-														deletingId: deletingId === activeId,
-													}),
+												project: activeRef.current,
+												goal: meta.goal,
+												route: meta.route,
+												science: meta.science,
+												chapterCount: (meta.outline?.chapters ?? []).length,
+											}),
+										});
+										return json.suggestion ?? null;
+									},
+									fetchText: (path) =>
+										fetch(
+											`/textbook/file?${sess()}&project=${encodeURIComponent(activeRef.current)}&path=${encodeURIComponent(path)}`,
+										).then((res) => {
+											if (!res.ok) throw new Error(`HTTP ${res.status}`);
+											return res.text();
+										}),
+								});
+							case "final":
+								return createElement(FinalApprovalCard, {
+									project: activeId,
+									session: sessionRef.current,
+									checks,
+									onPreview: togglePreview,
+									preview,
+									busy,
+									meta,
+									aiReport,
+									styleNotes: meta.styleNotes,
+									onApprove: () => {
+										void postAction({ action: "final-approve", approved: true });
+									},
+									onReject: (note) => {
+										void postAction({ action: "final-approve", approved: false, note });
+									},
+								});
+							case "delivered":
+								return createElement(DeliveryCard, {
+									project: activeId,
+									session: sessionRef.current,
+									checks,
+									onPreview: togglePreview,
+									preview,
+									busy,
+									meta,
+									aiReport,
+									styleNotes: meta.styleNotes, // 风格线落实清单：从 meta 传入，内部 ?? [] 兜底（旧账本无此字段）
+								});
+							case "chapters":
+								return createElement(ChaptersCard, {
+									meta,
+									chapterStatus,
+									pendingReviews,
+									progressDetail,
+									reviewMode:
+										meta.status === "awaiting-chapters-review",
+									onApproveAll: () => {
+										void postAction({
+											action: "chapters-review-confirm",
+											approved: true,
+										});
+									},
+									onView: (n) =>
+										viewWork({
+											path: `work/chapter-${String(n).padStart(2, "0")}.md`,
+											label: `第 ${n} 章`,
+										}),
+									onReview: submitReview,
+									busy,
+									events, // F17 章级「完成」态推导用（agent-end 事件 → 第N章）
+									workFiles, // F17 「看看这章」置灰用（chapter 文件不在产物清单就禁用）
+									project: activeId,
+									session: sessionRef.current,
+									postAction, // F39 过目态内联展开/段级三键
+								});
+							case "upload":
+								return createElement(UploadArea, {
+									sources: meta.sources ?? [],
+									converting: meta.converting === true,
+									onUpload: uploadSource,
+									onConvert: convert,
+									onIdentify: identifyRoles,
+									busy,
+								});
+							default:
+								return createElement(StatusCard, {
+									meta,
+									lastEvent,
+									events,
+									needsConfig: needsConfigText,
+									onResume: resume,
+									busy,
+									pendingStageLabel,
+									progressDetail,
+									// F31：AI 流式干活（partialActive）或账本 3 分钟内有动 → 抑制「可能卡住了」误报（口径同活性行 L2759）。
+									aiActive:
+										partialActive ||
+										(meta?.status === "running" &&
+											Date.now() - (meta.updatedAt ?? 0) <
+												3 * 60 * 1000),
+									// F28：error 态删书重来入口——复用既有 deletingId/deleteBook 两步删除机制（与业务头同源）。
+									onDeleteStart: () => setDeletingId(activeId),
+									onDeleteConfirm: () => deleteBook(activeId),
+									deletingId: deletingId === activeId,
+								});
+						}
+					})(),
 					createElement(
 						"div",
 						{ style: { margin: "8px 0" } },
@@ -1467,7 +1409,7 @@ function WorkbenchView(props) {
 					),
 					showHistory
 						? events.map((event) => {
-								const product = workPathForEvent(event);
+								const product = workPathForEvent(event, meta, workFiles);
 								const isGate = event.type === "textbook/gate-proposal";
 								const detailOpen = gateOpen === event.seq;
 								const clickable = product !== null || isGate;
@@ -1751,18 +1693,39 @@ function WorkbenchView(props) {
 }
 
 export function apply(ctx) {
-	ctx.slots.inject("conversation.view", () =>
-		ctx.slots.register(
-			{
-				name: "conversation.view",
-				id: "dsh-craft-your-textbook",
-				order: 20,
-				label: () => "工作台",
-				inject: () => ({}),
-			},
-			WorkbenchView,
-		),
-	);
+	// 工作台页签「会话级门控」：宿主 conversation.view 页签列表是全局投影、无 per-session
+	// 可见性选项，故订阅 sessions.list——当前会话是造书模式（agentPreset === "textbook"）
+	// 才注册页签，否则注销；null/非 textbook 一律不注册，杜绝闪现。
+	ctx.slots.inject("conversation.view", () => {
+		let disposer = null;
+		const sync = () => {
+			const snap = ctx.sessions.list.getSnapshot();
+			const current = snap.byId?.[snap.current];
+			const isTextbook = current?.agentPreset === "textbook";
+			if (isTextbook && disposer === null) {
+				disposer = ctx.slots.register(
+					{
+						name: "conversation.view",
+						id: "dsh-craft-your-textbook",
+						order: 20,
+						label: () => "工作台",
+						inject: () => ({}),
+					},
+					WorkbenchView,
+				);
+			} else if (!isTextbook && disposer !== null) {
+				disposer();
+				disposer = null;
+			}
+		};
+		// subscribe 不会立即触发一次（zustand 语义），先手动同步一次再订阅。
+		sync();
+		const unsubscribe = ctx.sessions.list.subscribe(sync);
+		return () => {
+			unsubscribe();
+			if (disposer !== null) disposer();
+		};
+	});
 	// 造书会话首次对话后自动打开工作台页签（头部小工具位，常驻但不占视觉空间）。
 	ctx.slots.inject("conversation.session.header.utilities", () =>
 		ctx.slots.register(

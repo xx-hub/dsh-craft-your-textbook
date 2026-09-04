@@ -79,7 +79,10 @@ function resolveBaseUrl(config) {
   return 'http://127.0.0.1:3080'
 }
 
-/** 协作动作的本地预校验：不联网即可拦下明显错参（也便于测试；错误信息要能指导 AI 下一步怎么引导用户）。 */
+/**
+ * 协作动作的本地预校验：不联网即可拦下明显错参（也便于测试；错误信息要能指导 AI 下一步怎么引导用户）。
+ * 这是协作动作参数的**单一校验落点**：execute switch 只负责组 body、不再重复校验——改参数规则只改这一处。
+ */
 function preValidate(actionName, args) {
   const need = (cond, msg) => { if (!cond) throw new Error(msg) }
   switch (actionName) {
@@ -92,7 +95,7 @@ function preValidate(actionName, args) {
     case 'waive':
       need(typeof args.item === 'string' && args.item !== '', 'waive 需要 item（豁免项）')
       need(typeof args.userNote === 'string' && args.userNote.trim() !== '',
-        '豁免必须由用户在界面「特殊要求」面板手输原因（userNote）才能放行；请引导用户操作后再调用')
+        '豁免必须由用户手输原因（userNote）才能放行；请用户在对话里直接说明，你转交后再调用')
       break
     case 'style-note-revoke':
     case 'waive-revoke':
@@ -112,6 +115,10 @@ function preValidate(actionName, args) {
       break
     case 'chapters-review-confirm':
       need(typeof args.approved === 'boolean', 'chapters-review-confirm 需要 approved（true=都过了，开始合并）')
+      break
+    case 'final-approve':
+      need(typeof args.approved === 'boolean', 'final-approve 需要 approved（true=认可终检结果，交付；false=驳回，需 note）')
+      if (args.approved === false) need(typeof args.note === 'string' && args.note.trim() !== '', 'final-approve approved=false 需要 note（对整本书的改进意见）')
       break
     case 'deep-modify':
       need(typeof args.segment === 'string' && args.segment !== '', 'deep-modify 需要 segment（历史段 key，如 outline/chapter-2）')
@@ -172,7 +179,7 @@ function apply(ctx, config) {
       const projects = list.projects ?? []
       debugLog({ stage: 'status-projects', count: projects.length })
       if (projects.length === 0) {
-        const out = { hasBook: false, sessionId, message: '这个会话还没有书，工作台显示"＋ 新建书"向导。' }
+        const out = { hasBook: false, sessionId, message: '这个会话还没有书，工作台已打开建档向导（书名 + 学习目标必填），引导用户在向导里建书或先建演示书。' }
         debugLog({ stage: 'status-return', out })
         return out
       }
@@ -200,11 +207,11 @@ function apply(ctx, config) {
           role: source.role ?? '',
           converted: source.converted === true,
         })),
-        // 机器在等谁：pendingStage != null → 等你 AI 动手；awaiting-explore/awaiting-gold/awaiting-chapters-review → 等用户；关卡 awaiting → 等用户拍板。
+        // 机器在等谁：pendingStage != null → 等你 AI 动手；awaiting-explore/awaiting-gold/awaiting-chapters-review/awaiting-final-approval → 等用户；关卡 awaiting → 等用户拍板。
         pendingStage: detail.pendingStage ?? null,
         pendingGate: detail.pendingGate ?? null,
         stageLabel: detail.pendingStage ?? null,
-        awaitingUser: ['awaiting-explore', 'awaiting-gold', 'awaiting-chapters-review'].includes(meta.status)
+        awaitingUser: ['awaiting-explore', 'awaiting-gold', 'awaiting-chapters-review', 'awaiting-final-approval'].includes(meta.status)
           || (gate !== null && gate.status === 'awaiting'),
         gate: gate === null ? null : {
           gate: gate.gate,
@@ -244,27 +251,26 @@ function apply(ctx, config) {
 
   ctx.tools.register(defineToolLocal({
     name: 'workbench_act',
-    description: '与造书工作台交互。两类用法：① 流水线内务（机器派给你的活）：stage-brief 领任务说明、progress 上报进度、stage-submit 交工——这三类直接调用，不需要征求用户同意；② 代用户操作（改书名/改目标/建书/拍板/回退/重试/删除）——仅在用户明确同意后调用。action 取值：stage-brief、stage-submit、progress、create（建书，需 name/goal，可选 route/science）、rename（改书名，需 name）、set_goal（改学习目标，需 goal）、gate（关卡拍板，需 gate/version/approved，可选 note）、rollback（回退，需 snapshot 序号）、resume（重试/继续）、delete（删除这本书）。协作动作：style-note（记风格线）、intervene（留言）、pause（强制中断）、nudge（催办：把用户一句话以 notice 唤醒主 AI，不中断不 cancel）为内务可直接调用；waive（豁免，必须先引导用户在界面手输原因）、outline-confirm、chapters-review-confirm（全章过目确认：全章写完后替用户点「都过了」时用，需 approved=true）、gold-opinion/gold-revise/gold-chapter-set/gold 定稿类必须用户明确同意后调用。定点修改（改历史）：deep-modify（用户在界面上点定点修改时走这条，需 segment/note）、deep-undo（撤销最近一次深改）；对话里用户说改历史也必须引导走工作台的定点修改流程，不要自己改账本或产物。',
+    description: '与造书工作台交互。两类用法：① 流水线内务（机器派给你的活）：stage-brief 领任务说明、progress 上报进度、stage-submit 交工——这三类直接调用，不需要征求用户同意；② 代用户操作（改书名/改目标/建书/拍板/回退/重试/删除/终检认可）——仅在用户明确同意后调用。action 取值：stage-brief、stage-submit、progress、create（建书，需 name/goal，可选 route/science）、rename（改书名，需 name）、set_goal（改学习目标，需 goal）、gate（关卡拍板，需 gate/version/approved，可选 note）、rollback（回退，需 snapshot 序号）、resume（重试/继续）、delete（删除这本书）。协作动作：style-note（记风格线）、intervene（留言）、pause（强制中断）、nudge（催办：把用户一句话以 notice 唤醒主 AI，不中断不 cancel）为内务可直接调用；waive（豁免，必须先引导用户在界面手输原因）、outline-confirm、chapters-review-confirm（全章过目确认：全章写完后替用户点「都过了」时用，需 approved=true）、final-approve（终检结果认可：终检全过后用户在终检结果卡点「认可/不满意」时用，需 approved=true/false；approved=false 必须带 note 改进意见）、gold-opinion/gold-revise/gold-chapter-set/gold 定稿类必须用户明确同意后调用。定点修改（改历史）：deep-modify（用户在界面上点定点修改时走这条，需 segment/note）、deep-undo（撤销最近一次深改）；对话里用户说改历史也必须引导走工作台的定点修改流程，不要自己改账本或产物。',
     parameters: {
       action: {
         type: 'string', required: true,
-        description: 'stage-brief | stage-submit | progress | create | rename | set_goal | gate | rollback | resume | nudge | delete | chapters-review-confirm | deep-modify | deep-undo',
+        description: 'stage-brief | stage-submit | progress | create | rename | set_goal | gate | rollback | resume | nudge | delete | chapters-review-confirm | final-approve | deep-modify | deep-undo',
       },
-      stage: { type: 'string', description: 'stage-brief/stage-submit 用的阶段名：explore|gate|outline|gold|chapters|merge|final' },
+      stage: { type: 'string', description: 'stage-brief/stage-submit 用的阶段名：explore|gate|outline|gold|chapters|merge|final；progress 时（铺章阶段可选）：本章流水线阶段 writing|auditing|audited|finalizing|done' },
       segment: { type: 'string', description: 'deep-modify 时：要定点修改的历史段 key（explore|gate-1|gate-2|gate-3|outline|gold|chapter-N|merge|final）' },
       // —— stage-submit 各阶段的交付内容 ——
       title: { type: 'string', description: '交工 gate 时：一句话标题' },
       summary: { type: 'string', description: '交工 gate 时：给用户看的人话摘要（300 字内）' },
-      detail: { type: 'string', description: '交工 gate 时：完整方案 Markdown（detail 内联全文，禁止写「见文件/proposal-*.md」指针，用户只在页面上看方案）' },
+      detail: { type: 'string', description: '按动作取义：交工 gate（stage-submit）时必填——完整方案 Markdown（detail 内联全文，禁止写「见文件/proposal-*.md」指针，用户只在页面上看方案）；progress 时可选——更细的一句话说明' },
       chaptersJson: { type: 'string', description: '交工 outline 时：JSON 数组字符串 [{"title":"…","outline":"…","source":"资料N：…","targetWords":6000,"points":["知识点…"],"volumeReason":"体量依据"}]' },
       goldChapter: { type: 'number', description: '交工 outline 时：建议的样例章章号（1 基，默认 1）；outline-confirm 时：用户改选的样例章章号' },
       goldChapterReason: { type: 'string', description: '交工 outline 时：一句理由（哪章最能代表全书风格/结构最完整/材料最充分）' },
-      chapter: { type: 'number', description: '交工 chapters 时：第几章；gold-chapter-set 时：目标样例章章号（1 基）' },
-      preface: { type: 'string', description: '交工 merge 时：书的前言/使用说明（≤300 字）' },
+      chapter: { type: 'number', description: '交工 chapters 时：第几章；gold-chapter-set 时：目标样例章章号（1 基）；progress 时：正在汇报的是第几章（1 基，与 stage 一起进章节流水线账本，工作台章节卡显示流水灯）；交工 chapters 时机器验该章 audit-NN.md 的 passed===true、无未处置抽查意见、无脚手架残留才放行' },
+      preface: { type: 'string', description: '交工 merge 时：书的前言/使用说明（≤300 字）。注意：交工 merge 前必须先做合并前跨章审计（读全部章核对事实一致性/术语统一/交叉引用悬空/知识递进链），把审计结论落盘 work/audit-cross.md——机器验该文件存在才放行合并，没落盘会 400 拒收' },
       report: { type: 'string', description: '交工 final 时：你的最后检查报告（人话）' },
       // —— progress ——
       label: { type: 'string', description: 'progress 时：正在做什么（如「写第3章」）' },
-      detail: { type: 'string', description: 'progress 时：更细的一句话说明' },
       // —— 代用户操作 ——
       name: { type: 'string', description: 'create/rename 时的书名' },
       goal: { type: 'string', description: 'create/set_goal 时的学习目标' },
@@ -273,7 +279,6 @@ function apply(ctx, config) {
       gate: { type: 'string', description: 'gate 时的关卡号' },
       version: { type: 'number', description: 'gate 时的版本号' },
       approved: { type: 'boolean', description: 'gate 时：true=通过，false=驳回；chapters-review-confirm 时：true=全章都过了，开始合并' },
-      note: { type: 'string', description: 'gate 驳回时的说明，或任何想留的备注' },
       snapshot: { type: 'number', description: 'rollback 时回退到的快照序号' },
       // -- 协作动作 --
       text: { type: 'string', description: 'style-note/intervene 时：意见或留言内容；nudge 时：催办语（一句话，可省）' },
@@ -287,7 +292,7 @@ function apply(ctx, config) {
       wish: { type: 'string', description: 'gold-opinion 时：一句话说明' },
       para: { type: 'number', description: 'gold-opinion 时：段落序号（可省）' },
       hint: { type: 'string', description: 'gold-opinion 时：段落描述（如「开头那段」）' },
-      note: { type: 'string', description: 'outline-confirm 驳回/gold-revise 时：给 AI 的改进方向；deep-modify 时：这次要改什么（一句话，必填）' },
+      note: { type: 'string', description: '按动作取义：gate 驳回时——驳回说明或备注；outline-confirm 驳回 / gold-revise 时——给 AI 的改进方向；deep-modify 时——这次要改什么（必填）' },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
@@ -313,10 +318,18 @@ function apply(ctx, config) {
           }
           break
         case 'progress':
+          // 契约面审计（2026-08-26）：补转发 chapter/stage。之前只转 label/detail，
+          // 后端 meta.chapterPipeline 永远收不到结构化数据（休眠），前端章节卡只能靠事件兜底推导。
           body = {
             action: 'progress',
             label: typeof args.label === 'string' ? args.label : '',
             detail: typeof args.detail === 'string' ? args.detail : '',
+            ...(Number.isSafeInteger(Number(args.chapter)) && Number(args.chapter) >= 1
+              ? { chapter: Number(args.chapter) }
+              : {}),
+            ...(['writing', 'auditing', 'audited', 'finalizing', 'done'].includes(args.stage)
+              ? { stage: args.stage }
+              : {}),
           }
           break
         case 'stage-submit': {
@@ -389,37 +402,27 @@ function apply(ctx, config) {
           break
         // ── 协作动作 ──────────────────────────────────────────────────────
         case 'style-note':
-          if (typeof args.text !== 'string' || args.text.trim() === '') throw new Error('style-note 需要 text')
           body = { action: 'style-note', text: args.text.trim(), source: typeof args.source === 'string' ? args.source : 'chat' }
           break
         case 'style-note-revoke':
-          if (typeof args.id !== 'string') throw new Error('需要 id')
           body = { action: 'style-note-revoke', id: args.id }
           break
         case 'waive':
-          if (typeof args.item !== 'string' || args.item === '') throw new Error('waive 需要 item')
-          if (typeof args.userNote !== 'string' || args.userNote.trim() === '') {
-            throw new Error('豁免必须由用户在界面「特殊要求」面板手输原因（userNote）才能放行；请引导用户操作后再调用')
-          }
           body = { action: 'waive', item: args.item, userNote: args.userNote.trim(), source: 'chat' }
           break
         case 'waive-revoke':
-          if (typeof args.id !== 'string') throw new Error('需要 id')
           body = { action: 'waive-revoke', id: args.id }
           break
         case 'pause':
           body = { action: 'pause', reason: typeof args.reason === 'string' ? args.reason : '主 AI 侧发起的中断' }
           break
         case 'intervene':
-          if (typeof args.text !== 'string' || args.text.trim() === '') throw new Error('intervene 需要 text')
           body = { action: 'intervene', text: args.text.trim(), ...(typeof args.target === 'string' ? { target: args.target } : {}) }
           break
         case 'intervene-done':
-          if (typeof args.id !== 'string') throw new Error('需要 id')
           body = { action: 'intervene-done', id: args.id }
           break
         case 'outline-confirm':
-          if (typeof args.approved !== 'boolean') throw new Error('outline-confirm 需要 approved')
           body = {
             action: 'outline-confirm', approved: args.approved,
             ...(typeof args.note === 'string' ? { note: args.note } : {}),
@@ -427,22 +430,25 @@ function apply(ctx, config) {
           }
           break
         case 'chapters-review-confirm':
-          if (typeof args.approved !== 'boolean') throw new Error('chapters-review-confirm 需要 approved（true=都过了，开始合并）')
           body = { action: 'chapters-review-confirm', approved: args.approved }
+          break
+        case 'final-approve':
+          // 终检结果认可：用户在终检结果卡点「认可/不满意」时由 AI 代点（须用户明确同意）。
+          // approved=false 必带 note 由 preValidate 拦（单一校验落点）。
+          body = {
+            action: 'final-approve', approved: args.approved,
+            ...(typeof args.note === 'string' ? { note: args.note.trim() } : {}),
+          }
           break
         case 'deep-modify':
           // 定点修改（改历史）：用户在界面上点定点修改时走这条；对话里说改历史也必须
           // 引导用户去工作台点定点修改，不要自己动账本/产物。需用户明确同意后才调用。
-          if (typeof args.segment !== 'string' || args.segment === '') throw new Error('deep-modify 需要 segment（历史段 key）')
-          if (typeof args.note !== 'string' || args.note.trim() === '') throw new Error('deep-modify 需要 note（这次要改什么）')
           body = { action: 'deep-modify', segment: args.segment, note: args.note.trim() }
           break
         case 'deep-undo':
           body = { action: 'deep-undo' }
           break
         case 'gold-opinion':
-          if (!['dislike', 'drop', 'change'].includes(args.kind)) throw new Error('gold-opinion 需要 kind（dislike|drop|change）')
-          if (typeof args.wish !== 'string' || args.wish.trim() === '') throw new Error('gold-opinion 需要 wish')
           body = {
             action: 'gold-opinion', kind: args.kind, wish: args.wish.trim(),
             ...(Number.isSafeInteger(args.para) ? { para: args.para } : {}),
@@ -450,14 +456,12 @@ function apply(ctx, config) {
           }
           break
         case 'gold-opinion-revoke':
-          if (typeof args.id !== 'string') throw new Error('需要 id')
           body = { action: 'gold-opinion-revoke', id: args.id }
           break
         case 'gold-revise':
           body = { action: 'gold-revise', ...(typeof args.note === 'string' ? { note: args.note } : {}) }
           break
         case 'gold-chapter-set':
-          if (!Number.isSafeInteger(Number(args.chapter)) || Number(args.chapter) < 1) throw new Error('gold-chapter-set 需要 chapter（目标样例章章号，1 基）')
           body = { action: 'gold-chapter-set', chapter: Number(args.chapter), ...(typeof args.reason === 'string' ? { reason: args.reason } : {}) }
           break
         case 'resume':
