@@ -148,9 +148,12 @@ export {
 // ── 自动打开器：造书会话首次对话后，自动切到"工作台"页签 ────────────────────
 
 export function AutoOpenWorkbench(props) {
+	// 真实契约：会话列表记录的 agentPreset 在 projectionValues 里（host 经
+	// control 帧镜像），顶层没有该字段——读错会导致永远非 textbook。
 	const isTextbook =
-		props.useSessions((s) => s.byId[props.sessionId]?.agentPreset) ===
-		"textbook";
+		props.useSessions(
+			(s) => s.byId[props.sessionId]?.projectionValues?.agentPreset,
+		) === "textbook";
 	const messageCount = props.useSession((s) => s.nodes.length);
 	const doneRef = useRef(false);
 
@@ -174,7 +177,7 @@ export function AutoOpenWorkbench(props) {
 function WorkbenchView(props) {
 	// 会话模式门控：只在「造书模式」显示工作台（useSessions 选择器返回稳定值，安全）。
 	const sessionPreset = props.useSessions(
-		(s) => s.byId[props.sessionId]?.agentPreset ?? null,
+		(s) => s.byId[props.sessionId]?.projectionValues?.agentPreset ?? null,
 	);
 	const session = props.sessionId;
 	// 主 AI 活性（F17）：浏览器侧流式正在吐半个回合（partial!=null）即算「AI 回合进行中」。
@@ -1694,14 +1697,17 @@ function WorkbenchView(props) {
 
 export function apply(ctx) {
 	// 工作台页签「会话级门控」：宿主 conversation.view 页签列表是全局投影、无 per-session
-	// 可见性选项，故订阅 sessions.list——当前会话是造书模式（agentPreset === "textbook"）
-	// 才注册页签，否则注销；null/非 textbook 一律不注册，杜绝闪现。
+	// 可见性选项，故订阅 sessions.list——当前会话是造书模式（projectionValues.agentPreset
+	// === "textbook"）才注册页签，否则注销；null/非 textbook 一律不注册，杜绝闪现。
+	// ⚠️ agentPreset 在客户端会话记录里位于 projectionValues（host control 帧镜像），
+	// 顶层没有该字段——8-26 版本曾读错字段导致门控永远失效/永远生效。
 	ctx.slots.inject("conversation.view", () => {
 		let disposer = null;
 		const sync = () => {
 			const snap = ctx.sessions.list.getSnapshot();
 			const current = snap.byId?.[snap.current];
-			const isTextbook = current?.agentPreset === "textbook";
+			const isTextbook =
+				current?.projectionValues?.agentPreset === "textbook";
 			if (isTextbook && disposer === null) {
 				disposer = ctx.slots.register(
 					{
