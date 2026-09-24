@@ -6,6 +6,7 @@
  */
 
 import { createElement, useEffect, useRef } from "react";
+import { deriveChatDeskNodes } from "./chat-source.js";
 import { S } from "./styles.js";
 
 function blockText(block) {
@@ -63,14 +64,17 @@ function bubble(side, text, extraStyle) {
 }
 
 // 工具行一句话：正在跑 / 已完成 / 出错（工具细节压成一行，避免刷屏）。
+// 形状照契约快照 §3：`ToolChatData.root` 是 `ToolCallBlock` = `RunningToolCall | ToolResultNode`
+// ——正在跑的带 `name`；定稿的带 `call.name` 与 `content`（`ContentBlock[]`）。原来读的
+// `root.result.text` 在契约里**不存在**（真实节点只会渲染成「🔧 工具 · 完成」），随本票的
+// 契约形状桩一并改对。
 function toolLine(root) {
-	const name = root?.name ?? root?.toolName ?? "工具";
+	const name = root?.name ?? root?.call?.name ?? "工具";
 	if (root?.kind === "tool-result") {
-		const text = String(root?.result?.text ?? root?.text ?? "")
+		const text = contentBlocksText(root?.content)
 			.replace(/\s+/g, " ")
 			.slice(0, 120);
-		const ok = root?.result?.isError !== true && root?.isError !== true;
-		return `🔧 ${name} · ${ok ? "完成" : "出错"}${text !== "" ? `：${text}` : ""}`;
+		return `🔧 ${name} · ${root?.isError === true ? "出错" : "完成"}${text !== "" ? `：${text}` : ""}`;
 	}
 	return `🔧 ${name} · 执行中…`;
 }
@@ -105,8 +109,8 @@ const RECEIPT_TEXT = {
 	"textbook/outline-decision": (d) =>
 		`✓ 章节安排${d?.approved === true ? "已通过" : "已驳回"}`,
 	"textbook/gate-decision": (d) =>
-		`✓ 第 ${d?.gate ?? "?"} 关${d?.approved === true ? "通过" : "驳回"}`,
-	"textbook/gold-seal": () => "✓ 金标准已定稿为风格母版",
+		`✓ 第 ${d?.gate ?? "?"} 次拍板${d?.approved === true ? "通过" : "驳回"}`,
+	"textbook/gold-seal": () => "✓ 最佳范例章已定稿（后面的章节照它写）",
 	"textbook/pattern-added": (d) =>
 		`✓ 已加自定义模式${d?.name ? `：${String(d.name).slice(0, 20)}` : ""}`,
 };
@@ -154,13 +158,20 @@ function assistantBubbleText(node) {
 
 // 对话台（右下：宿主对话的完整镜像，节点全集自绘；独立滚动由外层容器负责）。
 export function ChatDesk(props) {
-	const nodes = props.useSession((s) => s.nodes) ?? [];
-	const partial = props.useSession((s) => s.partial);
+	// 消息来源＝宿主对话区用的那一份（聊天快照的节点仓 + 它给的顺序），与「自动打开页签」
+	// 共用 `src/ui/chat-source.js` 的同一个推导（票 dsh-contract-drift/02：原来读的是**会话快照**
+	// 的 `nodes` / `partial`，那两个字段不在它身上，于是这里恒空、也不跟随滚动）。
+	// 取**整份快照**（`useChat((s) => s)`）而不是只取 `order`/`nodes`：同一条消息正在吐字时
+	// `order` 保持原数组身份，只订阅它收不到内容更新（契约快照 §5 末）。
+	const nodes = deriveChatDeskNodes(props.useChat((s) => s));
+	// 最后一条的**身份**当跟随滚动的信号：内容更新时节点仓会换掉这个节点对象，
+	// 只数条数收不到「同一条正在长」。
+	const lastNode = nodes.length > 0 ? nodes[nodes.length - 1] : null;
 	// F5 账面事件（/textbook/events，Task 20 回执徽章用）；漏账催办（Task 19 nudge，不传时安全忽略）。
 	const events = props.events ?? [];
 	const onNudge = props.onNudge ?? (() => {});
 	const onCollapse = props.onCollapse ?? null;
-	// 对话台钉底滚动（回归修复）：新消息/流式增量（nodes.length/partial）进来时，若用户正停在
+	// 对话台钉底滚动（回归修复）：新消息/流式增量（条数或最后一条的身份变了）进来时，若用户正停在
 	// 底部附近就自动滚到底；用户往上翻（离开底部）就不打扰，回到底部附近后重新钉住。
 	// 清理安全：effect 只返回 undefined，随组件卸载/重渲一并回收，无外部监听残留。
 	const deskScrollRef = useRef(null);
@@ -170,7 +181,7 @@ export function ChatDesk(props) {
 		const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
 		if (nearBottom) el.scrollTop = el.scrollHeight;
 		return undefined;
-	}, [nodes.length, partial]);
+	}, [nodes.length, lastNode]);
 	// 打开对话台时默认滚到最新一条消息：ChatDesk 在展开态才挂载，挂载即无条件钉底
 	// （上面的 effect 只在用户已停在底部附近时才滚，长对话刚打开时会停在顶部）。
 	useEffect(() => {
@@ -214,7 +225,10 @@ export function ChatDesk(props) {
 		switch (node.kind) {
 			case "user":
 			case "steering": {
-				const text = contentBlocksText(node.content);
+				// 载荷在 `node.data` 上（契约快照 §3：节点没有顶层 `content`）；保留
+				// 顶层 `content` 这条旧兜底，真实节点走的是 `data.content`。
+				const text =
+					contentBlocksText(node.data?.content) || contentBlocksText(node.content);
 				if (text !== "") push(bubble("user", text));
 				break;
 			}
@@ -256,7 +270,9 @@ export function ChatDesk(props) {
 				break;
 			case "command":
 			case "command-input":
-				push(muted(`⌘ /${data.command?.name ?? "命令"} 已执行`));
+				// `command` 的载荷就是 `CommandNode`（名字在 `data.name`）；`manual-compaction`
+				// 才是 `{ command, compaction }`（契约快照 §3 的 `ChatNodeDataMap`）。
+				push(muted(`⌘ /${data.command?.name ?? data.name ?? "命令"} 已执行`));
 				break;
 			case "compaction":
 			case "manual-compaction":
@@ -291,13 +307,12 @@ export function ChatDesk(props) {
 				push(muted("（工作流运行）"));
 				break;
 			default:
-				break; // turn-tail 等页脚行不进镜像
+				break; // 页脚行（turn-tail）已在 deriveChatDeskNodes 里滤掉；其余未列出的 kind 不画
 		}
 	}
-	if (partial != null && partial.blocks != null) {
-		const text = assistantBlocks(partial.blocks);
-		if (text !== "") push(bubble("assistant", `${text}▍`));
-	}
+	// 「正在吐字」不另读「吐到一半的那半截」（宿主顶层根本没有 `partial`，只有那层自称兼容投影的
+	// `legacy.partial`，宿主自己零消费）：流式中的那一条**由消息自己的状态**呈现
+	// （`assistantBubbleText` 认 `data.status === 'running'`，画「▍」）。
 	if (items.length === 0)
 		push(muted("对话会实时显示在这里；你对 AI 说话用页面底下的输入条。"));
 	// 外层是对话台自己的滚动容器（旧 ChatMirror 的 chatPaneRef 钉底滚动回归修复）：
@@ -352,8 +367,10 @@ export function ChatDesk(props) {
 					title:
 						"AI 在对话里答应/说过的事，如果工作台还没显示，点这个提醒它记下来",
 					onClick: () =>
+						// 票 10（判定三 #5）：原来写 `（style-note/progress 等）`——事件 type 是机器身份词，
+						// 不该出现在发给 AI 的人话里；这句与 client-entry.js 的那处逐字相同，两处一起改。
 						onNudge(
-							"工作台还没跟上，请把刚才答应的事落账（style-note/progress 等）",
+							"工作台还没跟上，请把刚才答应的事落账（比如风格线、进度）",
 						),
 				},
 				"⏰ 提醒 AI 记下来",

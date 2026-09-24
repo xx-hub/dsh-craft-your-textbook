@@ -8,12 +8,11 @@ import {
   goldN,
   paragraphReviewText,
   readMeta,
-  writeMeta,
+  updateMeta,
   appendEvent,
-  readEvents,
   workDir,
   workFile,
-  updateStyleLineMirror,
+  sealGoldStandard,
   wakeMainAI,
   handoff,
   advance,
@@ -49,20 +48,21 @@ export async function actGold(ctx, _req, res, action, sessionId, project, body) 
           id: `pr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
           at: Date.now(), chapter, target, kind, wish, status: 'pending',
         }
-        const reviews = Array.isArray(meta.pendingReviews) ? meta.pendingReviews : []
-        reviews.push(opinion)
-        meta.pendingReviews = reviews
-        meta.updatedAt = Date.now()
-        // 过目态下提段落意见：与整章意见同路径——先取原状态再落盘，转 running 交办修订（改完回来继续过目）。
+        // 过目态下提段落意见：与整章意见同路径——状态改在改法里（当场新读），转 running 交办修订
+        // （改完回来继续过目）。原先「改在手里那份旧状态上再整份写回」会把账高带回旧值（票 02）。
         const inChaptersReview = meta.status === 'awaiting-chapters-review'
-        meta.status = 'running'
-        if (inChaptersReview) {
-          meta.pendingStage = null
-          meta.chaptersReviewed = false
-        }
-        writeMeta(meta)
+        updateMeta(project, (state) => {
+          state.pendingReviews = [...(state.pendingReviews ?? []), opinion]
+          state.status = 'running'
+          if (inChaptersReview) {
+            state.pendingStage = null
+            state.chaptersReviewed = false
+          }
+        })
         const title = chapters[chapter - 1]?.title ?? `第${chapter}章`
-        appendEvent(project, 'textbook/review', { chapter, title, comment: paragraphReviewText(opinion), para: target?.para ?? null })
+        // 事件带 `reviewId`（与 meta.pendingReviews 的 id 同源）：深改截断账本时按它同步意见集合
+        // （票 13，engine 的 syncPendingReviewsAfterTruncate）——两条入账路径同形状，别只改一条。
+        appendEvent(project, 'textbook/review', { reviewId: opinion.id, chapter, title, comment: paragraphReviewText(opinion), para: target?.para ?? null })
         if (inChaptersReview) {
           handoff(ctx, project, 'chapters')
         } else {
@@ -90,11 +90,11 @@ export async function actGold(ctx, _req, res, action, sessionId, project, body) 
         id: `go-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
         at: Date.now(), target, kind, wish, status: 'pending',
       }
-      meta.goldOpinions = [...(meta.goldOpinions ?? []), opinion]
-      meta.updatedAt = Date.now()
-      writeMeta(meta)
+      const withOpinion = updateMeta(project, (state) => {
+        state.goldOpinions = [...(state.goldOpinions ?? []), opinion]
+      })
       appendEvent(project, 'textbook/gold-opinion', {
-        seq: meta.goldOpinions.filter((o) => o.status !== 'revoked').length,
+        seq: withOpinion.goldOpinions.filter((o) => o.status !== 'revoked').length,
         opinion: { ...opinion, target: target === null ? '笼统' : (target.hint || `第${target.para}段`) },
       })
       sendJson(res, 200, { ok: true, project, opinion })
@@ -102,13 +102,15 @@ export async function actGold(ctx, _req, res, action, sessionId, project, body) 
     }
     case 'gold-opinion-revoke': {
       assertSessionOwned(project, sessionId)
-      const meta = readMeta(project)
       // F39：段落级意见记在 pendingReviews（chapter 维度），撤销时两处都找。
-      const target = (meta.goldOpinions ?? []).find((o) => o.id === body.id)
-        ?? (meta.pendingReviews ?? []).find((r) => r.id === body.id)
+      let target
+      updateMeta(project, (state) => {
+        target = (state.goldOpinions ?? []).find((o) => o.id === body.id)
+          ?? (state.pendingReviews ?? []).find((r) => r.id === body.id)
+        if (target === undefined) return
+        target.status = 'revoked'
+      })
       if (target === undefined) { sendJson(res, 404, { ok: false, error: '没有这条意见' }); return }
-      target.status = 'revoked'
-      writeMeta(meta)
       sendJson(res, 200, { ok: true, project })
       return
     }
@@ -120,8 +122,6 @@ export async function actGold(ctx, _req, res, action, sessionId, project, body) 
         return
       }
       const pending = (meta.goldOpinions ?? []).filter((o) => o.status === 'pending')
-      // 本轮交办的意见转「AI 修订中」；新稿交工时再转「AI 已改」。
-      pending.forEach((o) => { o.status = 'sent' })
       const archive = join(workDir(project), '_旧版产物')
       mkdirSync(archive, { recursive: true })
       const stamp = Date.now().toString(36)
@@ -130,19 +130,23 @@ export async function actGold(ctx, _req, res, action, sessionId, project, body) 
         const target = workFile(project, name)
         if (existsSync(target)) { try { renameSync(target, join(archive, `${name}.${stamp}`)) } catch { /* 尽力归档 */ } }
       }
-      meta.goldRedoNote = pending.length > 0
+      const redoNote = pending.length > 0
         ? pending.map((o, i) => `#${i + 1}（${o.target === null ? '笼统' : o.target.hint || `第${o.target.para}段`}）${o.kind === 'dislike' ? '不喜欢' : o.kind === 'drop' ? '不需要' : '要改成'}${o.wish ? `：${o.wish}` : ''}`).join('；')
         : (typeof body.note === 'string' && body.note.trim() !== '' ? body.note.trim().slice(0, 500) : null)
-      meta.status = 'running'
-      meta.pendingStage = null
-      meta.pendingGate = null
-      writeMeta(meta)
+      // 本轮交办的意见转「AI 修订中」（新稿交工时再转「AI 已改」）＋置态，一次收进改法。
+      updateMeta(project, (state) => {
+        for (const o of state.goldOpinions ?? []) if (o.status === 'pending') o.status = 'sent'
+        state.goldRedoNote = redoNote
+        state.status = 'running'
+        state.pendingStage = null
+        state.pendingGate = null
+      })
       appendEvent(project, 'textbook/hint', { text: '✍️ 已把你的意见带给 AI，它正在照着修订最佳范例章，改完再请你过目。' })
       handoff(ctx, project, 'gold')
       // 演示书不唤醒主 AI（wakeMainAI 对 demo 直接跳过）：直接驱动状态机，
       // 由演示占位通道自己重生成范例章，否则永远停在「AI 修订中」。
       if (meta.demo === true) void kick(ctx, project)
-      sendJson(res, 200, { ok: true, project, redoNote: meta.goldRedoNote })
+      sendJson(res, 200, { ok: true, project, redoNote })
       return
     }
     case 'gold-chapter-set': {
@@ -155,17 +159,17 @@ export async function actGold(ctx, _req, res, action, sessionId, project, body) 
         return
       }
       if (meta.goldSealed != null || meta.phase >= 5) {
-        sendJson(res, 409, { ok: false, error: '范例章已定稿/铺章已开始；要换样例章请先驳回重做范例章' })
+        // 票 10（判定一 #3/#4）：这两条 409 会渲染到人眼，统一说「最佳范例章」。
+        sendJson(res, 409, { ok: false, error: '最佳范例章已定稿/写完整本已开始；要换最佳范例章请先驳回重做' })
         return
       }
       // 控制器裁决（F10）：gold 修订在飞（pendingStage=gold）时允许改选样例章——AI 交工后自然写新章；
       // 其余 AI 回合进行中一律拦住，避免打断它手里的活。
       if (meta.status === 'running' && meta.pendingStage !== 'gold') {
-        sendJson(res, 409, { ok: false, error: 'AI 正在干活；等它交工或先暂停，再改样例章' })
+        sendJson(res, 409, { ok: false, error: '我正在做；等交工或先暂停，再改最佳范例章' })
         return
       }
       const gn = goldN(meta)
-      meta.goldChapter = pick
       const archive = join(workDir(project), '_旧版产物')
       mkdirSync(archive, { recursive: true })
       const stamp = Date.now().toString(36)
@@ -174,12 +178,15 @@ export async function actGold(ctx, _req, res, action, sessionId, project, body) 
         const target = workFile(project, name)
         if (existsSync(target)) { try { renameSync(target, join(archive, `${name}.${stamp}`)); archived += 1 } catch { /* 尽力归档 */ } }
       }
-      meta.status = 'running'
-      meta.pendingStage = null
-      meta.pendingGate = null
-      writeMeta(meta)
+      // 改选落账走单一入口（当场新读）：原先拿请求开头那份旧状态整份写回（票 02 的形状）。
+      updateMeta(project, (state) => {
+        state.goldChapter = pick
+        state.status = 'running'
+        state.pendingStage = null
+        state.pendingGate = null
+      })
       appendEvent(project, 'textbook/gold-chapter', { chapter: pick, reason: String(body.reason ?? '').slice(0, 200), archived })
-      appendEvent(project, 'textbook/hint', { text: `📐 样例章改为第 ${pick} 章${archived > 0 ? '（旧范例章已留档，正在重写新范例章）' : ''}。` })
+      appendEvent(project, 'textbook/hint', { text: `📐 最佳范例章改为第 ${pick} 章${archived > 0 ? '（旧的最佳范例章已留档，正在重写）' : ''}。` })
       if (archived > 0 || meta.phase >= 4) handoff(ctx, project, 'gold')
       else void kick(ctx, project)
       // 演示书不唤醒主 AI（wakeMainAI 对 demo 直接跳过）：直接驱动状态机，
@@ -202,33 +209,16 @@ export async function actGold(ctx, _req, res, action, sessionId, project, body) 
         return
       }
       if (typeof body.targetWords === 'number' && Number.isFinite(body.targetWords) && body.targetWords >= 500) {
-        goldMeta.targetWords = Math.round(body.targetWords) // 兼容旧单值：仅作未填章的兜底
-        // 意见为空时上面 approved 路径不会 writeMeta，兜底值会随 advance 重读丢失，这里先落账。
-        writeMeta(goldMeta)
+        // 兼容旧单值：仅作未填章的兜底。走单一入口（当场新读）先落账——意见为空时下面 approved 路径
+        // 不写状态，兜底值会随 advance 重读丢失。
+        updateMeta(project, (state) => { state.targetWords = Math.round(body.targetWords) })
         appendEvent(project, 'textbook/hint', { text: '字数以每章清单为准；这个统一值只作未填章的兜底。' })
       }
       if (approved === true) {
         // 定稿沉淀：把尚未撤销的意见转成风格线（source:'gold'），并记金标准母版版本号。
-        const sealOpinions = (goldMeta.goldOpinions ?? []).filter((o) => o.status !== 'revoked')
-        if (sealOpinions.length > 0) {
-          const sealed = []
-          sealOpinions.forEach((o, i) => {
-            const kindText = o.kind === 'dislike' ? '不要这种写法' : o.kind === 'drop' ? '不要这类内容' : '要照此修改'
-            const entry = {
-              id: `sn-gold-${Date.now().toString(36)}-${i}`,
-              text: `${o.target === null ? '' : `${o.target.hint || `第${o.target.para}段`}：`}${kindText}--${o.wish}`,
-              at: Date.now(), source: 'gold', status: 'active', note: `来自金标准意见#${i + 1}`,
-            }
-            o.status = 'applied'
-            sealed.push(entry)
-          })
-          goldMeta.styleNotes = [...(goldMeta.styleNotes ?? []), ...sealed]
-          const goldVersions = readEvents(project).filter((e) => e.type === 'textbook/agent-end' && String(e.data?.label ?? '').includes('最佳范例章')).length
-          goldMeta.goldSealed = { version: Math.max(1, goldVersions), at: Date.now() }
-          writeMeta(goldMeta)
-          updateStyleLineMirror(project)
-          appendEvent(project, 'textbook/gold-seal', { version: goldMeta.goldSealed.version, count: sealed.length })
-        }
+        // 抽到 engine 的 sealGoldStandard（票 15④）：stage-submit gold 在 gold-skip 豁免下自动定稿时
+        // 走的是**同一个**沉淀函数，两条路径不许各写一份。它自己去读当场状态，不收meta参数（票 02）。
+        sealGoldStandard(project)
         appendEvent(project, 'textbook/hint', { text: '✅ 范例章已确认，开始写全书。' })
         advance(project, 4, 5)
         void kick(ctx, project)
@@ -245,11 +235,12 @@ export async function actGold(ctx, _req, res, action, sessionId, project, body) 
           }
         }
         // 整版重写：明确告知 AI 这不是逐条修订，是推翻重来（意见保留为方向）。
-        goldMeta.goldRedoNote = '整版重写：不参考上一稿的结构与表述，按学习目标与材料全新生成；用户意见仅作为方向参考。'
+        // 走单一入口（当场新读）：「最后动静时刻」只归「记一笔」所有，改法里不再自己写 updatedAt。
+        updateMeta(project, (state) => {
+          state.goldRedoNote = '整版重写：不参考上一稿的结构与表述，按学习目标与材料全新生成；用户意见仅作为方向参考。'
+          state.status = 'running'
+        })
         appendEvent(project, 'textbook/hint', { text: '↩️ 范例章已标记重写，AI 正在重新生成。' })
-        goldMeta.status = 'running'
-        goldMeta.updatedAt = Date.now()
-        writeMeta(goldMeta)
         void kick(ctx, project)
       }
       sendJson(res, 200, { ok: true, project, approved })

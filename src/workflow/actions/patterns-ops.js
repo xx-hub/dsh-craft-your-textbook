@@ -12,7 +12,7 @@ import {
   sanitizeFolderName,
   freeBookDir,
   readMeta,
-  writeMeta,
+  createMeta,
   appendEvent,
   listProjects,
   customPatternsDir,
@@ -151,7 +151,7 @@ export async function actPatternsOps(ctx, _req, res, action, sessionId, project,
         phase: 2, status: 'running',
         createdAt: Date.now(), updatedAt: Date.now(), eventCount: 0,
       }
-      writeMeta(meta)
+      createMeta(meta)
       appendEvent(id, 'textbook/phase-start', { phase: 1, label: PHASE_LABELS[1] })
       appendEvent(id, 'textbook/phase-end', { phase: 1, label: PHASE_LABELS[1] })
       appendEvent(id, 'textbook/phase-start', { phase: 2, label: PHASE_LABELS[2] })

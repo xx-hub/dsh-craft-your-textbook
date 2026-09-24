@@ -7,14 +7,29 @@
 
 import { createElement, useState } from "react";
 import { S } from "./styles.js";
-import { formatTime } from "./rules.js";
-// 六阶段 canonical 全称（共享领域规则）。
-import { PHASES } from "../domain-rules.js";
+import { formatTime, humanDuration } from "./rules.js";
+// 界面用词表（批 2）：六阶段在界面上的字只此一份。
+import { phaseUi, gateHuman } from "./view-rules.js";
 
 // ── 协作状态条：现在轮到谁 ───────────────────────────────────────────────────
 
+/** 「轮到你」时你到底该做什么——一句大白话，按书的 status 给。
+ *  批 1（2026-09-20）：状态词收敛成「轮到你 / 我正在做 / 已完成」，见 CONTEXT.md「工作台状态词」。 */
+function humanTurnAction(status, gate, phase) {
+	if (status === "awaiting-explore") return "确认读到的材料重点对不对";
+	if (status === "awaiting-outline") return "确认章节安排";
+	if (status === "awaiting-gold") return "确认最佳范例章";
+	if (status === "awaiting-chapters-review") return "逐章过目";
+	if (status === "awaiting-final-approval") return "对整本书做最后把关";
+	// 批 4：原来写「拍板第 1 关」——同一屏的步清单写「第 1 次拍板 · 学习目标与难点」，两套词。
+	if (gate !== null && gate.status === "awaiting")
+		return gateHuman(gate.gate);
+	if (phase === 1) return "上传教材（开始转换后 AI 会自动接手）";
+	return "看一眼下面的卡片";
+}
+
 export function StatusStrip(props) {
-	const { meta, gate, pendingStage, progressDetail, metaLabel } = props;
+	const { meta, gate, pendingStage, progressDetail, metaLabel, humanTurn } = props;
 	const status = meta?.status ?? "active";
 	const phase = meta?.phase ?? 1;
 	let text = null;
@@ -25,26 +40,21 @@ export function StatusStrip(props) {
 	} else if (status === "error" || status === "needs-config") {
 		text =
 			status === "error"
-				? "⚠️ 出错了 · 请看下面的提示"
-				: "🔑 需要配置 · 请看下面的提示";
-		tone = "error";
-	} else if (gate !== null && gate.status === "awaiting") {
-		text = `⚡ 轮到你 · 拍板第 ${gate.gate} 关`;
-		tone = "you";
-	} else if (status === "awaiting-gold") {
-		text = "⚡ 轮到你 · 确认最佳范例章";
-		tone = "you";
-	} else if (status === "awaiting-explore") {
-		text = "⚡ 轮到你 · 确认探查结果";
-		tone = "you";
-	} else if (phase === 1) {
-		text = "📤 轮到你 · 上传教材（开始转换后 AI 会自动接手）";
+				? "⚠️ 轮到你 · 出错了，请看下面的提示"
+				: "🔑 轮到你 · 需要配置，请看下面的提示";
+		tone = status === "error" ? "error" : "you";
+		// ⚡ 批 1 根因修复：原来这里按 status 逐条列举 awaiting-*，漏了 awaiting-outline /
+		//    awaiting-chapters-review / awaiting-final-approval，于是终检屏落到 else 说
+		//    「AI 正在准备下一步…」——与同屏的「等你把关」直接矛盾。
+		//    现在「轮到谁」只在 client-entry 的 humanTurn 里判一次，这里只负责翻译成一句话。
+	} else if (humanTurn === true || (gate !== null && gate.status === "awaiting")) {
+		text = `⚡ 轮到你 · ${humanTurnAction(status, gate, phase)}`;
 		tone = "you";
 	} else if (pendingStage !== null && pendingStage !== undefined) {
-		text = `🤖 AI 干活中 · ${metaLabel ?? ""}${progressDetail ? `　⏳ ${progressDetail}` : ""}`;
+		text = `🤖 我正在做 · ${metaLabel ?? ""}${progressDetail ? `　⏳ ${progressDetail}` : ""}`;
 		tone = "ai";
 	} else {
-		text = "🤖 AI 正在准备下一步…";
+		text = "🤖 我正在做 · 准备下一步";
 		tone = "ai";
 	}
 	const bg = {
@@ -78,38 +88,69 @@ export function StatusStrip(props) {
 	);
 }
 
-// ── 主 AI 活性行（F17）：AI 回合进行中 / 账面 N 分钟没动静[戳一下 AI] / 等你拍板 ─────
+// ── 主 AI 活性行（F17）：AI 回合进行中 / N 分钟没动静了 [🔁 从断点继续] / 轮到你 ─────
 
+/**
+ * 活性行是「多久没动静」这一屏**唯一的出口**（票 stale-detection/01）。
+ *
+ * 判定不在这里算：`stall` 是 `src/ui/rules.js` 的 `deriveStallJudgment` 算出来的**同一份**结果
+ * （三路输入：主 AI 在跑 / 账本新鲜度 / 有小助手在跑，门槛 5 分钟），状态卡消费的也是它——
+ * 两处逐字抄过一遍算式，正是这次「同一行自己打自己」的根因。
+ *
+ * 措辞只说**可见事实**（`N 分钟没动静了`），不下「卡住了」这个诊断：机器只看得到账本，
+ * 看不到 AI 内部。停顿时长按分钟说（`humanDuration`，与状态卡计时共用一份格式化）。
+ * 判停时这句仍然先说状态词「🤖 我正在做」——照用户上报那屏的原句形态（「🤖 我正在做 · 好像卡住了」），
+ * 撤掉的只是那句诊断与重复出口；状态卡那一行的「只报时长」是**另一件事**（它是这一步的计时行）。
+ *
+ * 小助手状态来自宿主推送的会话摘要（`indexSubagentDescendants` 的口径），**不再自己轮询计数**：
+ * 这里只说「N 个小助手在跑」；「📥 N 个完成待收」已撤——它的真身是「记录只存在于磁盘上」，
+ * 每一条曾经创建过的子代理都算，跟「干完了等你收」没有关系，对用户也没有可操作性。
+ */
 export function ActivityLine(props) {
-	const { meta, aiActive, onNudge, subagents } = props;
-	const staleMs = meta != null ? Date.now() - (meta.updatedAt ?? 0) : 0;
-	// F35（2026-08-20 走查）：聚合主会话的审计/写作子代理状态——running=在跑、inactive=完成待收；
-	// 对应为 0 不显示，全 0 不显示聚合行（不打扰既有活性行）。
-	const agg = { running: 0, inactive: 0, ...(subagents ?? {}) };
-	const aggText = [
-		agg.running > 0 ? `🔎 ${agg.running} 个审计在跑` : null,
-		agg.inactive > 0 ? `📥 ${agg.inactive} 个完成待收` : null,
-	]
-		.filter(Boolean)
-		.join(" · ");
-	const content = aiActive
-		? "🤖 AI 回合进行中"
-		: meta?.status === "running"
-			? createElement(
-					"span",
-					null,
-					`⏱ 账面 ${Math.round(staleMs / 60000)} 分钟没动静 `,
-					createElement(
-						"button",
-						{
-							style: S.smallLink,
-							onClick: onNudge,
-							title: "给主 AI 发一条提醒，让它继续推进（不打断它正在做的事，也不会取消）",
-						},
-						"[戳一下 AI]",
-					),
-				)
-			: "⚡ 等你拍板/确认";
+	const { meta, stall, subagents, humanTurn, onResume } = props;
+	const runs = { count: 0, runningCount: 0, ...(subagents ?? {}) };
+	const aggText =
+		Number.isSafeInteger(runs.runningCount) && runs.runningCount > 0
+			? `🔎 ${runs.runningCount} 个小助手在跑`
+			: "";
+	// 三态词（2026-09-20 用户拍板）：轮到你 / 我正在做 / 已完成。
+	// 「轮到谁」先看 humanTurn，再看状态与活性（2026-09-20 02 屏判读实测的矛盾：那个会话
+	// status=running 但第 1 次拍板正等用户定，状态条写「⚡ 轮到你」、活性行却说「我正在做」）。
+	// 轮到用户时，状态条已经在说「⚡ 轮到你 · <要你做什么>」，这一行再喊一遍就是两行同话：
+	// 只留子代理聚合；连聚合都没有就整行不出现。
+	const stalled = (stall ?? {}).stalled === true;
+	const content =
+		humanTurn === true
+			? null
+			: // 已交付＝全书完成：此时既不是「轮到你」也不是「我正在做」（真 GUI 判读实测：
+				// 已交付的《工业大数据分析》活性行还写着「⚡ 轮到你」，同一屏却在大喊「🎉 书做好了」）。
+				meta?.status === "delivered"
+				? "✅ 已完成"
+				: meta?.status !== "running"
+					? "⚡ 轮到你"
+					: stalled
+						? createElement(
+								"span",
+								null,
+								`🤖 我正在做 · ${humanDuration(stall.idleMs)}没动静了 `,
+								createElement(
+									"button",
+									{
+										style: S.smallLink,
+										onClick: onResume,
+										// 票 stale-detection/01：原来那颗写着「让 AI 接着干」、做的只是「催一句」
+										// （标签与动作本身对不上），而且没有活着的主 AI 时直接报错。
+										// 现在发「从断点继续」：会写状态、清暂停标记、必要时重新交办，
+										// 没有活的主 AI 时还能退回推状态机这条路。
+										title:
+											"让 AI 从断点接着做完这一步（不重做已完成的部分；它没在跑时也能把它叫起来）",
+									},
+									"🔁 从断点继续",
+								),
+							)
+						: "🤖 我正在做";
+	// 轮到用户、又没有子代理聚合 → 整行不出现（状态条已经说了「轮到你 · 要你做什么」）。
+	if (content === null && aggText === "") return null;
 	return createElement(
 		"div",
 		{
@@ -202,7 +243,7 @@ export function AutoFollowAwaitNote(props) {
 		createElement(
 			"span",
 			{ style: { flex: 1 } },
-			"⚡ AI 在等你拍板，已切回现在",
+			"⚡ 轮到你，已切回现在",
 		),
 		createElement(
 			"button",
@@ -223,7 +264,7 @@ export function AutoFollowProgressNote(props) {
 			onClick: props.onJump,
 		},
 		createElement("style", null, AUTO_FOLLOW_KEYFRAMES),
-		createElement("span", { style: { flex: 1 } }, "▶ AI 正在干活--点此跳过去"),
+		createElement("span", { style: { flex: 1 } }, "▶ 我正在做，点此跳过去"),
 		createElement(
 			"button",
 			{
@@ -265,7 +306,7 @@ export function TopBar(props) {
 		createElement(
 			"span",
 			{ style: { fontSize: "12px", opacity: 0.75 } },
-			`一起做到：${PHASES.find((x) => x.n === meta?.phase)?.label ?? ""}`,
+			`一起做到：${phaseUi(meta?.phase)}`,
 		),
 		createElement("span", { style: { flex: 1 } }),
 		styleCount > 0
@@ -291,15 +332,34 @@ export function TopBar(props) {
 				)
 			: null,
 		meta?.pause != null
-			? createElement(
-					"button",
-					{
-						style: { ...S.smallLink, color: "#1a7f37" },
-						onClick: resume,
-						title: "继续从断点接着写",
-					},
-					"▶ 已暂停·点继续",
-				)
+			? [
+					// 票 10（spec §3 热区表把「顶栏 ⏸ 暂停 / ▶ 已暂停·点继续」判**不合法**；不变量 2
+					// 「一个热区只干一件事」）：**状态归状态**——「已暂停」是纯指示，不是 `<button>`、
+					// 没有 onClick、不替用户发动作；也故意不借 `S.smallLink`（那套带 `cursor:pointer`
+					// ＋下划线，会让纯指示看着像能点）。旧文案「▶ 已暂停·点继续」把状态陈述与动作
+					// 缝进同一句话、还与「⏸ 暂停」共用位置，已退役。
+					createElement(
+						"span",
+						{
+							key: "paused-indicator",
+							style: { fontSize: "12px", opacity: 0.75 },
+							title: "这本书现在是暂停的",
+						},
+						"⏸ 已暂停",
+					),
+					// **动作归动作**：独立的「▶ 继续」，独占自己的热区；文案只说动作、不说状态
+					// （spec §3 热区表：改法＝一颗显式按钮「▶ 继续」）。
+					createElement(
+						"button",
+						{
+							key: "resume-button",
+							style: { ...S.smallLink, color: "#1a7f37" },
+							onClick: resume,
+							title: "继续从断点接着写",
+						},
+						"▶ 继续",
+					),
+				]
 			: createElement(
 					"button",
 					{
@@ -442,11 +502,6 @@ export function IntervenePanel(props) {
 								)
 							: null,
 						createElement("div", null, item.text ?? ""),
-						createElement(
-							"p",
-							{ style: { margin: "2px 0 0", fontSize: "12px", opacity: 0.6 } },
-							"AI 到下个停靠点会看到并处理，不打断它手里的活。",
-						),
 					),
 				),
 		createElement(
@@ -503,7 +558,7 @@ export function PatternPanel(props) {
 					lineHeight: 1.6,
 				},
 			},
-			"粘贴一段你想要的教法/章节结构描述，AI 会把它提炼成一张「模式卡」加入这本书的模式库；第 2 关「教学模式选型」和写作规范都会优先参考它。",
+			"粘贴一段你想要的教法/章节结构描述，AI 会把它提炼成一张「模式卡」加入这本书的模式库；第 2 次拍板「教学方法与板块」和写作规范都会优先参考它。",
 		),
 		createElement("textarea", {
 			style: { ...S.textarea, minHeight: "64px" },

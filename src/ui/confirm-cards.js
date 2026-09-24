@@ -30,6 +30,7 @@ export function ExploreConfirmCard(props) {
 	// 注：调用方（WorkbenchView）仍会传 meta，但本卡不使用——不解构以免未用变量。
 	const {
 		exploreSummary,
+		knowledgeMapText,
 		project,
 		session,
 		onConfirm,
@@ -46,36 +47,19 @@ export function ExploreConfirmCard(props) {
 	const [rejecting, setRejecting] = useState(false);
 	const [reasons, setReasons] = useState([]);
 	const [rejectNote, setRejectNote] = useState("");
-	// 知识地图（work/knowledge-map.json）通过现有文件接口读取并渲染成可读清单，
-	// 让用户真正"看到"AI 从材料里整理出了什么，而不只是几个数字。
-	const [km, setKm] = useState(null);
-	useEffect(() => {
-		let alive = true;
-		setKm(null);
-		if (project === null || project === undefined) return undefined;
-		fetch(
-			`/textbook/file?session=${encodeURIComponent(session)}&project=${encodeURIComponent(project)}&path=${encodeURIComponent("work/knowledge-map.json")}`,
-		)
-			.then((res) =>
-				res.ok ? res.text() : Promise.reject(new Error(`HTTP ${res.status}`)),
-			)
-			.then((text) => {
-				// 解析失败等同读取失败（原实现靠链尾 .catch 兼容，此处改为局部捕获，行为不变）：
-				// 不渲染知识地图清单、不阻断确认流程。
-				try {
-					const parsed = JSON.parse(text);
-					if (alive) setKm(parsed);
-				} catch {
-					/* 保持 km 为 null */
-				}
-			})
-			.catch(() => {
-				/* 读取失败不影响确认卡；展示不了清单也不阻塞流程 */
-			});
-		return () => {
-			alive = false;
-		};
-	}, [project, session]);
+	// 知识地图（work/knowledge-map.json）原文由父级随事件一起取回（它随 /textbook/events
+	// 下发的 knowledgeMap 字段，见 workflow.js）：这是**机器产物**，`/textbook/file` 按
+	// 「给人读的产物」收窄后已拒绝它（票 04）；它的人读形态是这张卡片内联的折叠清单（票 05）。
+	// 解析失败等同于没有清单：不渲染知识地图清单、不阻断确认流程。
+	let km = null;
+	if (typeof knowledgeMapText === "string" && knowledgeMapText !== "") {
+		try {
+			const parsed = JSON.parse(knowledgeMapText);
+			if (parsed !== null && typeof parsed === "object") km = parsed;
+		} catch {
+			/* 保持 km 为 null */
+		}
+	}
 	// F30（2026-08-20 走查）：源探查报告（work/explore.md）默认置顶展示。
 	// 有 reportText（父级/测试注入）直接用（含首次渲染）；否则按上面 knowledge-map 的
 	// 同一方式拉取，读取失败不抛错、报告为空也不影响卡片其余功能（优雅降级）。
@@ -142,7 +126,7 @@ export function ExploreConfirmCard(props) {
 					createElement(
 						"p",
 						{ style: { margin: "0 0 6px", fontSize: "12px", opacity: 0.8 } },
-						"📋 源探查报告（AI 通读后的完整记录）：",
+						"📋 读材料报告（AI 通读后的完整记录）：",
 					),
 					...reportBlocks,
 				)
@@ -150,7 +134,7 @@ export function ExploreConfirmCard(props) {
 		createElement(
 			"strong",
 			{ style: { fontSize: "14px" } },
-			"🔍 源探查做完了！",
+			"🔍 材料读完了！",
 		),
 		createElement(
 			"p",
@@ -341,7 +325,9 @@ export function ExploreConfirmCard(props) {
 					createElement(
 						"p",
 						{ style: { margin: "0 0 6px", fontWeight: 600 } },
-						"哪里不满意？（点选或写一句，10 秒内搞定）",
+						// 票 14（承诺账 D「说不清」第 7 条）：「10 秒」估的是用户自己的操作成本、
+						// 不是系统耗时，代码里断不了真假——收掉这个数字（点选或写一句本身已经够短）。
+						"哪里不满意？（点选或写一句）",
 					),
 					createElement(
 						"div",
@@ -466,7 +452,7 @@ export function OutlineConfirmCard(props) {
 		createElement(
 			"p",
 			{ style: { margin: "6px 0" } },
-			`AI 计划把这本书分成 ${chapters.length} 章${totalWords > 0 ? `，全书大约 ${totalWords} 字` : ""}。每章标好了用材料的哪一块、覆盖哪些知识点、大概写多长。满意点「通过」，AI 先写最佳范例章（第 ${safePick} 章当全书样板）给你过目；要调就点「提改进方向」。`,
+			`AI 计划把这本书分成 ${chapters.length} 章${totalWords > 0 ? `，全书大约 ${totalWords} 字` : ""}。每章标好了用材料的哪一块、覆盖哪些知识点、大概写多长。满意点「通过」，AI 先把第 ${safePick} 章当最佳范例章写出来给你过目；要调就点「让 AI 重做」。`,
 		),
 		createElement(
 			"div",
@@ -551,7 +537,9 @@ export function OutlineConfirmCard(props) {
 			createElement(
 				"span",
 				{ style: { fontSize: "12px" } },
-				`📐 AI 建议用第 ${safePick} 章当样例章：${goldReason !== "" ? goldReason : "（未给理由）"}`,
+				// 票 10（判定一 #3）：「样例章」与同一张卡下面按钮上的「最佳范例章」是同一件事两种叫法，
+				// 统一取界面词表定的「最佳范例章」（CONTEXT.md「范例章」词条：对外统一为最佳范例章）。
+				`📐 AI 建议用第 ${safePick} 章当最佳范例章：${goldReason !== "" ? goldReason : "（未给理由）"}`,
 			),
 			chapters.length > 1
 				? createElement(
@@ -642,7 +630,7 @@ export function OutlineConfirmCard(props) {
 							onClick: () => onConfirm(true, note, safePick),
 							disabled: busy,
 						},
-						"✅ 通过，开始写范例章",
+						"✅ 通过，开始写最佳范例章",
 					),
 					createElement(
 						"button",
@@ -655,7 +643,9 @@ export function OutlineConfirmCard(props) {
 							onClick: () => setRejecting(true),
 							disabled: busy,
 						},
-						"🔁 提改进方向",
+						// 票 10（判定一 #7）：与另一张确认卡的「🔁 让 AI 重做」是同一动作，统一成这一句
+						// （引擎播报里告诉用户点哪个按钮的话也同步改了）。
+						"🔁 让 AI 重做",
 					),
 				),
 	);

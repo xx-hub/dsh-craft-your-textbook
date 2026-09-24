@@ -117,12 +117,17 @@ function preValidate(actionName, args) {
       need(typeof args.approved === 'boolean', 'chapters-review-confirm 需要 approved（true=都过了，开始合并）')
       break
     case 'final-approve':
-      need(typeof args.approved === 'boolean', 'final-approve 需要 approved（true=认可终检结果，交付；false=驳回，需 note）')
+      need(typeof args.approved === 'boolean', 'final-approve 需要 approved（true=认可最后检查结果，交付；false=驳回，需 note）')
       if (args.approved === false) need(typeof args.note === 'string' && args.note.trim() !== '', 'final-approve approved=false 需要 note（对整本书的改进意见）')
       break
     case 'deep-modify':
       need(typeof args.segment === 'string' && args.segment !== '', 'deep-modify 需要 segment（历史段 key，如 outline/chapter-2）')
       need(typeof args.note === 'string' && args.note.trim() !== '', 'deep-modify 需要 note（这次要改什么）')
+      break
+    case 'audit-submit':
+      // 不带 auditJson 就验书里那份 work/audit-NN.md；带了必须是 JSON 字符串（服务端按字符串判真假）。
+      need(args.auditJson === undefined || typeof args.auditJson === 'string',
+        'audit-submit 的 auditJson 必须是 JSON 字符串（或省略——机器直接验书里的 work/audit-NN.md）')
       break
     default:
       break
@@ -231,6 +236,10 @@ function apply(ctx, config) {
         finalReport: detail.finalReport ?? null,
         lastEvent: last === null ? null : { type: last.type, text: last.data?.text ?? last.data?.label ?? last.data?.title ?? '' },
         paused: detail.meta?.pause != null ? { ...detail.meta.pause } : null,
+        // 票 dsh-contract-drift/01 的载体：**按下暂停时还有几个小助手在跑**这个事实（暂停那一刻记下的）。
+        // 只有那个数，不含名字/编号——要看是哪几个，你自己有 list_agents；没有小助手时是 0。
+        // 没暂停、或当时数不出来（宿主没挂投影注册表）时是 null（「不知道」，不是 0）。
+        pausedSubagentsRunning: detail.meta?.pause?.subagentsRunning ?? null,
         styleNotes: (detail.meta?.styleNotes ?? []).map((n) => ({ id: n.id, text: n.text, status: n.status, note: n.note ?? null })),
         waivers: detail.meta?.waivers ?? [],
         pendingInterventions: detail.pendingInterventions ?? [],
@@ -251,13 +260,13 @@ function apply(ctx, config) {
 
   ctx.tools.register(defineToolLocal({
     name: 'workbench_act',
-    description: '与造书工作台交互。两类用法：① 流水线内务（机器派给你的活）：stage-brief 领任务说明、progress 上报进度、stage-submit 交工——这三类直接调用，不需要征求用户同意；② 代用户操作（改书名/改目标/建书/拍板/回退/重试/删除/终检认可）——仅在用户明确同意后调用。action 取值：stage-brief、stage-submit、progress、create（建书，需 name/goal，可选 route/science）、rename（改书名，需 name）、set_goal（改学习目标，需 goal）、gate（关卡拍板，需 gate/version/approved，可选 note）、rollback（回退，需 snapshot 序号）、resume（重试/继续）、delete（删除这本书）。协作动作：style-note（记风格线）、intervene（留言）、pause（强制中断）、nudge（催办：把用户一句话以 notice 唤醒主 AI，不中断不 cancel）为内务可直接调用；waive（豁免，必须先引导用户在界面手输原因）、outline-confirm、chapters-review-confirm（全章过目确认：全章写完后替用户点「都过了」时用，需 approved=true）、final-approve（终检结果认可：终检全过后用户在终检结果卡点「认可/不满意」时用，需 approved=true/false；approved=false 必须带 note 改进意见）、gold-opinion/gold-revise/gold-chapter-set/gold 定稿类必须用户明确同意后调用。定点修改（改历史）：deep-modify（用户在界面上点定点修改时走这条，需 segment/note）、deep-undo（撤销最近一次深改）；对话里用户说改历史也必须引导走工作台的定点修改流程，不要自己改账本或产物。',
+    description: '与造书工作台交互。两类用法：① 流水线内务（机器派给你的活）：stage-brief 领任务说明、progress 上报进度、audit-submit 把范例章审计结论交给机器即时验形状、stage-submit 交工——这几类直接调用，不需要征求用户同意；② 代用户操作（改书名/改目标/建书/拍板/回退/重试/删除/最后检查认可）——仅在用户明确同意后调用。action 取值：stage-brief、stage-submit、progress、audit-submit（真实模式下，范例章审计结论落盘后先交这里：机器当场验 5 个必读文件各一行 {file, quote} 与 quote 逐字、passed 判定，不合格当场把机器看到的行键/样例/缺口说清；可带 auditJson 正文由机器落盘，不带就验书里那份 work/audit-NN.md）、create（建书，需 name/goal，可选 route/science）、rename（改书名，需 name）、set_goal（改学习目标，需 goal）、gate（拍板，需 gate/version/approved，可选 note）、rollback（回退，需 snapshot 序号）、resume（重试/继续）、delete（删除这本书）。协作动作：style-note（记风格线）、intervene（留言）、pause（强制中断）、nudge（催办：把用户一句话以 notice 唤醒主 AI，不中断不 cancel）为内务可直接调用；waive（豁免，必须先引导用户在界面手输原因）、outline-confirm、chapters-review-confirm（全章过目确认：全章写完后替用户点「都过了」时用，需 approved=true）、final-approve（最后检查结果认可：最后检查全过后用户在最后检查结果卡点「认可/不满意」时用，需 approved=true/false；approved=false 必须带 note 改进意见）、gold-opinion/gold-revise/gold-chapter-set/gold 定稿类必须用户明确同意后调用。定点修改（改历史）：deep-modify（用户在界面上点定点修改时走这条，需 segment/note）、deep-undo（撤销最近一次深改）；对话里用户说改历史也必须引导走工作台的定点修改流程，不要自己改账本或产物。',
     parameters: {
       action: {
         type: 'string', required: true,
-        description: 'stage-brief | stage-submit | progress | create | rename | set_goal | gate | rollback | resume | nudge | delete | chapters-review-confirm | final-approve | deep-modify | deep-undo',
+        description: 'stage-brief | stage-submit | progress | audit-submit | create | rename | set_goal | gate | rollback | resume | nudge | delete | chapters-review-confirm | final-approve | deep-modify | deep-undo',
       },
-      stage: { type: 'string', description: 'stage-brief/stage-submit 用的阶段名：explore|gate|outline|gold|chapters|merge|final；progress 时（铺章阶段可选）：本章流水线阶段 writing|auditing|audited|finalizing|done' },
+      stage: { type: 'string', description: 'stage-brief/stage-submit 用的阶段名：explore|gate|outline|gold|chapters|merge|final；progress 时（写完整本阶段可选）：本章流水线阶段 writing|auditing|audited|finalizing|done' },
       segment: { type: 'string', description: 'deep-modify 时：要定点修改的历史段 key（explore|gate-1|gate-2|gate-3|outline|gold|chapter-N|merge|final）' },
       // —— stage-submit 各阶段的交付内容 ——
       title: { type: 'string', description: '交工 gate 时：一句话标题' },
@@ -267,8 +276,34 @@ function apply(ctx, config) {
       goldChapter: { type: 'number', description: '交工 outline 时：建议的样例章章号（1 基，默认 1）；outline-confirm 时：用户改选的样例章章号' },
       goldChapterReason: { type: 'string', description: '交工 outline 时：一句理由（哪章最能代表全书风格/结构最完整/材料最充分）' },
       chapter: { type: 'number', description: '交工 chapters 时：第几章；gold-chapter-set 时：目标样例章章号（1 基）；progress 时：正在汇报的是第几章（1 基，与 stage 一起进章节流水线账本，工作台章节卡显示流水灯）；交工 chapters 时机器验该章 audit-NN.md 的 passed===true、无未处置抽查意见、无脚手架残留才放行' },
+      handledReviews: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { id: { type: 'string' }, how: { type: 'string' } },
+          required: ['id', 'how'],
+          additionalProperties: false,
+        },
+        description: '交工 chapters 时：本回合处置过的本章抽查意见，逐条点名 [{id: 意见 id（见 workbench_status 的 pendingReviews / brief.pendingReviews）, how: 一句人话说明这条你怎么处置的}]。机器只给点名的置为已处置，没点名的继续拦；该章意见未处置机器会拒收这章交工。',
+      },
       preface: { type: 'string', description: '交工 merge 时：书的前言/使用说明（≤300 字）。注意：交工 merge 前必须先做合并前跨章审计（读全部章核对事实一致性/术语统一/交叉引用悬空/知识递进链），把审计结论落盘 work/audit-cross.md——机器验该文件存在才放行合并，没落盘会 400 拒收' },
+      auditJson: { type: 'string', description: 'audit-submit 时：范例章审计 JSON 的正文（可省——省了就验书里已有的 work/audit-NN.md）。带了必须是一整份严格 JSON，机器验形状合格后由机器落盘；不合格当场 400，报错里带机器解析到的行键与样例、契约行形状与 5 个必读文件、以及差在哪一项' },
       report: { type: 'string', description: '交工 final 时：你的最后检查报告（人话）' },
+      styleCheck: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            status: { type: 'string', enum: ['adopted', 'conflict', 'superseded'] },
+            note: { type: 'string' },
+            chapter: { type: 'string' },
+          },
+          required: ['id', 'status'],
+          additionalProperties: false,
+        },
+        description: '交工 final 时：对每条生效中的风格线逐条交代去向 [{id: 风格线 id（见 workbench_status 的 styleNotes 里 status 为 active 的）, status: adopted（已落实）/ conflict（与某章冲突）/ superseded（已不再适用）, note: conflict 必写一句冲突理由, chapter: 落实在哪章（可选）}]。漏一条机器会 400 拒收；一条风格线都没有时可以不传。',
+      },
       // —— progress ——
       label: { type: 'string', description: 'progress 时：正在做什么（如「写第3章」）' },
       // —— 代用户操作 ——
@@ -276,7 +311,7 @@ function apply(ctx, config) {
       goal: { type: 'string', description: 'create/set_goal 时的学习目标' },
       route: { type: 'string', description: 'create 时：blueprint=给 AI 老师上课用（推荐），human=给人直接读的教材' },
       science: { type: 'boolean', description: 'create 时：理科内容（公式较多）为 true' },
-      gate: { type: 'string', description: 'gate 时的关卡号' },
+      gate: { type: 'string', description: 'gate 时的拍板序号' },
       version: { type: 'number', description: 'gate 时的版本号' },
       approved: { type: 'boolean', description: 'gate 时：true=通过，false=驳回；chapters-review-confirm 时：true=全章都过了，开始合并' },
       snapshot: { type: 'number', description: 'rollback 时回退到的快照序号' },
@@ -284,7 +319,7 @@ function apply(ctx, config) {
       text: { type: 'string', description: 'style-note/intervene 时：意见或留言内容；nudge 时：催办语（一句话，可省）' },
       source: { type: 'string', description: 'style-note 时：wizard|ui|chat（对话里识别的用 chat）' },
       id: { type: 'string', description: 'style-note-revoke/intervene-done/gold-opinion-revoke/waive-revoke 时：条目 id' },
-      item: { type: 'string', description: 'waive 时：豁免项枚举（gate-skip 跳过「请你拍板」的设计关卡 / outline-skip 跳过「章节安排」确认 / gold-skip 跳过「最佳范例章」确认 / audit-skip 不要求每章都有独立审查 / scaffold-keep 保留 AI 的笔记不删 / route-override 改变已定的使用路线 / progress-skip 跳过「进度账本」检查 / other 其他）' },
+      item: { type: 'string', description: 'waive 时：豁免项枚举（gate-skip 跳过「请你拍板」的设计环节 / outline-skip 跳过「章节安排」确认 / gold-skip 跳过「最佳范例章」确认 / audit-skip 不要求每章都有独立审查 / scaffold-keep 保留 AI 的笔记不删 / progress-skip 跳过「进度账本」检查 / other 其他）' },
       userNote: { type: 'string', description: 'waive 时：用户在界面手输的原因（放行必要条件）' },
       reason: { type: 'string', description: 'pause 时：中断原因（给账本与恢复上下文）' },
       target: { type: 'string', description: 'intervene 时：留言指向（如「第4章」）' },
@@ -332,6 +367,14 @@ function apply(ctx, config) {
               : {}),
           }
           break
+        case 'audit-submit':
+          // 写入侧校验（票 audit-matrix-contract/01 (b)）：范例章审计结论先交这里让机器即时验形状。
+          // 不带 auditJson 就验书里那份 work/audit-NN.md；带了原样转发进 HTTP 体，由服务端验并落盘。
+          body = {
+            action: 'audit-submit',
+            ...(typeof args.auditJson === 'string' && args.auditJson.trim() !== '' ? { auditJson: args.auditJson } : {}),
+          }
+          break
         case 'stage-submit': {
           const stage = String(args.stage ?? '')
           if (stage === '') throw new Error('stage-submit 需要 stage（explore|gate|outline|gold|chapters|merge|final）')
@@ -355,12 +398,28 @@ function apply(ctx, config) {
           } else if (stage === 'chapters') {
             if (!Number.isSafeInteger(Number(args.chapter))) throw new Error('交工 chapters 需要 chapter（第几章）')
             body.chapter = Number(args.chapter)
+            // 票 09：交工点名销号——把 handledReviews 原样透传给服务端（机器只给点名的置为已处置）。
+            // 必须是真数组：服务端按 Array.isArray 判真假，字符串会被当成「一条都没点名」。
+            if (args.handledReviews !== undefined) {
+              if (!Array.isArray(args.handledReviews)) {
+                throw new Error('handledReviews 需要数组 [{id, how}]（每条点名一条抽查意见）')
+              }
+              body.handledReviews = args.handledReviews
+            }
           } else if (stage === 'merge') {
             if (typeof args.preface !== 'string' || args.preface.trim() === '') throw new Error('交工 merge 需要 preface（前言文本）')
             body.preface = args.preface.trim()
           } else if (stage === 'final') {
             if (typeof args.report !== 'string' || args.report.trim() === '') throw new Error('交工 final 需要 report（自查报告）')
             body.report = args.report.trim()
+            // 票 08：终检交工转发 styleCheck——这是这条契约的产品侧唯一发送点（此前只有测试会写它）。
+            // 判据一个字不放宽：漏一条 active 风格线照样由服务端 400 打回。
+            if (args.styleCheck !== undefined) {
+              if (!Array.isArray(args.styleCheck)) {
+                throw new Error('styleCheck 需要数组 [{id, status, note?, chapter?}]（每条生效中的风格线一条去向）')
+              }
+              body.styleCheck = args.styleCheck
+            }
           }
           break
         }
@@ -385,7 +444,7 @@ function apply(ctx, config) {
           body = { action: 'book-set-goal', goal: args.goal.trim() }
           break
         case 'gate':
-          if (args.gate === undefined || args.gate === null || args.gate === '') throw new Error('拍板需要 gate 关卡号')
+          if (args.gate === undefined || args.gate === null || args.gate === '') throw new Error('拍板需要 gate 拍板序号')
           if (typeof args.version !== 'number') throw new Error('拍板需要 version 版本号')
           if (typeof args.approved !== 'boolean') throw new Error('拍板需要 approved（true=通过/false=驳回）')
           body = {

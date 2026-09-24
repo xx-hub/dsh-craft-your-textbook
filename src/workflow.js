@@ -37,7 +37,7 @@ import {
   waived,
   workDir,
   workFile,
-  writeMeta,
+  updateMeta,
 } from './workflow/engine.js'
 import { actBooks } from './workflow/actions/books.js'
 import { actWizard } from './workflow/actions/wizard.js'
@@ -48,11 +48,11 @@ import { actDeepModify } from './workflow/actions/deep-modify.js'
 import { actCollabSignals } from './workflow/actions/collab-signals.js'
 import { actChapters } from './workflow/actions/chapters.js'
 import { actPatternsOps } from './workflow/actions/patterns-ops.js'
-import { readFileSync, readdirSync, writeFileSync, existsSync, statSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync, statSync, mkdirSync, renameSync, rmSync, realpathSync } from 'node:fs'
 import { join, resolve, basename } from 'node:path'
 import { isWithin } from './path-guard.js'
 import { readSettings } from './mineru-lib.js'
-import { MAX_UPLOAD_BYTES, uploadTooLargeMessage } from './domain-rules.js'
+import { MAX_UPLOAD_BYTES, uploadTooLargeMessage, productOpenMode, SEGMENT_PHASE } from './domain-rules.js'
 
 
 export const name = 'textbook-workflow'
@@ -62,10 +62,26 @@ export const inject = ['webServer', 'agents', 'subagents', 'sessions']
 const SESSION_ID_RE = /^[A-Za-z0-9._-]{1,128}$/
 
 
-/** 归一化会话 id（缺省/非法 → 'default'）。 */
+/**
+ * 读 session 参数：缺失/非法返回 null，由调用方回 400（票 04）。
+ * ⚠️ 曾经缺省回退 `'default'`——所有权检查于是只剩「会话 id 给对了」那么强：
+ * 带着非法 session 的请求会被当成 default 会话，凡是 meta.session === 'default'
+ * 的老书都能被任何人读写。宁可拒绝，也不替调用方猜一个身份。
+ */
 function sessionOf(value) {
   if (typeof value === 'string' && SESSION_ID_RE.test(value)) return value
-  return 'default'
+  return null
+}
+
+
+/** 校验会话参数：缺失/非法直接回 400 并返回 null（调用方据此提前 return）。 */
+function requireSession(value, res) {
+  const sessionId = sessionOf(value)
+  if (sessionId === null) {
+    sendJson(res, 400, { ok: false, error: '缺少或非法的 session 参数' })
+    return null
+  }
+  return sessionId
 }
 
 
@@ -166,7 +182,8 @@ function readRawBody(req) {
 /** POST /textbook/upload?session=&project=&name=&role= （raw body = PDF 字节） */
 async function handleUpload(req, res) {
   const url = new URL(req.url, 'http://localhost')
-  const sessionId = sessionOf(url.searchParams.get('session'))
+  const sessionId = requireSession(url.searchParams.get('session'), res)
+  if (sessionId === null) return
   const project = url.searchParams.get('project')
   const name = url.searchParams.get('name')
   const role = url.searchParams.get('role') ?? '学生用书'
@@ -197,20 +214,26 @@ async function handleUpload(req, res) {
       return
     }
     writeFileSync(join(sourcesDir(project), safeName), bytes)
-    const sources = meta.sources ?? []
-    // 幂等：同一文件名重复上传只更新角色，不再追加条目/事件。
-    // 背景：客户端瞬时网络失败（Failed to fetch）时服务端已落盘，前端重传同一批文件；
-    // 无幂等 → meta.sources 与 timeline 逐次重复（实测 4 文件 × 3 轮 = 12 条）。
-    const existing = sources.find((source) => source.file === safeName)
-    if (existing !== undefined) {
-      existing.role = role
-    } else {
-      sources.push({ file: safeName, role, converted: false })
-      appendEvent(project, 'textbook/source-added', { file: safeName, role })
-    }
-    meta.sources = sources
-    meta.status = 'active'
-    writeMeta(meta)
+    // ⚠️ 状态改在 updateMeta 的改法里（当场新读）：上面 `await readRawBody` 期间可能已经有一笔
+    // 记进了账本——原先拿着函数开头那份旧状态整份写回，会把账高打回读请求体之前的旧值，
+    // 于是同一拍的下一次上传重号（真账本头六笔 source-added 序号全是 1，票 02）。
+    let added = false
+    updateMeta(project, (state) => {
+      const sources = state.sources ?? []
+      // 幂等：同一文件名重复上传只更新角色，不再追加条目/事件。
+      // 背景：客户端瞬时网络失败（Failed to fetch）时服务端已落盘，前端重传同一批文件；
+      // 无幂等 → meta.sources 与 timeline 逐次重复（实测 4 文件 × 3 轮 = 12 条）。
+      const existing = sources.find((source) => source.file === safeName)
+      if (existing !== undefined) {
+        existing.role = role
+      } else {
+        sources.push({ file: safeName, role, converted: false })
+        added = true
+      }
+      state.sources = sources
+      state.status = 'active'
+    })
+    if (added) appendEvent(project, 'textbook/source-added', { file: safeName, role })
     sendJson(res, 200, { ok: true, project, file: safeName, role })
   } catch (error) {
     const tooLarge = error?.code === BODY_TOO_LARGE
@@ -224,26 +247,46 @@ async function handleUpload(req, res) {
 }
 
 
-/** GET /textbook/file?session=&project=&path= （文本预览，限 work/ 与 book 产物） */
+/**
+ * GET /textbook/file?session=&project=&path= （文本读回：**只给有正文的产物**）
+ *
+ * 票 04 收窄：判据换成 domain-rules 的显式产物清单（productOpenMode === 'preview'，
+ * 章节 / 探查报告 / 设计关卡方案 / 自查报告 / 成品 / 材料转换出的 Markdown），
+ * **不是**扩展名、也不是「在项目目录里」——旧判据是后两者，于是机器产物
+ * （knowledge-map.json / project.json / timeline.jsonl）与源 PDF 一道可读。
+ *
+ * 这条路由保留（历史章节回看、金标准逐段对比仍在调它，见 gold-table.js 的 fetchText），
+ * 但只放行人会读的正文；越界/非白名单一律拒绝并给出可读原因，不静默。
+ */
 function handleFile(req, res) {
   const url = new URL(req.url, 'http://localhost')
-  const sessionId = sessionOf(url.searchParams.get('session'))
+  const sessionId = requireSession(url.searchParams.get('session'), res)
+  if (sessionId === null) return
   const project = url.searchParams.get('project')
   const rel = url.searchParams.get('path')
   if (project === null || rel === null) {
     sendJson(res, 400, { ok: false, error: '缺少参数' })
     return
   }
+  if (productOpenMode(rel) !== 'preview') {
+    sendJson(res, 403, { ok: false, error: '这份是机器产物，不提供文本读回' })
+    return
+  }
   try {
     assertSessionOwned(project, sessionId)
-    const target = resolve(projectDir(project), rel)
     const root = resolve(projectDir(project))
+    const target = resolve(root, rel)
     if (!isWithin(root, target)) {
       sendJson(res, 403, { ok: false, error: '路径越界' })
       return
     }
     if (!existsSync(target) || statSync(target).isDirectory()) {
       sendJson(res, 404, { ok: false, error: '文件不存在' })
+      return
+    }
+    // 白名单判的是名字，符号链接可以挂到项目外：再按真实路径确认一次落点还在项目里。
+    if (!isWithin(realpathSync(root), realpathSync(target))) {
+      sendJson(res, 403, { ok: false, error: '路径越界' })
       return
     }
     res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store' })
@@ -257,7 +300,8 @@ function handleFile(req, res) {
 /** GET /textbook/work?session=&project= （列出已完成步骤的结果文件） */
 function handleWork(req, res) {
   const url = new URL(req.url, 'http://localhost')
-  const sessionId = sessionOf(url.searchParams.get('session'))
+  const sessionId = requireSession(url.searchParams.get('session'), res)
+  if (sessionId === null) return
   const project = url.searchParams.get('project')
   if (project === null) {
     sendJson(res, 400, { ok: false, error: '缺少 project 参数' })
@@ -274,7 +318,7 @@ function handleWork(req, res) {
       for (const name of readdirSync(dir)) {
         if (!name.endsWith('.md')) continue
         let label = null
-        if (name === 'explore.md') label = '源探查结果'
+        if (name === 'explore.md') label = '读材料挑重点的结果'
         else if (name === 'outline.md') label = '教学设计·章节安排'
         else if (name === 'style-spec.md') label = '写作规范'
         else if (name === 'book.md') label = '成书 BOOK.md'
@@ -298,7 +342,8 @@ function handleWork(req, res) {
 /** GET /textbook/download?session=&project=&path= （附件下载） */
 function handleDownload(req, res) {
   const url = new URL(req.url, 'http://localhost')
-  const sessionId = sessionOf(url.searchParams.get('session'))
+  const sessionId = requireSession(url.searchParams.get('session'), res)
+  if (sessionId === null) return
   const project = url.searchParams.get('project')
   const rel = url.searchParams.get('path')
   if (project === null || rel === null) {
@@ -367,6 +412,8 @@ const ACTION_FAMILY_OF = new Map([
   ['waive-revoke', actCollabSignals],
   ['pause', actCollabSignals],
   ['review', actChapters],
+  ['review-revoke', actChapters],
+  ['audit-submit', actChapters],
   ['stage-submit', actChapters],
   ['stage-brief', actChapters],
   ['progress', actChapters],
@@ -392,7 +439,8 @@ async function handleAction(ctx, req, res) {
     return
   }
   const { action, project } = body
-  const sessionId = sessionOf(body.session)
+  const sessionId = requireSession(body.session, res)
+  if (sessionId === null) return
   if (typeof action !== 'string' || action === '') {
     sendJson(res, 400, { ok: false, error: '缺少 action' })
     return
@@ -414,7 +462,8 @@ async function handleAction(ctx, req, res) {
 
 function handleEvents(req, res) {
   const url = new URL(req.url, 'http://localhost')
-  const sessionId = sessionOf(url.searchParams.get('session'))
+  const sessionId = requireSession(url.searchParams.get('session'), res)
+  if (sessionId === null) return
   const project = url.searchParams.get('project')
   if (project === null || !PROJECT_ID_RE.test(project)) {
     sendJson(res, 400, { ok: false, error: '缺少或非法的 project 参数' })
@@ -435,6 +484,9 @@ function handleEvents(req, res) {
     }
     const events = readEvents(project, after)
     // 章节状态：每章写好/自查好的徽章（UI 与 AI 都用）。
+    // 票 14（界面数字同源）：`done` 直接问**闸门那一份判据**（engine 的 chapterDone：两份产物在
+    // ＋ 机器记下的交工通过 ＋ 没有未处置的抽查意见）——界面的「已完成 X/Y 章」与过目闸门从此同源，
+    // 两个数字不打架。**不许在这里写第二份判据**（写第二份就是本程要消灭的「两个数字打架」）。
     const chapters = meta.outline?.chapters ?? []
     const chapterStatus = chapters.map((chapter, index) => {
       const n = index + 1
@@ -442,13 +494,22 @@ function handleEvents(req, res) {
       return {
         n, title: chapter.title ?? `第${n}章`,
         source: chapter.source ?? '', targetWords: chapter.targetWords ?? null,
+        // written/audited 保留为「产物在不在」的原义（界面用它区分「执笔中 / 写好了审计中 / AI 复核中」）；
+        // done 才是闸门口径的「这一章算完成了」（客户端改用 done 后，两个数字必然一致）。
         written: existsSync(chapterPath), audited: existsSync(auditPath),
+        done: chapterDone(project, n),
       }
     })
     // 探查摘要（探查确认卡用）：材料份数/知识点数/建议章数。
     let exploreSummary = null
+    // 知识地图原文：机器产物，但人读形态是**卡片内联**折叠清单（ADR-0010 决策 2 / 票 05），
+    // 故随事件一起下发，不再让前端走 /textbook/file——那条路由按「给人读的产物」收窄后
+    // 拒绝机器产物（票 04）。文件不在/读不到时为 null（前端回退成一句可读说明）。
+    let knowledgeMap = null
     try {
-      const km = JSON.parse(readFileSync(workFile(project, 'knowledge-map.json'), 'utf8'))
+      const kmText = readFileSync(workFile(project, 'knowledge-map.json'), 'utf8')
+      knowledgeMap = kmText
+      const km = JSON.parse(kmText)
       const converted = (meta.sources ?? []).filter((source) => source.converted === true).length
       exploreSummary = {
         sources: converted,
@@ -484,6 +545,7 @@ function handleEvents(req, res) {
       goldDrafts,
       goldDraftVersion: goldDrafts.length + 1,
       exploreSummary,
+      knowledgeMap,
     })
   } catch (error) {
     sendJson(res, 500, { ok: false, error: String(error instanceof Error ? error.message : error) })
@@ -498,29 +560,54 @@ function buildProcessMap(projectId) {
   const segments = []
   const push = (s) => segments.push(s)
   const phase = meta?.phase ?? 1
+  // 「当前正在做的是哪一步」只认 pendingStage/pendingGate/status，**不认「phase 已经走到几」**。
+  // 根因（2026-09-20 走查 04 屏）：原式一律 `phase >= N ? 'active' : 'pending'`，于是书一进
+  // 第 3 期，第 2/3 次拍板与章节安排统统亮成「▶ 我正在做」——从没碰过的步骤也在"做"。
+  const pending = meta?.pendingStage ?? null
   // 产物存在性按「项目目录相对路径」判（artifacts 输出即相对路径；workFile 会再拼 work/，不能复用）。
   const existsRel = (rel) => existsSync(join(projectDir(projectId), rel))
   // 探源
   push({
     key: 'explore', label: '源探查', kind: 'explore',
-    status: existsSync(workFile(projectId, 'explore.md')) ? (meta.exploreConfirmed === true ? 'done' : 'waiting-user') : (phase >= 2 ? 'active' : 'pending'),
+    // 阶段号：阶段片一格＝一个阶段＝若干分段（kind → 阶段号查 domain-rules 的 SEGMENT_PHASE，别手写数字）。
+    phase: SEGMENT_PHASE['explore'],
+    // 原式认 exploreConfirmed 单一标记：演示书没有这个标记，于是二十几步前就干完的「读材料」
+    // 一直亮着「⚡轮到你」（03/04 屏实测）。改认「状态是否正停在等确认」+「是否已推进过去」。
+    status: meta?.status === 'awaiting-explore'
+      ? 'waiting-user'
+      : (meta?.exploreConfirmed === true || phase >= 3 ? 'done' : (pending === 'explore' ? 'active' : 'pending')),
     artifacts: ['work/explore.md', 'work/knowledge-map.json'].filter(existsRel),
     redoNote: meta.exploreRedoNote ?? null,
   })
   for (const gate of ['1', '2', '3']) {
-    const folded = foldGate(projectId)
-    const mine = folded !== null && folded.gate === gate ? folded : null
+    // 2026-09-21 修：按 gate 号折（原来折"最后一个提案"，只有碰巧是它自己时才拿得到结论）。
+    const folded = foldGate(projectId, gate)
+    const mine = folded !== null && String(folded.gate) === String(gate) ? folded : null
     const approved = gateApproved(projectId, gate) || waived(projectId, 'gate-skip')
     push({
       key: `gate-${gate}`, label: `关卡${gate}·${GATE_LABELS[gate] ?? ''}`, kind: 'gate',
-      status: approved ? 'done' : (mine !== null && mine.status === 'awaiting' ? 'waiting-user' : (phase >= 3 ? 'active' : 'pending')),
+      phase: SEGMENT_PHASE['gate'],
+      status: approved
+        ? 'done'
+        : (mine !== null && mine.status === 'awaiting'
+          ? 'waiting-user'
+          : (pending === 'gate' && meta?.pendingGate === gate ? 'active' : 'pending')),
       artifacts: [`提案/关卡${gate}-v1.md`].filter(existsRel),
       decision: mine === null ? undefined : { version: mine.version, approved: mine.status === 'approved', note: mine.decision?.note ?? '' },
     })
   }
+  // 「章节安排」是第 3 次拍板定下来的东西——定过了才算做完。原式写 `phase >= 4 ? 'done' : 'active'`，
+  // 于是只要章节清单已经存在（第 3 次拍板还没定）就亮「▶ 我正在做」（02 屏实测：那本书 phase=3、
+  // 第 1 次拍板正等用户，步清单却把「章节安排」也报成"正在做"）。
+  const gate3Ok = gateApproved(projectId, '3') || waived(projectId, 'gate-skip')
   push({
     key: 'outline', label: '章节安排', kind: 'outline',
-    status: chapters.length === 0 ? (phase >= 3 ? 'active' : 'pending') : (meta.status === 'awaiting-outline' ? 'waiting-user' : (phase >= 4 ? 'done' : 'active')),
+    phase: SEGMENT_PHASE['outline'],
+    status: meta?.status === 'awaiting-outline'
+      ? 'waiting-user'
+      : (gate3Ok || phase >= 4
+        ? 'done'
+        : (pending === 'outline' ? 'active' : 'pending')),
     artifacts: existsRel('work/outline.md') ? ['work/outline.md'] : [],
     redoNote: meta.outlineRedoNote ?? null,
   })
@@ -528,34 +615,47 @@ function buildProcessMap(projectId) {
   const goldNn = goldN(meta)
   push({
     key: 'gold', label: '最佳范例章（风格母版）', kind: 'gold',
+    phase: SEGMENT_PHASE['gold'],
     status: goldDone ? 'done' : (meta.status === 'awaiting-gold' ? 'waiting-user' : (phase >= 4 ? 'active' : 'pending')),
     artifacts: ['work/style-spec.md', `work/chapter-${String(goldNn).padStart(2, '0')}.md`, `work/audit-${String(goldNn).padStart(2, '0')}.md`].filter(existsRel),
-    decision: meta.goldSealed == null ? undefined : { version: meta.goldSealed.version, approved: true, note: '已定稿为风格母版' },
+    decision: meta.goldSealed == null ? undefined : { version: meta.goldSealed.version, approved: true, note: '已定稿为最佳范例章' },
     redoNote: meta.goldRedoNote ?? null,
   })
+  // 一章一章写：phase>=5 不等于每一章都在写。只有「已经在动的那章」（有流水线阶段上报）
+  // 或「第一个还没写完的章」才是「▶ 我正在做」，其余未开始的章是 ○。
+  const firstUndone = chapters.findIndex((_, index) => !chapterDone(projectId, index + 1))
   chapters.forEach((chapter, index) => {
     const n = index + 1
+    const stageN = pipelineStage(meta, index)
     push({
       key: `chapter-${n}`, label: `第${n}章 ${chapter.title ?? ''}`, kind: 'chapter',
-      status: chapterDone(projectId, n) ? 'done' : (phase >= 5 ? 'active' : 'pending'),
+      phase: SEGMENT_PHASE['chapter'],
+      status: chapterDone(projectId, n)
+        ? 'done'
+        : (phase >= 5 && (stageN !== null || index === firstUndone) ? 'active' : 'pending'),
       // F35（2026-08-20 走查）：每章流水线阶段（writing/auditing/audited/finalizing/done，未上报为 null）。
-      stage: pipelineStage(meta, index),
+      stage: stageN,
       artifacts: [`work/chapter-${String(n).padStart(2, '0')}.md`, `work/audit-${String(n).padStart(2, '0')}.md`].filter(existsRel),
     })
   })
   push({
     key: 'chapters-review', label: '全章过目', kind: 'review',
+    phase: SEGMENT_PHASE['review'],
     status: meta?.status === 'awaiting-chapters-review' ? 'waiting-user' : (meta?.chaptersReviewed === true || existsRel('work/book.md') ? 'done' : 'pending'),
     artifacts: [],
   })
   push({
     key: 'merge', label: '合并成书', kind: 'merge',
+    phase: SEGMENT_PHASE['merge'],
     status: existsRel('work/book.md') ? 'done' : (phase >= 6 ? 'active' : 'pending'),
     artifacts: existsRel('work/book.md') ? ['work/book.md'] : [],
   })
   push({
     key: 'final', label: '最后检查与交付', kind: 'final',
-    status: meta?.status === 'delivered' ? 'done' : (phase >= 6 ? 'active' : 'pending'),
+    phase: SEGMENT_PHASE['final'],
+    // 批 1 根因修复：原式只认 delivered → done，其余 phase>=6 → active，
+    // 于是终检等认可时纵向地图显示「▶ 正在做」，而横向阶段片显示「⚡轮到你」——同屏打架。
+    status: meta?.status === 'delivered' ? 'done' : (meta?.status === 'awaiting-final-approval' ? 'waiting-user' : (phase >= 6 ? 'active' : 'pending')),
     artifacts: existsRel('work/book.md') ? ['work/book.md'] : [],
   })
   // 影响预告数据：每段的深改影响范围（下游段 keys / 会被归档的现存产物 / 是否可深改）。
@@ -570,30 +670,18 @@ function buildProcessMap(projectId) {
 }
 
 
-/** 聚合主会话的审计/写作子代理状态（F35）：activity=running →「在跑」，inactive →「完成待收」；
- *  宿主未挂 subagents 服务或读取失败时优雅降级为 0（不阻塞 process 查询）。 */
-async function countDescendantSubagents(ctx, sessionId) {
-  try {
-    const svc = typeof ctx?.get === 'function' ? ctx.get('subagents') : undefined
-    if (svc === undefined || typeof svc.listDescendants !== 'function') return { running: 0, inactive: 0 }
-    const entries = await svc.listDescendants(sessionId)
-    let running = 0
-    let inactive = 0
-    for (const entry of Array.isArray(entries) ? entries : []) {
-      if (entry === null || typeof entry !== 'object' || entry.kind !== 'child') continue
-      if (entry.activity === 'running') running += 1
-      else inactive += 1
-    }
-    return { running, inactive }
-  } catch {
-    return { running: 0, inactive: 0 }
-  }
-}
-
-
+/** 分段清单（`/textbook/process`）：历史分段 + 影响预告 + 撤销窗口。
+ *
+ * ⚠️ 票 stale-detection/01：这里原来还自己列一遍子代理、把 `{running, inactive}` 随响应下发，
+ * 前端拿它拼「N 个小助手在跑 / N 个完成待收」。那条路径有两个毛病：① 口径不是宿主的口径
+ * （`listDescendants` 的 `activity` 说的是「记录还在不在内存里」，驻留但空闲的也算在跑）；
+ * ② 前端每 2 秒轮询、拉取失败还静默保留旧值——一旦它参与抑制就成了永久消音器。
+ * 小助手状态现已改读宿主推送的会话摘要（前端那份订阅本来就在），这段计数随之删除；
+ * 端点本身留着，它还返回这份分段清单。 */
 async function handleProcess(ctx, req, res) {
   const url = new URL(req.url, 'http://localhost')
-  const sessionId = sessionOf(url.searchParams.get('session'))
+  const sessionId = requireSession(url.searchParams.get('session'), res)
+  if (sessionId === null) return
   const project = url.searchParams.get('project')
   if (project === null || !PROJECT_ID_RE.test(project)) {
     sendJson(res, 400, { ok: false, error: '缺少或非法的 project 参数' })
@@ -601,8 +689,7 @@ async function handleProcess(ctx, req, res) {
   }
   try {
     assertSessionOwned(project, sessionId)
-    const subagents = await countDescendantSubagents(ctx, sessionId)
-    sendJson(res, 200, { ok: true, project, segments: buildProcessMap(project), subagents })
+    sendJson(res, 200, { ok: true, project, segments: buildProcessMap(project) })
   } catch (error) {
     sendJson(res, 500, { ok: false, error: String(error instanceof Error ? error.message : error) })
   }
@@ -611,7 +698,8 @@ async function handleProcess(ctx, req, res) {
 
 function handleProjects(req, res) {
   const url = new URL(req.url, 'http://localhost')
-  const sessionId = sessionOf(url.searchParams.get('session'))
+  const sessionId = requireSession(url.searchParams.get('session'), res)
+  if (sessionId === null) return
   try {
     sendJson(res, 200, { ok: true, session: sessionId, projects: listProjects(sessionId) })
   } catch (error) {
@@ -736,14 +824,20 @@ function processRedoMarks() {
       }
       const meta = readMeta(id)
       if (meta !== null) {
-        meta.phase = 2
-        meta.status = 'running'
-        meta.converting = false
-        delete meta.outline
-        meta.updatedAt = Date.now()
-        writeMeta(meta)
+        // 重置重做的状态改动走 updateMeta（不拿手里那份旧状态整份写回）。
+        updateMeta(id, (state) => {
+          state.phase = 2
+          state.status = 'running'
+          state.converting = false
+          delete state.outline
+          // 票 13（spec 第 7 条 / 不变量 5）：全量重置**清 `pendingReviews`**——重排大纲后旧章号的意见
+          // 不许拦到新章号上（意见是挂在章号上的，章号一旦重排，旧意见指向的就是另一章了）。
+          // 同时清掉「全章过目已通过」的标记：这一程的全部章节都要重新写、重新过目。
+          delete state.pendingReviews
+          state.chaptersReviewed = false
+        })
         try {
-          appendEvent(id, 'textbook/hint', { text: '已执行「重置重做」：从源探查重新开始（材料保留）' })
+          appendEvent(id, 'textbook/hint', { text: '已执行「重置重做」：从读材料挑重点重新开始（材料保留）' })
         } catch { /* 账本异常忽略 */ }
       }
       // 移除标记（rmSync 在部分盘上失效，用移动代替；跨盘 EXDEV 自动降级复制+删除）。

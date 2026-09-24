@@ -6,13 +6,14 @@
 import {
   assertSessionOwned,
   readMeta,
-  writeMeta,
+  updateMeta,
   appendEvent,
   writeSnapshot,
   restoreSnapshot,
   foldGate,
   workDir,
   workFile,
+  chapterGateMiss,
   gateWaiters,
   handoff,
   advance,
@@ -21,6 +22,22 @@ import {
 } from '../engine.js'
 import { mkdirSync, existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
+
+
+/**
+ * 拍板动作的两条校验报错（错误条 / 回给主 AI 的话都算界面词，判定线①③；界面不叫「关卡」）。
+ * 导出以便用词不变量断言直调**真实报错文本**（票 01），不在测试里复制文案。
+ */
+
+/** 提案对不上号（gate/version 不匹配，或压根没有待拍板的提案）。 */
+export function gateMismatchError(current) {
+  return `拍板状态不匹配（当前: ${current === null ? '无' : `${current.gate} v${current.version} ${current.status}`}）`
+}
+
+/** 该次拍板已经拍过了（不能重复拍板）。 */
+export function gateAlreadyDecidedError(current) {
+  return `第 ${current.gate} 次拍板已${current.status === 'approved' ? '通过' : '驳回'}，不能重复拍板`
+}
 
 
 /** 动作族 · 关卡拍板：'gate-decide' / 'explore-confirm' / 'outline-confirm' / 'chapters-review-confirm' / 'final-approve' / 'rollback'。 */
@@ -36,11 +53,11 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
       assertSessionOwned(project, sessionId)
       const current = foldGate(project)
       if (current === null || current.gate !== gateId || current.version !== version) {
-        sendJson(res, 409, { ok: false, error: `关卡状态不匹配（当前: ${current === null ? '无' : `${current.gate} v${current.version} ${current.status}`}）` })
+        sendJson(res, 409, { ok: false, error: gateMismatchError(current) })
         return
       }
       if (current.status !== 'awaiting') {
-        sendJson(res, 409, { ok: false, error: `该关卡已 ${current.status === 'approved' ? '通过' : '驳回'}，不能重复拍板` })
+        sendJson(res, 409, { ok: false, error: gateAlreadyDecidedError(current) })
         return
       }
       const event = appendEvent(project, 'textbook/gate-decision', {
@@ -51,9 +68,8 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
         reasons: Array.isArray(reasons) ? reasons.filter((item) => typeof item === 'string') : [],
         note: typeof note === 'string' ? note : '',
       })
-      const meta = readMeta(project)
-      meta.updatedAt = event.time
-      writeMeta(meta)
+      // 原先这里还「读状态 → meta.updatedAt = event.time → 整份写回」：那个写回纯属多余
+      // （appendEvent 已经把 updatedAt 记成 event.time），却会把账高带回读状态那一刻的旧值（票 02）。已删。
       const waiter = gateWaiters.get(project)
       if (waiter !== undefined && waiter.gate === gateId && waiter.version === version) {
         gateWaiters.delete(project)
@@ -73,12 +89,13 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
       }
       const approved = body.approved === true
       if (approved) {
-        exMeta.exploreConfirmed = true
-        exMeta.status = 'running'
-        exMeta.pendingStage = null
-        exMeta.pendingGate = null
-        delete exMeta.exploreRedoNote
-        writeMeta(exMeta)
+        updateMeta(project, (meta) => {
+          meta.exploreConfirmed = true
+          meta.status = 'running'
+          meta.pendingStage = null
+          meta.pendingGate = null
+          delete meta.exploreRedoNote
+        })
         appendEvent(project, 'textbook/hint', { text: '✅ 探查结果已确认，开始做教学设计。' })
         advance(project, 2, 3)
         void kick(ctx, project)
@@ -97,11 +114,12 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
           const target = workFile(project, name)
           if (existsSync(target)) { try { renameSync(target, join(archive, `${name}.${stamp}`)) } catch { /* 尽力归档 */ } }
         }
-        exMeta.status = 'running'
-        exMeta.pendingStage = null
-        exMeta.pendingGate = null
-        exMeta.exploreRedoNote = feedback.length > 0 ? feedback.join('；') : null
-        writeMeta(exMeta)
+        updateMeta(project, (meta) => {
+          meta.status = 'running'
+          meta.pendingStage = null
+          meta.pendingGate = null
+          meta.exploreRedoNote = feedback.length > 0 ? feedback.join('；') : null
+        })
         appendEvent(project, 'textbook/hint', {
           text: feedback.length > 0
             ? `↩️ 探查结果已标记重做，你的意见（${feedback.join('；')}）已带给 AI，它正在重新探查。`
@@ -123,21 +141,37 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
       }
       const note = typeof body.note === 'string' ? body.note.trim().slice(0, 500) : ''
       const pick = Number(body.goldChapter)
-      if (body.approved === true && Number.isSafeInteger(pick) && pick >= 1 && pick <= (meta.outline?.chapters ?? []).length) {
-        if (meta.goldChapter !== pick) {
-          meta.goldChapter = pick
-          appendEvent(project, 'textbook/hint', { text: `📐 样例章定为第 ${pick} 章。` })
+      // 改选最佳范例章也要改在改法里（当场新读那份状态）：下面两笔事件之间原先夹着一次整份写回，
+      // 会把账高带回读状态那一刻的旧值（票 02）。
+      let pickedGold = false
+      updateMeta(project, (state) => {
+        if (body.approved === true && Number.isSafeInteger(pick) && pick >= 1 && pick <= (state.outline?.chapters ?? []).length) {
+          if (state.goldChapter !== pick) {
+            state.goldChapter = pick
+            pickedGold = true
+          }
         }
+        if (body.approved === true) {
+          state.status = 'running'
+          delete state.outlineRedoNote
+          // 驳回重排时 handoff 记过 pendingStage='outline'；拍板通过必须清掉，
+          // 否则 stale 残留到 phase4/5（2026-09-03 实测：UI 误显「AI 干活中·章节骨架」）。
+          state.pendingStage = null
+          state.pendingGate = null
+        } else {
+          delete state.outline
+          state.status = 'running'
+          state.pendingStage = null
+          state.pendingGate = null
+          if (note !== '') state.outlineRedoNote = note
+        }
+      })
+      if (pickedGold) {
+        // 票 10（判定一 #3/#4）：「样例章」是界面词表外的叫法，这条 hint 会渲染到人眼，统一成「最佳范例章」。
+        appendEvent(project, 'textbook/hint', { text: `📐 最佳范例章定为第 ${pick} 章。` })
       }
       appendEvent(project, 'textbook/outline-decision', { approved: body.approved === true, note })
       if (body.approved === true) {
-        meta.status = 'running'
-        delete meta.outlineRedoNote
-        // 驳回重排时 handoff 记过 pendingStage='outline'；拍板通过必须清掉，
-        // 否则 stale 残留到 phase4/5（2026-09-03 实测：UI 误显「AI 干活中·章节骨架」）。
-        meta.pendingStage = null
-        meta.pendingGate = null
-        writeMeta(meta)
         appendEvent(project, 'textbook/hint', { text: '✅ 章节安排已确认，开始写最佳范例章。' })
         advance(project, 3, 4)
         void kick(ctx, project)
@@ -147,12 +181,6 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
         const stamp = Date.now().toString(36)
         const target = workFile(project, 'outline.md')
         if (existsSync(target)) { try { renameSync(target, join(archive, `outline.md.${stamp}`)) } catch { /* 尽力归档 */ } }
-        delete meta.outline
-        meta.status = 'running'
-        meta.pendingStage = null
-        meta.pendingGate = null
-        if (note !== '') meta.outlineRedoNote = note
-        writeMeta(meta)
         appendEvent(project, 'textbook/hint', {
           text: note !== ''
             ? `↩️ 章节安排已驳回，你的意见（${note}）已带给 AI，它正在重新安排。`
@@ -174,17 +202,48 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
         sendJson(res, 409, { ok: false, error: '当前没有等你过目的章节' })
         return
       }
-      meta.chaptersReviewed = body.approved === true
-      writeMeta(meta)
+      // 票 10 的服务端收口（死条件收口 · 票 14 的连带）：**确认过目时重验全书 chapterDone**。
+      // 原先这里只看 status，于是「用户点翻案（review-revoke 把意见写回 pending）」之后书仍停在
+      // awaiting-chapters-review，能直接确认 → 合并 → 交付——票 10「退回去之后这本书重新被这条意见拦住」
+      // 就成了空话（真旁路）。判据复用 engine 的同一份 chapterDone / chapterGateMiss，**不写第二份**。
+      if (body.approved === true) {
+        const chapters = meta.outline?.chapters ?? []
+        const misses = chapters
+          .map((chapter, index) => ({ n: index + 1, chapter, miss: chapterGateMiss(project, index + 1, meta) }))
+          .filter((row) => row.miss !== null)
+        if (misses.length > 0) {
+          const why = misses.slice(0, 3).map((row) => {
+            const title = row.chapter?.title ?? ''
+            const pad = String(row.n).padStart(2, '0')
+            const what = row.miss.reason === 'artifact'
+              ? `缺产物（work/chapter-${pad}.md / work/audit-${pad}.md）`
+              : row.miss.reason === 'review'
+                ? '还有未处置的抽查意见'
+                : '没有机器记下的交工通过（还没按章交工）'
+            return `第${row.n}章${title === '' ? '' : `《${title}》`}：${what}`
+          })
+          sendJson(res, 409, {
+            ok: false,
+            error: `还没到能交工的时候：${why.join('；')}。逐章处置完（改稿 → 重新审计 → 交工点名）机器才会放行过目。`,
+          })
+          return
+        }
+      }
+      // 过目记账与「开始合并」的置态一次收进改法（原先分两次整份写回，后一次还落在
+      // 「记一笔」之后——账高会被带回旧值，票 02）。
+      const after = updateMeta(project, (state) => {
+        state.chaptersReviewed = body.approved === true
+        if (body.approved === true) {
+          state.status = 'running'
+          state.pendingStage = null
+        }
+      })
       appendEvent(project, 'textbook/chapters-review', { approved: body.approved === true })
       if (body.approved === true) {
-        meta.status = 'running'
-        meta.pendingStage = null
-        writeMeta(meta)
         appendEvent(project, 'textbook/hint', { text: '✅ 全章过目通过，开始合并成书。' })
         handoff(ctx, project, 'merge')
         // demo 无主 AI 可唤醒：仅 demo 补 kick 让状态机自驱动合并（真实模式靠主 AI 交工推进）。
-        if (meta.demo === true) void kick(ctx, project)
+        if (after.demo === true) void kick(ctx, project)
       }
       sendJson(res, 200, { ok: true, project })
       return
@@ -194,33 +253,35 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
       assertSessionOwned(project, sessionId)
       const meta = readMeta(project)
       if (meta === null || meta.status !== 'awaiting-final-approval') {
-        sendJson(res, 409, { ok: false, error: '当前没有等你认可的终检结果' })
+        sendJson(res, 409, { ok: false, error: '当前没有等你认可的最后检查结果' })
         return
       }
       if (body.approved === true) {
-        meta.status = 'delivered'
-        meta.finalApprovedAt = Date.now()
-        writeMeta(meta)
+        const delivered = updateMeta(project, (state) => {
+          state.status = 'delivered'
+          state.finalApprovedAt = Date.now()
+        })
         appendEvent(project, 'textbook/final-approve', { approved: true })
         appendEvent(project, 'textbook/delivery', {
-          book: 'work/book.md', checks: meta.finalChecks ?? [],
-          note: `交付完成！点「下载《${meta.name ?? ''}》.md」保存成品。`,
+          book: 'work/book.md', checks: delivered.finalChecks ?? [],
+          note: `交付完成！点「下载《${delivered.name ?? ''}》.md」保存成品。`,
         })
         sendJson(res, 200, { ok: true, project, delivered: true })
         return
       }
       const note = typeof body.note === 'string' ? body.note.trim().slice(0, 500) : ''
       if (note === '') {
-        sendJson(res, 400, { ok: false, error: '不满意终检结果必须写一句改进意见（AI 照着改整本后重新终检）' })
+        sendJson(res, 400, { ok: false, error: '不满意最后检查结果必须写一句改进意见（AI 照着改整本后重新做最后检查）' })
         return
       }
       // 原地循环：交办终检修订，AI 按意见改整本 → 重新硬检查 → 再给用户认可。
-      meta.status = 'running'
-      meta.pendingStage = null
-      meta.finalRedoNote = note
-      writeMeta(meta)
+      updateMeta(project, (state) => {
+        state.status = 'running'
+        state.pendingStage = null
+        state.finalRedoNote = note
+      })
       appendEvent(project, 'textbook/final-approve', { approved: false, note })
-      appendEvent(project, 'textbook/hint', { text: '🔁 终检被驳回，AI 将按你的意见修整本后重新终检。' })
+      appendEvent(project, 'textbook/hint', { text: '🔁 最后检查未获认可，AI 将按你的意见修整本后重新做最后检查。' })
       handoff(ctx, project, 'final')
       // demo 无主 AI 可唤醒：仅 demo 补 kick 驱动重新终检（真实模式靠主 AI）。
       if (meta.demo === true) void kick(ctx, project)
@@ -237,13 +298,14 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
       }
       writeSnapshot(project, `回退到快照 ${seq} 之前`)
       const event = restoreSnapshot(project, seq)
-      const rbMeta = readMeta(project)
       // 回退后清掉交办标记，让状态机根据账本重新推导（文件产物保留，由验货逻辑复用）。
-      delete rbMeta.pendingStage
-      delete rbMeta.pendingGate
-      delete rbMeta.wakeToken
-      rbMeta.status = 'running'
-      writeMeta(rbMeta)
+      // 注意走 updateMeta：账本刚被 rollbackLedger 截短、账高已回到笔数，这里不许再整份写回。
+      updateMeta(project, (meta) => {
+        delete meta.pendingStage
+        delete meta.pendingGate
+        delete meta.wakeToken
+        meta.status = 'running'
+      })
       void kick(ctx, project)
       sendJson(res, 200, { ok: true, project, event })
       return

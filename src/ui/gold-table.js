@@ -143,7 +143,10 @@ export function GoldOpinionList(props) {
 					createElement(
 						"p",
 						{ style: S.hint },
-						"只改你标过的地方，其余原样保留",
+						// 票 14（承诺账 A2）：机器**没有段落级校验**（只把标过的意见交给 AI，
+						// 见 engine.js 的 gold 分支）——「只改你标过的地方，其余原样保留」是结果承诺，
+						// 查无机制；收成机制真做的那件事。
+						"只把你标过的意见交给 AI",
 					),
 				)
 			: null,
@@ -236,7 +239,9 @@ export function GoldReader(props) {
 			? createElement(
 					"p",
 					{ style: { margin: "0 0 8px", fontSize: "12px", opacity: 0.75 } },
-					"标记方法：鼠标停在哪一段，那段右侧就亮出三个键 😕🗑✏️；不指哪段就用最底下「笼统提一条」。提完点意见单里的【让 AI 照这些改】。",
+					// 票 10（判定四③）：原句 69 字本就在 90 字内，只删了「提完」前那个句号造成的断句
+					// （同一句连着读更省字），信息一条不丢。
+					"标记方法：鼠标停在哪一段，那段右侧就亮出三个键 😕🗑✏️；不指哪段就用最底下「笼统提一条」，提完点意见单里的【让 AI 照这些改】。",
 				)
 			: null,
 		paras.map((para, idx) => {
@@ -556,7 +561,9 @@ export function GoldCompare(props) {
 		createElement(
 			"p",
 			{ style: { margin: "0 0 8px", fontSize: "12px", opacity: 0.75 } },
-			`对照方式：红底划掉的是旧稿删掉的；绿底是新稿改成的；#号对应意见单里的第几条${generalCount > 0 ? `（另有 ${generalCount} 条笼统意见，AI 会对号入座）` : ""}。`,
+			// 票 10（判定四③）：原句 96 字压到 90 字内——「AI 会对号入座」属客套（意见单里就写着哪条
+			// 是哪条），删掉后只留三种颜色/编号各自什么意思。
+			`对照方式：红底划掉的是旧稿删掉的；绿底是新稿改成的；#号对应意见单里的第几条${generalCount > 0 ? `（另有 ${generalCount} 条笼统意见）` : ""}。`,
 		),
 		...blocks,
 	);
@@ -607,7 +614,8 @@ export function GoldFinalize(props) {
 		createElement(
 			"p",
 			{ style: { margin: "0 0 6px", fontWeight: 600 } },
-			"✅ 满意了就定稿（这一章就是全书的样板）",
+			// 票 10（判定一 #4）：「样板」是界面词表外的第三套叫法，统一成「最佳范例章」。
+			"✅ 满意了就定稿（这一章就是全书的最佳范例章）",
 		),
 		createElement(
 			"div",
@@ -636,7 +644,7 @@ export function GoldFinalize(props) {
 						{ style: { opacity: 0.6 } },
 						Number.isFinite(chapter.targetWords)
 							? `约 ${chapter.targetWords} 字`
-							: "未定，AI 铺章时自定",
+							: "未定，AI 写整本时自定",
 					),
 					chapter.volumeReason
 						? createElement(
@@ -709,7 +717,7 @@ export function GoldFinalize(props) {
 									createElement(
 										"div",
 										{ key: item.n, style: { margin: "1px 0" } },
-										`${item.n}. ${item.title ?? ""}：${Number.isFinite(item.words) ? `约 ${item.words} 字` : "未定，AI 铺章时自定"}${item.reason ? `（${item.reason}）` : ""}`,
+										`${item.n}. ${item.title ?? ""}：${Number.isFinite(item.words) ? `约 ${item.words} 字` : "未定，AI 写整本时自定"}${item.reason ? `（${item.reason}）` : ""}`,
 									),
 								),
 							)
@@ -766,7 +774,9 @@ export function GoldFinalize(props) {
 		createElement(
 			"p",
 			{ style: S.hint },
-			"从头重写这一章；你标过的意见仍会带给 AI 当方向",
+			// 票 14（承诺账 A2）：机制只透出 `pending`/`sent` 的意见（engine.js 的 gold 分支）——
+			// 已经点过「让 AI 照这些改」的那批不再随整版重写下发，所以限定成「还没处理的意见」。
+			"从头重写这一章；还没处理的意见会一并带给 AI 当方向",
 		),
 		confirming === "seal"
 			? createElement(
@@ -781,7 +791,10 @@ export function GoldFinalize(props) {
 					createElement(
 						"p",
 						{ style: { margin: "0 0 4px", fontWeight: 600 } },
-						"定稿前确认：下面这些会永久生效",
+						// 票 14（承诺账 A2）：「永久生效」与机制自相矛盾——风格线可被收回
+						// （collab-signals 的 style-note-revoke 置 superseded，界面自己也渲染「·（已收回）」）。
+						// 改成「会生效」＋把收回的路说给用户（收回入口在对话侧，界面没有）。
+						"定稿前确认：下面这些会生效（想收回，可以在对话里跟 AI 说）",
 					),
 					createElement(
 						"p",
@@ -801,7 +814,8 @@ export function GoldFinalize(props) {
 					createElement(
 						"p",
 						{ style: { margin: "4px 0", fontSize: "12px", opacity: 0.85 } },
-						"② 这一稿冻结为「风格母版」，AI 铺全书时都拿它当样板。",
+						// 票 10（判定一 #4）：同上，「样板」→「最佳范例章」。
+						"② 这一稿定下来当最佳范例章，AI 写整本时都照着它。",
 					),
 					createElement(
 						"div",
@@ -836,7 +850,9 @@ export function GoldFinalize(props) {
 					createElement(
 						"p",
 						{ style: { margin: "0 0 6px" } },
-						"整稿丢弃重写：这一稿会存档留底（不丢），AI 从头再写一版。",
+						// 票 14（承诺账 A2）：归档是「尽力」语义（gold.js 的 `try { renameSync } catch {}`），
+						// 「不丢」是全集承诺——收掉。
+						"整稿丢弃重写：这一稿会归档留底，AI 从头再写一版。",
 					),
 					createElement(
 						"div",
@@ -906,6 +922,15 @@ export function GoldTable(props) {
 	// 展示稿：当前稿或旧稿
 	const showTab = Math.min(view.tab, goldDraftVersion);
 	const showPath = pathOf(showTab);
+	// 换稿也要**加载**（2026-09-23 代码审查补）：原来只有挂载时加载当前稿（上面那个 effect 的
+	// `load(currentPath)`）与对比态加载对照稿（下面那个 effect），谁都没加载"切过去的那一稿"——
+	// 于是点「第 N 稿」切到旧稿后 `showText` 恒为 `undefined`，正文永远停在「加载中…」。
+	// spec §3 转场矩阵的 `E 焦点区·「现在」 × 页内换内容` 格（「点 `第 N 稿` → 正文换成那一稿」）
+	// 此前只有渲染级覆盖（只断稿页签在不在），这条漏网正是"渲染级冒充点击级"的典型。
+	useEffect(() => {
+		if (showPath !== null) load(showPath);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [showPath]);
 	const showText = showPath === null ? null : (texts[showPath] ?? null);
 	// 对比对象：当前稿比上一稿；旧稿比它的下一稿
 	const compareWith =
@@ -921,18 +946,20 @@ export function GoldTable(props) {
 	}, [comparePath]);
 	const compareText =
 		comparePath === null ? null : (texts[comparePath] ?? null);
-	let auditBadge = "🧪 质检：已附自查记录";
+	// 票 10（判定三 #9）：界面一律说「检查」——「质检」（质量门系机器词）与「自查」（机器视角）
+	// 都不上人眼。文件仍是 `work/audit-NN.md`（机器身份词，不改）。
+	let auditBadge = "🧪 检查：已附检查记录";
 	if (auditText != null) {
 		try {
 			const audit = JSON.parse(auditText);
 			auditBadge =
 				typeof audit.passed === "boolean"
 					? audit.passed === true
-						? "🧪 质检：通过（自查无待完善项）"
-						: "🧪 质检：有几处待完善（可以让 AI 改）"
-					: "🧪 质检：记录格式待完善";
+						? "🧪 检查：通过（没有待完善项）"
+						: "🧪 检查：有几处待完善（可以让 AI 改）"
+					: "🧪 检查：记录格式待完善";
 		} catch {
-			auditBadge = "🧪 质检：记录格式待完善";
+			auditBadge = "🧪 检查：记录格式待完善";
 		}
 	}
 	const addOpinion = (kind, wish, para, hint) => {
@@ -971,7 +998,7 @@ export function GoldTable(props) {
 			createElement(
 				"strong",
 				{ style: { fontSize: "14px" } },
-				"🤝 最佳范例章 · 风格谈判桌",
+				"🤝 最佳范例章 · 一起定风格",
 			),
 			createElement(
 				"span",
@@ -1059,6 +1086,9 @@ export function GoldTable(props) {
 				? createElement(
 						"p",
 						{ style: { fontSize: "12px", opacity: 0.7, margin: "4px 0" } },
+						// 票 10（判定四①）：与上面「想在这一稿上继续挑毛病？点『只看这一稿』」是同一件事
+						// 的两种说法（一条讲怎么改、一条讲为什么不能改），收敛成这一句——它信息量大
+						// （说清了"旧稿只能回顾"这个原因）。两处不会同屏（mode 互斥），故只留一份字。
 						"这是旧稿，只能回顾；要挑毛病请回到「最新」那稿。",
 					)
 				: null,

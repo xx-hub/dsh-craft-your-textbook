@@ -7,7 +7,7 @@ import {
   assertSessionOwned,
   stageLabel,
   readMeta,
-  writeMeta,
+  updateMeta,
   appendEvent,
   handoff,
   kick,
@@ -21,20 +21,14 @@ export async function actConvert(ctx, _req, res, action, sessionId, project, bod
   switch (action) {
     case 'convert-start': {
       assertSessionOwned(project, sessionId)
-      const meta = readMeta(project)
-      if (meta === null) throw new Error(`unknown project ${JSON.stringify(project)}`)
-      meta.status = 'running'
-      writeMeta(meta)
+      updateMeta(project, (meta) => { meta.status = 'running' })
       void kick(ctx, project)
       sendJson(res, 200, { ok: true, project })
       return
     }
     case 'retry-convert': {
       assertSessionOwned(project, sessionId)
-      const meta = readMeta(project)
-      if (meta === null) throw new Error(`unknown project ${JSON.stringify(project)}`)
-      meta.status = 'running'
-      writeMeta(meta)
+      updateMeta(project, (meta) => { meta.status = 'running' })
       void kick(ctx, project)
       sendJson(res, 200, { ok: true, project })
       return
@@ -67,10 +61,8 @@ export async function actConvert(ctx, _req, res, action, sessionId, project, bod
       const resumeMeta = readMeta(project)
       if (resumeMeta === null) throw new Error(`unknown project ${JSON.stringify(project)}`)
       const clearedPause = resumeMeta.pause !== null && resumeMeta.pause !== undefined
-      if (clearedPause) {
-        resumeMeta.pause = null
-        appendEvent(project, 'textbook/resume', {})
-      }
+      // 「已继续」事件先落（账本那一笔），清暂停标记与置 running 交给下面的 updateMeta 改法。
+      if (clearedPause) appendEvent(project, 'textbook/resume', {})
       const agent = (ctx.get('agents') ?? ctx.agents)?.get?.(resumeMeta.session)
       if (resumeMeta.demo !== true && agent !== undefined) {
         try {
@@ -90,9 +82,12 @@ export async function actConvert(ctx, _req, res, action, sessionId, project, bod
             source: { kind: 'plugin', plugin: 'dsh-craft-your-textbook', form: 'notice', summary: `工作台：用户点了「让 AI 接着干」（${label || '当前环节'}）` },
           })
           if (!clearedPause) appendEvent(project, 'textbook/resume', {})
-          resumeMeta.status = 'running'
-          resumeMeta.updatedAt = Date.now()
-          writeMeta(resumeMeta)
+          // 状态改动走 updateMeta（当场新读）：上面 appendEvent 已经推进过账高，
+          // 原先拿函数开头那份旧状态整份写回会把账高打回去（票 02）。
+          updateMeta(project, (meta) => {
+            if (clearedPause) meta.pause = null
+            meta.status = 'running'
+          })
           sendJson(res, 200, { ok: true, project, woke: 'continue' })
           return
         } catch (error) {
@@ -100,8 +95,10 @@ export async function actConvert(ctx, _req, res, action, sessionId, project, bod
         }
       }
       if (resumeMeta.pendingStage !== null && resumeMeta.pendingStage !== undefined) {
-        resumeMeta.status = 'running'
-        writeMeta(resumeMeta)
+        updateMeta(project, (meta) => {
+          if (clearedPause) meta.pause = null
+          meta.status = 'running'
+        })
         handoff(ctx, project, resumeMeta.pendingStage, resumeMeta.pendingGate ?? null)
         // F41（2026-08-20）：demo 无主 AI 消费 handoff，必须补 kick 驱动状态机，
         // 否则 pendingStage 非空时 resume 后卡 running（实测需再 kick 才能恢复）。
@@ -109,8 +106,10 @@ export async function actConvert(ctx, _req, res, action, sessionId, project, bod
         sendJson(res, 200, { ok: true, project, woke: true })
         return
       }
-      resumeMeta.status = 'running'
-      writeMeta(resumeMeta)
+      updateMeta(project, (meta) => {
+        if (clearedPause) meta.pause = null
+        meta.status = 'running'
+      })
       void kick(ctx, project)
       sendJson(res, 200, { ok: true, project })
       return

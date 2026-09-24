@@ -62,6 +62,18 @@ export const S = {
 			? "var(--dsw-accent, #4f6ef7)"
 			: "var(--dsw-danger, #cf222e)",
 	}),
+	// 次级按钮（批 3，2026-09-20）：原来「预览/不满意/认可」三键都是 bigBtn(true)，
+	// 三个一模一样的蓝实心并排，用户看不出该点哪儿。主操作填色，其余描边。
+	ghostBtn: (danger) => ({
+		border: `1px solid ${danger ? "var(--dsw-danger, #cf222e)" : "var(--dsw-border, #d0d7de)"}`,
+		borderRadius: "10px",
+		padding: "10px 18px",
+		fontSize: "14px",
+		fontWeight: 600,
+		cursor: "pointer",
+		background: "transparent",
+		color: danger ? "var(--dsw-danger, #cf222e)" : "inherit",
+	}),
 	smallLink: {
 		border: "none",
 		background: "transparent",

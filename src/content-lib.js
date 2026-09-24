@@ -209,7 +209,7 @@ function demoGateProposal(_runtime, params) {
 		},
 	};
 	const entry = base[String(gate)];
-	if (entry === undefined) throw new Error(`未知关卡: ${gate}`);
+	if (entry === undefined) throw new Error(`未知拍板序号: ${gate}`);
 	return {
 		title: `${entry.title}（演示·v${version}）`,
 		summary: entry.summary,
