@@ -6,7 +6,7 @@ description: 让你具备"亲手为自己造一本教材"的能力——把源�
 # 亲手造属于你自己的教材（Craft Your Textbook）
 
 <SUBAGENT-STOP>
-如果你是被分派来执行某个具体任务（如"写第 3 章""跑某章独立审计"）的 subagent，且不涉及造书的全局决策，则无需把完整流程再读一遍——直接按主 agent 已定稿的 style-spec / META / 章内板块语法执行你的章节任务即可。你仍受不变量底线（references/invariants.md）约束。
+如果你是被分派来执行某个具体任务（如"写第 3 章""跑某章独立审计"）的 subagent，且不涉及造书的全局决策，则无需把完整流程再读一遍——直接按主 agent 已定稿的写作规范（风格与语法）/ 章内板块语法执行你的章节任务即可。你仍受不变量底线（references/invariants.md）约束。
 </SUBAGENT-STOP>
 
 <EXTREMELY-IMPORTANT>
@@ -16,7 +16,7 @@ description: 让你具备"亲手为自己造一本教材"的能力——把源�
 
 1. **先出设计，再写正文**——Phase 3 教学设计未定稿（三个用户确认关卡全部通过）之前，禁止写任何章正文。
 2. **先写金标准，再并行铺章**——没有一章通过四层审计 + 试教（条件触发）并回填 style-spec，禁止启动 Phase 5 的 subagent 并行。
-3. **交付前必拆脚手架**——带脚手架元信息（META、审计批注、未决 TODO、loader 指令外壳）的书不得交付；BOOK.md 必须是纯净可读本体。
+3. **交付前必拆脚手架**——带脚手架元信息（写作规范标题、审计批注、未决 TODO、loader 指令外壳）的书不得交付；BOOK.md 必须是纯净可读本体。
 
 不套模板：Agent 自己设计书的形状。模式库是菜单不是套餐，读完 `references/patterns/README.md` 后强制回答"拒绝/选中每个模式各自对应本书哪个教学问题"，写在 style-spec 里。
 </EXTREMELY-IMPORTANT>
@@ -121,8 +121,8 @@ digraph route {
 | 阶段 | 名称 | 做什么 | 产出 |
 | --- | --- | --- | --- |
 | **Phase 1** | 源材料准备 | PDF→MD（材料转换） | `sources-md/` |
-| **Phase 2** | 源探查 | 所有有源书必走：摸源结构、角色标签、简码表、权威层级 | `源材料索引.md` 第一层 |
-| **Phase 3** | 教学设计 | **核心阶段**：五步设计（见下）+ 三个用户确认关卡 | META/OUTLINE/style-spec/源材料索引 |
+| **Phase 2** | 源探查 | 所有有源书必走：摸源结构、角色标签、简码表、权威层级 | 源材料索引的第一层 |
+| **Phase 3** | 教学设计 | **核心阶段**：五步设计（见下）+ 三个用户确认关卡 | 写作规范 + 章节骨架 + 风格与语法 + 源材料索引（四件契约产物，各自落在哪个文件见 `references/file-contracts.md` 顶部的角色对照） |
 | **Phase 4** | 金标准验证 | 选一章按设计的语法写 → 四层审计 + 试教（条件触发）→ 通过后回填 style-spec | 金标准章 md |
 | **Phase 5** | 全量写作+收网 | 5.1 subagent 并行铺章（分批写，写一批即跑章级独立审计）→ 5.2 附录汇编 → 5.3 跨章全书审计（查映射表/事实一致性/时间线/术语）→ 5.4 合并 BOOK.md（human-readable 注入 loader 指令） | chapters/、appendix/、BOOK.md |
 | **Phase 6** | 终检与交付 | **修订复审**（核实 5.3 的修复到位且没引入新问题）→ 终检 → 拆脚手架 → 质量门 → 交付 | 纯净 BOOK.md |
@@ -161,8 +161,9 @@ Mode A（无源从零造）差异：Phase 2 跳过、幻觉 gate 更严，仅适
    - 回填源材料索引第二层（章级映射）
    - **用户确认关卡 ③**：全书架构和逐章骨架
 
-5. **Phase 3.5 META+源索引完稿**：
-   - META 完成（必答 10 个问题见 `references/file-contracts.md`）
+5. **Phase 3.5 契约产物完稿**：
+   - 写作规范（契约与铁律 + 风格与语法两节）完成，必答问题见 `references/file-contracts.md`
+   - 章节骨架完成
    - 源材料索引完成
 
 不变量底线见 `references/invariants.md`——任何设计都不能违反。

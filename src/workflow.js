@@ -612,6 +612,13 @@ function handleEvents(req, res) {
         teachingFocus: Array.isArray(km.teachingFocus) ? km.teachingFocus.slice(0, 5) : [],
       }
     } catch { exploreSummary = null }
+    // 章节安排原文（`work/outline.md`）：**内容是机器 JSON**，判 `'inline'` 不开右栏
+    // （票 pipeline-wiring-gaps/09），人读形态是阶段页第 3 阶段那张就地折叠清单
+    // （`chapters-map.foldOutline`）。同知识地图：随事件一起下发，文件读不到时为 null。
+    let outlineText = null
+    try {
+      outlineText = readFileSync(workFile(project, 'outline.md'), 'utf8')
+    } catch { outlineText = null }
     // 金标准稿版本（谈判桌页签数据）：_旧版产物 里按时间戳升序的旧稿；当前稿号 = 旧稿数 + 1。
     let goldDrafts = []
     try {
@@ -640,6 +647,7 @@ function handleEvents(req, res) {
       goldDraftVersion: goldDrafts.length + 1,
       exploreSummary,
       knowledgeMap,
+      outline: outlineText,
     })
   } catch (error) {
     sendJson(res, 500, { ok: false, error: String(error instanceof Error ? error.message : error) })

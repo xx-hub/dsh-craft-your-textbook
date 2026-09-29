@@ -356,7 +356,7 @@ export function GoldReader(props) {
 					{
 						style: {
 							...S.card,
-							borderColor: "var(--dsw-accent, #4f6ef7)",
+							borderColor: "var(--dsw-alias-state-business-primary)",
 							margin: "0 0 10px",
 						},
 					},
@@ -413,9 +413,9 @@ export function GoldReader(props) {
 			const pulsing = n === 1 && (pulsePhase === "on1" || pulsePhase === "on2");
 			const pulseBtnStyle = pulsing
 				? {
-						background: "var(--dsw-accent-soft, #eef2ff)",
+						background: "var(--dsw-alias-state-business-tertiary)",
 						borderRadius: "6px",
-						boxShadow: "0 0 0 2px var(--dsw-accent, #4f6ef7)",
+						boxShadow: "0 0 0 2px var(--dsw-alias-state-business-primary)",
 						transform: "scale(1.15)",
 						transition: "transform 0.2s, boxShadow 0.2s, background 0.2s",
 					}
@@ -440,7 +440,7 @@ export function GoldReader(props) {
 							fontSize: "11px",
 							lineHeight: 1.6,
 							whiteSpace: "nowrap",
-							color: "var(--dsw-accent, #4f6ef7)",
+							color: "var(--dsw-alias-state-business-primary)",
 							opacity: hover === n ? 1 : 0.35,
 							transition: "opacity 0.15s",
 						},
@@ -555,7 +555,7 @@ export function GoldReader(props) {
 													"transform 0.2s, boxShadow 0.2s, background 0.2s",
 												...(active != null
 													? {
-															background: "var(--dsw-accent-soft, #eef2ff)",
+															background: "var(--dsw-alias-state-business-tertiary)",
 															borderRadius: "6px",
 														}
 													: {}),
@@ -676,7 +676,7 @@ export function GoldCompare(props) {
 				style: {
 					fontWeight: 700,
 					marginRight: "6px",
-					color: "var(--dsw-accent, #4f6ef7)",
+					color: "var(--dsw-alias-state-business-primary)",
 					whiteSpace: "nowrap",
 				},
 			},
@@ -691,7 +691,7 @@ export function GoldCompare(props) {
 					style: {
 						...READER_PARA_STYLE,
 						textDecoration: "line-through",
-						background: "var(--dsw-danger-soft, #ffebe9)",
+						background: "var(--dsw-alias-file-diff-deleted-bg)",
 						opacity: 0.75,
 					},
 				},
@@ -709,8 +709,8 @@ export function GoldCompare(props) {
 					op.type === "add"
 						? {
 								...READER_PARA_STYLE,
-								background: "var(--dsw-success-soft, #dafbe1)",
-								borderColor: "var(--dsw-success, #2da44e)",
+								background: "var(--dsw-alias-state-success-tertiary)",
+								borderColor: "var(--dsw-alias-state-success-primary)",
 							}
 						: READER_PARA_STYLE,
 			},
@@ -775,6 +775,39 @@ export function GoldFinalize(props) {
 	const targetSignature = chapters
 		.map((chapter, index) => `${index + 1}:${chapter.targetWords ?? ""}`)
 		.join("|");
+
+	/**
+	 * 票 31 / ADR-0026（grilling Q2 ＋ Q3）：谈判桌上把「实测」与「逐章目标」点破成
+	 * **独立一整行**的一句话：
+	 *
+	 *   样章实测 10,119 汉字。按这个标定，其余 12 章合计约 149,000 汉字——要调吗？
+	 *
+	 * 「按这个标定」＝把最佳范例章的**实测/原定之比**乘到其余各章的现有目标上：
+	 * 母版章实际写了多少，其余章就照这个比例算——这样那个 +69% 的超标基准第一次被摆到台面上。
+	 * 字数一律标「汉字」口径（CONTEXT.md「字数」词条，grilling Q3）。
+	 *
+	 * 读不到标定所需的数据时（`goldMeasuredHanzi` 不可用、母版章原定未定、只有母版章一章）
+	 * **退回旧两行**（母版行里「原定 · 实测」那个既有形状）：不要空句，
+	 * 旧形状不需要新词表，也少一处「界面上凭空少了一句话」说不清的差异。
+	 */
+	const calibratedLine = (() => {
+		const measured = Number(meta?.goldMeasuredHanzi);
+		if (!Number.isFinite(measured)) return null;
+		const goldRow = chapters[goldNo - 1];
+		const goldOriginal = Number(goldRow?.targetWords);
+		const rest = chapters.filter((_, index) => index + 1 !== goldNo);
+		if (!Number.isFinite(goldOriginal) || goldOriginal <= 0 || rest.length === 0)
+			return null;
+		const fallback = Number.isFinite(meta?.targetWords) ? Number(meta.targetWords) : 0;
+		const restOriginal = rest.reduce(
+			(sum, chapter) =>
+				sum + (Number.isFinite(chapter?.targetWords) ? chapter.targetWords : fallback),
+			0,
+		);
+		if (restOriginal <= 0) return null;
+		const projected = Math.round((restOriginal * measured) / goldOriginal);
+		return `样章实测 ${measured} 汉字。按这个标定，其余 ${rest.length} 章合计约 ${projected} 汉字——要调吗？`;
+	})();
 	useEffect(() => {
 		setTargetDrafts(
 			Object.fromEntries(
@@ -877,6 +910,25 @@ export function GoldFinalize(props) {
 		createElement(
 			"div",
 			{ style: { margin: "6px 0" } },
+			// 票 31 / ADR-0026：那句点破「实测」与「逐章目标」关系的话独立占一整行，
+			// 不塞进下面输入区的标题（那是「只在样章后报一次」的那一次，塞进去会像输入框的标签）。
+			// 读不到标定所需数据时 calibratedLine 为 null ⇒ 退回旧两行，不留空句。
+			calibratedLine !== null
+				? createElement(
+						"p",
+						{
+							style: {
+								margin: "0 0 6px",
+								padding: "6px 8px",
+								background: "var(--dsw-alias-bg-layer-1)",
+								borderRadius: "8px",
+								border: "1px solid var(--dsw-alias-border-l2)",
+								fontSize: "12px",
+							},
+						},
+						calibratedLine,
+					)
+				: null,
 			createElement(
 				"p",
 				{ style: { margin: "0 0 4px", fontSize: "12px", opacity: 0.8 } },
@@ -888,9 +940,14 @@ export function GoldFinalize(props) {
 				const original = Number.isFinite(chapter.targetWords)
 					? `原定 ${chapter.targetWords}`
 					: "原定未定";
-				const measured = Number.isFinite(meta?.goldMeasuredHanzi)
-					? `实测 ${meta.goldMeasuredHanzi} 汉字`
-					: "实测暂不可用";
+				// 票 31 / ADR-0026：独立那一行已经说过实测了，母版行这里只留「原定」
+				// （不再把两个数字并排摆着、也不说它们的关系）；读不到时退回旧两行。
+				const measured =
+					calibratedLine !== null
+						? ""
+						: Number.isFinite(meta?.goldMeasuredHanzi)
+							? ` · 实测 ${meta.goldMeasuredHanzi} 汉字`
+							: " · 实测暂不可用";
 				return createElement(
 					"div",
 					{
@@ -908,8 +965,8 @@ export function GoldFinalize(props) {
 					isGold
 						? createElement(
 								"strong",
-								{ style: { color: "var(--dsw-accent, #4f6ef7)" } },
-								`${original} · ${measured}`,
+								{ style: { color: "var(--dsw-alias-state-business-primary)" } },
+								`${original}${measured}`,
 							)
 						: canEditTargets
 							? createElement(
@@ -1095,7 +1152,7 @@ export function GoldFinalize(props) {
 					style: {
 						...S.bigBtn(true),
 						background: "transparent",
-						color: "var(--dsw-danger, #cf222e)",
+						color: "var(--dsw-alias-state-error-primary)",
 						padding: "8px 10px",
 					},
 					onClick: () => setConfirming("rewrite"),
@@ -1117,7 +1174,7 @@ export function GoldFinalize(props) {
 					{
 						style: {
 							...S.card,
-							borderColor: "var(--dsw-accent, #4f6ef7)",
+							borderColor: "var(--dsw-alias-state-business-primary)",
 							marginTop: "8px",
 						},
 					},
@@ -1204,7 +1261,7 @@ export function GoldFinalize(props) {
 					{
 						style: {
 							...S.card,
-							borderColor: "var(--dsw-danger, #cf222e)",
+							borderColor: "var(--dsw-alias-state-error-primary)",
 							marginTop: "8px",
 						},
 					},
@@ -1224,7 +1281,7 @@ export function GoldFinalize(props) {
 								style: {
 									...S.bigBtn(true),
 									background: "transparent",
-									color: "var(--dsw-danger, #cf222e)",
+									color: "var(--dsw-alias-state-error-primary)",
 								},
 								onClick: () => onApprove(false, targetToSend),
 								disabled: busy || writing || !wordsOk || !targetRowsOk || targetsDirty,

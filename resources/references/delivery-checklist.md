@@ -1,6 +1,6 @@
 # 拆脚手架 + 交付质量门
 
-> **定位（2026-08-27，ADR-0008）**：交付闸门已归一到机器 `runQualityChecks`（含本清单的乱码/章节数/必含板块/禁用词四项，判据从 style-spec/outline 读）。本文档降级为**终检时主 AI 操作的拆脚手架/自查清单参考**，不再作为第二套交付闸门（机器全绿即放行，不需要再人工 grep 一套）。拆脚手架的结果由机器 `scanScaffolding` 残留=0 强制兜底。
+> **定位（2026-08-27，ADR-0008）**：交付闸门已归一到机器 `runQualityChecks`（含本清单的乱码/章节数/必含板块/禁用词四项，判据从 style-spec/outline 读）。本文档降级为**终检时主 AI 操作的拆脚手架/自查清单参考**，不再作为第二套交付闸门（机器全绿即放行，不需要再人工 grep 一套）。拆脚手架的结果由机器兜底，但**兜底分两半**：①**通用残留**（`META`/`TODO`/`FIXME`/`HACK`/审计批注/未决问题/loader 指令这 8 个硬编码标记——**它们与本书写作规范声明的那些标题是两回事，不许混**）由 `scanScaffolding` 扫，残留≠0 即不绿；②**本书写作规范里声明过的那些元数据板块标题**（`脚手架标题：…` 那一行）由机器按声明逐条扫——**声明了才查，没声明这一项整项不跑**（本仓那条判据：没显式列出就跳过，不拿硬编码词表误判）。本仓工作台没有 `scanScaffolding` 这个脚本，它是质量门里的一项机器检查。
 
 > **这是最关键、也最容易被跳过的一步**。实战教训：某本书的初版留了 112 个 `<!-- v2 新增 -->` 标记 + 8 个自检清单 + 8 个版本记录，审计后发现"AI 老师没法做对比"，两轮清理共删除 36,477 字符（-9.4%）。**这不是可选项，是交付前的硬门。**
 
@@ -16,7 +16,7 @@
 
 > **⚠️ 本文所有 grep 命令的统一前提（Phase 6 终检与质量门都适用）**：Git Bash 下先 `export LC_ALL=C.UTF-8`，否则含中文/emoji 的匹配在 C locale 下按字节匹配会误判；或改用 `rg` / python 更稳。
 >
-> **脚本说明**：下文提到的 `strip_meta_sections.py` / `merge_book.py` 都指**你项目里那份副本**（从 skill 复制来、已按本书改过的，约定在 `<项目根>/scripts/`），不是 skill 目录里的原件。
+> **脚本说明**：下文步骤 1 与步骤 3 提到的**拆脚手架脚本**（skill 侧 `strip_meta_sections.py`）与**装配脚本**（skill 侧 `merge_book.py`）都指**你项目里那份副本**（从 skill 复制来、已按本书改过的，约定在 `<项目根>/scripts/`），不是 skill 目录里的原件。**本仓工作台没有这两个脚本**：拆脚手架在它那边是「机器质量门里的残留检查」（只检测不删），合并是 `merge` 阶段机器拼装 `work/book.md`。**必答的是拆什么、拼什么，不是脚本参数。**
 
 ## Phase 6 的三步分工
 
@@ -73,10 +73,10 @@ AI 老师只读最终这一本书。它没有旧版、没有"教师用书"、没
 **1. 跑脚本删除板块级元数据（对应上表 ③④⑧）**
 
 ```bash
-python scripts/strip_meta_sections.py chapters/ appendix/
+python scripts/strip_meta_sections.py chapters/ appendix/   # 拆脚手架脚本（skill 侧）；本仓无脚本，改走机器质量门的残留检查
 ```
 
-删除每个章/附录源文件中"META 声明的脚手架标题"到文件末尾的全部内容。脚手架标题列表从 META 读（每本书可能不同），不硬编码。
+删除每个章/附录源文件中"写作规范声明的脚手架标题"到文件末尾的全部内容。脚手架标题列表从写作规范读（本仓工作台侧读 `work/style-spec.md` 行首的「脚手架标题：」那一行；每本书可能不同，不硬编码）。**没写这一行＝机器不查这一项**，别把「没写」当成「不用拆」。
 
 **2. 逐类搜索并清理行内元数据（对应上表 ①②⑤⑥⑦）**
 
@@ -99,11 +99,11 @@ grep -rn 'v[0-9]\|<!--\|教师用书\|新增\|增量\|人类教师\|可追溯\|�
 **3. 重跑合并**
 
 ```bash
-# pure-blueprint 路线（保留章级 frontmatter）：
-python scripts/merge_book.py
+# pure-blueprint 路线（保留章级 frontmatter）——下面那个是 skill 侧的装配脚本 merge_book.py：
+python scripts/merge_book.py        # 装配脚本（skill 侧）；本仓无脚本，由合并阶段机器拼装
 
-# human-readable 路线（剥离章级 frontmatter）：
-python scripts/merge_book.py --strip-frontmatter
+# human-readable 路线（剥离章级 frontmatter）——同一个装配脚本加一个开关：
+python scripts/merge_book.py --strip-frontmatter   # 装配脚本（skill 侧）
 ```
 
 ## Phase 6 质量门（6 项全绿才交付）
@@ -120,8 +120,8 @@ python scripts/merge_book.py --strip-frontmatter
 | --- | --- | --- |
 | ① 必含板块完整 | 按 style-spec §章内板块语法定义的必含板块 grep 计数 | = 章数 × 每章必含板块数（从 style-spec 读，不是硬编码 7 板块） |
 | ② 禁用词 | 从 style-spec §正文语言风格 读本书特有禁用词表，grep BOOK.md；"AI"单独查后**人工确认** | = 0（"AI 老师"等合法词人工放行） |
-| ③ 元数据残余 | grep META 声明的脚手架标题列表 | = 0 |
-| ④ 章数 | 从 OUTLINE §逐章骨架 读预期章数，grep 章标题（格式从 style-spec 读，不是硬编码 `^# Unit`） | = 预期章数 |
+| ③ 元数据残余 | grep 写作规范（`work/style-spec.md`）里声明的脚手架标题列表 | = 0 |
+| ④ 章数 | 从章节骨架的逐章骨架读预期章数，grep 章标题（格式从写作规范的板块语法读，不是硬编码 `^# Unit`） | = 预期章数 |
 | ⑤ 跨章引用 | 随机抽查 3 章，验证行内回溯/连接表/交叉引用指向的章/概念真实存在（Phase 5.3 已做全量检查，此步兜底抽查） | 无空指 |
 | ⑥ 文件大小 | 合并后字节数 | **首本书**：记录本次字节数作为 baseline（见下）；**重跑时**：与上次 baseline 相比 ±10% |
 
@@ -132,11 +132,11 @@ python scripts/merge_book.py --strip-frontmatter
 
 判据①②③④的具体值从四文件派生：
 
-- 必含板块清单：读 style-spec §章内板块语法
-- 禁用词表：读 style-spec §正文语言风格
-- 脚手架标题：读 META #10 脚手架标题列表
-- 章标题格式：读 style-spec §章内板块语法（标题格式在板块语法中约定）
-- 预期章数：读 OUTLINE §逐章骨架
+- 必含板块清单：读写作规范的 §章内板块语法
+- 禁用词表：读写作规范的 §正文语言风格
+- 脚手架标题：读写作规范（本仓 `work/style-spec.md`）第 10 项「脚手架标题列表」
+- 章标题格式：读写作规范的 §章内板块语法（标题格式在板块语法中约定）
+- 预期章数：读章节骨架的 §逐章骨架
 
 **任何一项不过，修完重跑。**
 

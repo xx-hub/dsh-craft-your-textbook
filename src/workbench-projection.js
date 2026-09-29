@@ -142,6 +142,13 @@ function normalizeCore(payload, { base = null, delta = false } = {}) {
   ) {
     throw malformed('events 响应的 knowledgeMap 必须是字符串')
   }
+  if (
+    payload.outline !== undefined &&
+    payload.outline !== null &&
+    typeof payload.outline !== 'string'
+  ) {
+    throw malformed('events 响应的 outline 必须是字符串')
+  }
 
   const incoming = payload.events
   for (const event of incoming) {
@@ -166,6 +173,9 @@ function normalizeCore(payload, { base = null, delta = false } = {}) {
       reviews: listOrEmpty(payload, 'pendingReviews', 'events.pendingReviews'),
     },
     knowledgeMap: typeof payload.knowledgeMap === 'string' ? payload.knowledgeMap : null,
+    // 章节安排原文（`work/outline.md`，内容是机器 JSON）：与 knowledgeMap 同一条路——
+    // 不经 /textbook/file（那条路由按 'preview' 收窄），人读形态由阶段页就地折叠。
+    outline: typeof payload.outline === 'string' ? payload.outline : null,
     chapterStatus: listOrEmpty(payload, 'chapterStatus', 'events.chapterStatus'),
     goldDrafts: listOrEmpty(payload, 'goldDrafts', 'events.goldDrafts'),
     goldDraftVersion: Number.isSafeInteger(payload.goldDraftVersion)

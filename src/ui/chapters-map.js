@@ -139,7 +139,7 @@ function ChapterReviewLine(props) {
 							? "#cf222e"
 							: state.key === "applied"
 								? "#1a7f37"
-								: "var(--dsw-text, #1f2328)",
+								: "var(--dsw-alias-label-primary)",
 					opacity: state.key === "revoked" ? 0.55 : 1,
 				},
 			},
@@ -152,7 +152,7 @@ function ChapterReviewLine(props) {
 						style: {
 							flex: "1 1 100%",
 							marginLeft: "14px",
-							color: "var(--dsw-text, #1f2328)",
+							color: "var(--dsw-alias-label-primary)",
 							opacity: 0.75,
 						},
 					},
@@ -343,7 +343,7 @@ export function ChaptersCard(props) {
 							margin: "0 0 10px",
 							padding: "8px 10px",
 							borderRadius: "8px",
-							background: "var(--dsw-accent-soft, #eef2ff)",
+							background: "var(--dsw-alias-state-business-tertiary)",
 						},
 					},
 					createElement("strong", null, "📚 全部章节写好了，请你过目"),
@@ -389,7 +389,7 @@ export function ChaptersCard(props) {
 							margin: "0 0 8px",
 							padding: "6px 10px",
 							borderRadius: "8px",
-							background: "var(--dsw-accent-soft, #eef2ff)",
+							background: "var(--dsw-alias-state-business-tertiary)",
 							fontSize: "12px",
 						},
 					},
@@ -450,9 +450,9 @@ export function ChaptersCard(props) {
 					style: {
 						margin: "6px 0",
 						padding: "8px 10px",
-						background: "var(--dsw-surface, #fff)",
+						background: "var(--dsw-alias-bg-layer-1)",
 						borderRadius: "8px",
-						border: "1px solid var(--dsw-border, #d0d7de)",
+						border: "1px solid var(--dsw-alias-border-l2)",
 					},
 				},
 				createElement(
@@ -585,7 +585,7 @@ export function ChaptersCard(props) {
 								style: {
 									marginTop: "6px",
 									paddingTop: "4px",
-									borderTop: "1px dashed var(--dsw-border, #d0d7de)",
+									borderTop: "1px dashed var(--dsw-alias-border-l2)",
 								},
 							},
 							createElement(
@@ -663,7 +663,7 @@ export function ChaptersCard(props) {
 							{
 								style: {
 									marginTop: "8px",
-									borderTop: "1px dashed var(--dsw-border, #d0d7de)",
+									borderTop: "1px dashed var(--dsw-alias-border-l2)",
 									paddingTop: "8px",
 								},
 							},
@@ -787,17 +787,20 @@ function stepStyle(isViewed, state) {
 		// 「你正在看这一步」优先于状态底色：否则一个 waiting-user 行的金边会盖掉回看高亮
 		// （第 4 轮原型实测抓到的排序 bug，别改回去）。
 		background: isViewed
-			? "var(--dsw-accent-soft, #eef2ff)"
+			? "var(--dsw-alias-state-business-tertiary)"
 			: state === "active"
-				? "var(--dsw-surface, #fff)"
+				? "var(--dsw-alias-bg-layer-1)"
 				: state === "waiting-user"
-					? "#fff8e6"
+					// 「等用户」这一档的浅金底与金边原来也是写死的浅色（票 19 路线 A 一并接宿主，
+					// 否则同一个函数里两个浅色钉子，深色下仍然不可读）。取值见
+					// docs/reference/dsh-theme-token-contracts.md §2。
+					? "var(--dsw-alias-state-warn-tertiary)"
 					: "transparent",
 		opacity: state === "pending" ? 0.45 : state === "done" ? 0.75 : 1,
 		border: isViewed
-			? "1px solid var(--dsw-text, #1f2328)"
+			? "1px solid var(--dsw-alias-label-primary)"
 			: state === "waiting-user"
-				? "1px solid #e3b341"
+				? "1px solid var(--dsw-alias-state-warn-secondary)"
 				: "1px solid transparent",
 	};
 }
@@ -905,10 +908,10 @@ export function ProgressOverview(props) {
 			"div",
 			{
 				style: {
-					border: "1px solid var(--dsw-border, #d0d7de)",
+					border: "1px solid var(--dsw-alias-border-l2)",
 					borderRadius: "10px",
 					padding: "8px 10px",
-					background: "var(--dsw-bg, #fff)",
+					background: "var(--dsw-alias-bg-base)",
 				},
 			},
 			createElement(
@@ -936,10 +939,10 @@ export function ProgressOverview(props) {
 					{
 						style: {
 							marginTop: "6px",
-							border: "1px solid var(--dsw-border, #d0d7de)",
+							border: "1px solid var(--dsw-alias-border-l2)",
 							borderRadius: "10px",
 							padding: "10px 12px",
-							background: "var(--dsw-bg, #fff)",
+							background: "var(--dsw-alias-bg-base)",
 							boxShadow: "0 10px 28px rgba(0,0,0,.16)",
 							maxHeight: "46vh",
 							overflowY: "auto",
@@ -1016,8 +1019,8 @@ export function NarrowMainHint(props) {
 				fontSize: "12px",
 				lineHeight: "1.5",
 				borderRadius: "8px",
-				border: "1px solid var(--dsw-border, #d0d7de)",
-				background: "var(--dsw-bg, #fff)",
+				border: "1px solid var(--dsw-alias-border-l2)",
+				background: "var(--dsw-alias-bg-base)",
 				opacity: 0.85,
 			},
 		},
@@ -1049,7 +1052,7 @@ export function FocusFooter(props) {
 			style: {
 				marginTop: "10px",
 				paddingTop: "8px",
-				borderTop: "1px solid var(--dsw-border, #d0d7de)",
+				borderTop: "1px solid var(--dsw-alias-border-l2)",
 				display: "flex",
 				alignItems: "center",
 				gap: "10px",
@@ -1094,7 +1097,7 @@ export function FocusFooter(props) {
 							fontSize: "11px",
 							opacity: deleting === true ? 1 : 0.5,
 							...(deleting === true
-								? { color: "var(--dsw-danger, #cf222e)" }
+								? { color: "var(--dsw-alias-state-error-primary)" }
 								: {}),
 						},
 						onClick: onDelete,
@@ -1141,6 +1144,23 @@ export function FocusFooter(props) {
  *
  * 所以它是焦点区的**兄弟节点**、不参与焦点区的滚动流：既不随内容滚走（永远可见），
  * 又不制造"永远露不出来"的字。恢复原来的渐变视觉，只是从竖卡摊成横条。
+ *
+ * ── 文案与它的**一行宽度预算**（2026-09-29 改）────────────────────────────────
+ * 改成「【线团造书工作台】是【破卷】的衍生项目 · 3A 游戏级沉浸 · 三倍学习效率」。
+ * 两处是**算出来的**、不是偏好：
+ *  - 预算 = 根容器 `maxWidth`（`--dsh-chat-content-width` + 20，宿主 clamp 在 [680, 920]）
+ *    − 10px 滚动条槽 − 28px 横条内边距 ⇒ 最窄档可用 ≈ **662px**。上一版实测 ≈690px，
+ *    **已经会在最窄档折行**（折行 +17px 垂直空间，正是 8px 遮挡那条票要守的东西）；
+ *    这一版 ≈647px，顺手把它让回来了。
+ *  - 「把造好的书交给【破卷】，当教材来学」（16 字 ≈176px）被砍掉，是为了让**全称**
+ *    进得来。全称是本项目的中文名（页签标题仍只写「造书工作台」），不进横条就等于
+ *    贴片仍在替一个匿名项目打广告。那个"交给它当教材"的动作没丢：它还在**向导卡**
+ *    （`WizardCard`「把造好的书交给【破卷】」，`event-cards.js`）与**交付卡**
+ *    （`DeliveryCard`「这本书怎么用」第一段）上——两处都是长版，放得下。
+ *    ⚠️ 别照这句反推「贴片在没建书时也看得到」：没书时 `meta === null` 那一支**不渲染
+ *    贴片**（`client-entry.js` 只给 topBar + 向导面），所以贴片得等**有书**才出现。
+ *  - 「3A 沉浸感」→「3A **游戏级**沉浸」：裸 `3A` 在中文里第一反应是学业评级或 AAA 顶级，
+ *    长版（向导卡）本来就写着「3A 游戏的沉浸感」，贴片上原来漏了这个消歧词。
  */
 export function SocratopiaAd() {
 	// 邀请码可点复制：整卡是链接会跳转，代码块单独拦下来复制、不跳转（2026-08-21）。
@@ -1200,7 +1220,9 @@ export function SocratopiaAd() {
 			},
 		},
 		createElement("span", { style: { fontSize: "15px" } }, "📚"),
-		createElement("strong", { style: { fontSize: "12px" } }, "【破卷】"),
+		createElement("strong", { style: { fontSize: "12px" } }, "【线团造书工作台】"),
+		createElement("span", null, "是"),
+		createElement("span", { style: { fontWeight: 600 } }, "【破卷】"),
 		createElement(
 			"span",
 			{
@@ -1214,11 +1236,12 @@ export function SocratopiaAd() {
 			},
 			"衍生项目",
 		),
-		createElement("span", null, "把造好的书交给【破卷】，当教材来学"),
+		// ⚠️ 这句**紧跟在【破卷】后面、不插别的产品名**：「三倍学习效率」是关于破卷的断言，
+		// 一旦两者之间隔了别的名词，读者会把它读成本项目自己的宣传——那是杜撰，得防。
 		createElement(
 			"span",
 			{ style: { opacity: 0.85 } },
-			"3A 沉浸感 · 3 倍学习效率",
+			"3A 游戏级沉浸 · 三倍学习效率",
 		),
 		createElement(
 			"span",
@@ -1247,8 +1270,10 @@ export function SocratopiaAd() {
 
 // ── 机器产物的人读折叠：knowledge-map.json 的**唯一**人读形态 ─────────────────
 // ⚠️ 有正文的产物（章节/报告/方案/成品）一律走 DSH 右栏预览，不经这里（ADR-0010 决策 2）；
-// 这里只剩 knowledge-map.json 这一条：机器产物，人读形态是**就地折叠清单**——
-// 阶段页第 2 阶段的 `KnowledgeMapBlock` 与源探查确认卡都调它，别让同一样东西两处两种读法。
+// 这里只剩机器产物但**有人读形态**的那两条：知识地图（`foldKnowledgeMap`）与章节安排
+// （`foldOutline`，票 pipeline-wiring-gaps/09）——人读形态都是**就地折叠清单**——
+// 阶段页第 2 阶段的 `KnowledgeMapBlock` 与源探查确认卡调前者，第 3 阶段的 `OutlineBlock` 调后者，
+// 别让同一样东西两处两种读法。
 // （2026-09-21：原来还有 `FileViewer` 那个查看壳的第二条路，它不在渲染路径上，已随旧单卡删除。）
 
 // F38（2026-08-20 走查）：knowledge-map.json 的最小人读折叠——把原始 JSON 的
@@ -1306,5 +1331,46 @@ export function foldKnowledgeMap(text) {
 	}
 	if (lines.length === 0) return null;
 	return lines.join("\n").replace(/\n+$/, "");
+}
+
+/**
+ * `work/outline.md`（章节安排）的**人读折叠形态**（票 pipeline-wiring-gaps/09）。
+ *
+ * ⚠️ 这一份与 `foldKnowledgeMap` 同族、同一形状：文件名带 `.md`，**内容是机器 JSON**
+ * （`{"chapters":[…]}`，落盘见 `actions/chapters.js` 的 `writeWork(project,'outline.md',…)`
+ * 与演示模式的 `engine.js` 那一行），所以 `domain-rules.productOpenMode` 判它 `'inline'`
+ * ——不开右栏（与 `work/audit-NN.md` 同一条理由）。它与 audit 那一族的分别只在于
+ * **有人读**：人读形态是**就地折叠清单**，本函数是它**唯一**的实现
+ * （阶段页第 3 阶段的 `OutlineBlock` 调它；拍板前那张 `OutlineConfirmCard` 从 `meta` 直接渲染，
+ * 数据与本函数同源、措辞各自成篇）。
+ *
+ * 解析失败 / 无内容返回 `null`（由调用方回退原文）——**不许假装读懂了**（与 foldKnowledgeMap 同纪律）。
+ * @param {string} text `work/outline.md` 的原文。
+ * @returns {string|null} 人读清单；读不出来时 `null`。
+ */
+export function foldOutline(text) {
+	let data;
+	try {
+		data = JSON.parse(text);
+	} catch {
+		return null;
+	}
+	if (data === null || typeof data !== "object") return null;
+	const chapters = Array.isArray(data.chapters) ? data.chapters : [];
+	if (chapters.length === 0) return null;
+	const lines = [`📐 章节安排（${chapters.length} 章）`];
+	chapters.forEach((chapter, index) => {
+		const title = String(chapter?.title ?? "").trim();
+		lines.push(`${index + 1}. ${title}`);
+		const summary = String(chapter?.outline ?? "").trim();
+		if (summary !== "") lines.push(`　${summary}`);
+		const source = String(chapter?.source ?? "").trim();
+		if (source !== "") lines.push(`　源：${source}`);
+		const points = (Array.isArray(chapter?.points) ? chapter.points : [])
+			.map((pt) => String(pt ?? "").trim())
+			.filter((pt) => pt !== "");
+		if (points.length > 0) lines.push(`　覆盖知识点 ${points.length} 个：${points.join(" / ")}`);
+	});
+	return lines.join("\n");
 }
 

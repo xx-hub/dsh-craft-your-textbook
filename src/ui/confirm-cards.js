@@ -153,9 +153,9 @@ export function ExploreConfirmCard(props) {
 						style: {
 							margin: "4px 0 8px",
 							padding: "8px 10px",
-							background: "var(--dsw-surface, #fff)",
+							background: "var(--dsw-alias-bg-layer-1)",
 							borderRadius: "8px",
-							border: "1px solid var(--dsw-border, #d0d7de)",
+							border: "1px solid var(--dsw-alias-border-l2)",
 						},
 					},
 					createElement(
@@ -179,9 +179,9 @@ export function ExploreConfirmCard(props) {
 						style: {
 							margin: "4px 0 8px",
 							padding: "8px 10px",
-							background: "var(--dsw-surface, #fff)",
+							background: "var(--dsw-alias-bg-layer-1)",
 							borderRadius: "8px",
-							border: "1px solid var(--dsw-border, #d0d7de)",
+							border: "1px solid var(--dsw-alias-border-l2)",
 						},
 					},
 					createElement(
@@ -225,9 +225,9 @@ export function ExploreConfirmCard(props) {
 									style: {
 										marginTop: "6px",
 										padding: "8px 10px",
-										background: "var(--dsw-surface, #fff)",
+										background: "var(--dsw-alias-bg-layer-1)",
 										borderRadius: "8px",
-										border: "1px solid var(--dsw-border, #d0d7de)",
+										border: "1px solid var(--dsw-alias-border-l2)",
 									},
 								},
 								kps.map((point, index) =>
@@ -287,9 +287,9 @@ export function ExploreConfirmCard(props) {
 									style: {
 										marginTop: "6px",
 										padding: "8px 10px",
-										background: "var(--dsw-surface, #fff)",
+										background: "var(--dsw-alias-bg-layer-1)",
 										borderRadius: "8px",
-										border: "1px solid var(--dsw-border, #d0d7de)",
+										border: "1px solid var(--dsw-alias-border-l2)",
 									},
 								},
 								sections.map((material, index) => {
@@ -323,7 +323,7 @@ export function ExploreConfirmCard(props) {
 					{
 						style: {
 							marginTop: "10px",
-							borderTop: "1px dashed var(--dsw-border, #d0d7de)",
+							borderTop: "1px dashed var(--dsw-alias-border-l2)",
 							paddingTop: "8px",
 						},
 					},
@@ -396,7 +396,7 @@ export function ExploreConfirmCard(props) {
 							style: {
 								...S.bigBtn(true),
 								background: "transparent",
-								color: "var(--dsw-danger, #cf222e)",
+								color: "var(--dsw-alias-state-error-primary)",
 							},
 							onClick: () => setRejecting(true),
 							disabled: busy,
@@ -423,11 +423,9 @@ export function OutlineConfirmCard(props) {
 	const [rejecting, setRejecting] = useState(false);
 	const [note, setNote] = useState("");
 	const chapters = meta?.outline?.chapters ?? [];
-	const totalWords = chapters.reduce(
-		(sum, chapter) =>
-			sum + (Number.isFinite(chapter?.targetWords) ? chapter.targetWords : 0),
-		0,
-	);
+	// 票 31 / ADR-0026（grilling Q1 选 B）：第 3 阶段**干脆不印字数**——
+	// 全书体量的「已定」性质后置到样章定稿之后（谈判桌上只报那一次）。
+	// 「不显示」≠「不产生」：chapters[].targetWords 仍是契约必填，数据一个字没删。
 	// 样例章：默认取旧账本兜底 meta.goldChapter ?? 1；用户可改选（只对确认生效）。
 	const [goldPick, setGoldPick] = useState(() => {
 		const initial = Number(meta?.goldChapter ?? 1);
@@ -457,7 +455,9 @@ export function OutlineConfirmCard(props) {
 		createElement(
 			"p",
 			{ style: { margin: "6px 0" } },
-			`AI 计划把这本书分成 ${chapters.length} 章${totalWords > 0 ? `，全书大约 ${totalWords} 汉字` : ""}。每章标好了用材料的哪一块、覆盖哪些知识点、大概写多长（「字」按汉字数，是体量参考、不是硬指标）。满意点「通过」，AI 先把第 ${safePick} 章当最佳范例章写出来给你过目；要调就点「让 AI 重做」。`,
+			// 票 31 / ADR-0026（grilling Q1 选 B）：不印「全书大约 X 汉字」，也不印逐章字数。
+			// 如实告知它为什么不在这里——等最佳范例章写完、实测之后再定（谈判桌上只报那一次）。
+			`AI 计划把这本书分成 ${chapters.length} 章。每章标好了用材料的哪一块、覆盖哪些知识点。每章多少字，等最佳范例章写完、实测之后一起定。满意点「通过」，AI 先把第 ${safePick} 章当最佳范例章写出来给你过目；要调就点「让 AI 重做」。`,
 		),
 		createElement(
 			"div",
@@ -465,9 +465,9 @@ export function OutlineConfirmCard(props) {
 				style: {
 					margin: "4px 0 8px",
 					padding: "8px 10px",
-					background: "var(--dsw-surface, #fff)",
+					background: "var(--dsw-alias-bg-layer-1)",
 					borderRadius: "8px",
-					border: "1px solid var(--dsw-border, #d0d7de)",
+					border: "1px solid var(--dsw-alias-border-l2)",
 				},
 			},
 			chapters.map((chapter, index) => {
@@ -493,22 +493,17 @@ export function OutlineConfirmCard(props) {
 								`　${chapter.outline}`,
 							)
 						: null,
-					createElement(
-						"div",
-						{ style: { opacity: 0.6, margin: "1px 0 0" } },
-						[
-							chapter.source !== undefined &&
-							chapter.source !== "" &&
-							chapter.source !== null
-								? `源：${chapter.source}`
-								: null,
-							Number.isFinite(chapter.targetWords)
-								? `约 ${chapter.targetWords} 汉字`
-								: null,
-						]
-							.filter(Boolean)
-							.join(" · "),
-					),
+					// 票 31 / ADR-0026：逐章那行原来的「约 N 汉字」也一并撤掉
+					//（第 3 阶段不假装字数是承诺）；数据仍在 outline.chapters[].targetWords。
+					chapter.source !== undefined &&
+					chapter.source !== "" &&
+					chapter.source !== null
+						? createElement(
+								"div",
+								{ style: { opacity: 0.6, margin: "1px 0 0" } },
+								`源：${chapter.source}`,
+							)
+						: null,
 					pointsArr.length > 0
 						? createElement(
 								"div",
@@ -554,8 +549,8 @@ export function OutlineConfirmCard(props) {
 								fontSize: "12px",
 								padding: "2px 4px",
 								borderRadius: "6px",
-								border: "1px solid var(--dsw-border, #d0d7de)",
-								background: "var(--dsw-surface, #fff)",
+								border: "1px solid var(--dsw-alias-border-l2)",
+								background: "var(--dsw-alias-bg-layer-1)",
 							},
 							value: safePick,
 							onChange: (e) => setGoldPick(Number(e.target.value)),
@@ -584,7 +579,7 @@ export function OutlineConfirmCard(props) {
 					{
 						style: {
 							marginTop: "10px",
-							borderTop: "1px dashed var(--dsw-border, #d0d7de)",
+							borderTop: "1px dashed var(--dsw-alias-border-l2)",
 							paddingTop: "8px",
 						},
 					},
@@ -643,7 +638,7 @@ export function OutlineConfirmCard(props) {
 							style: {
 								...S.bigBtn(true),
 								background: "transparent",
-								color: "var(--dsw-danger, #cf222e)",
+								color: "var(--dsw-alias-state-error-primary)",
 							},
 							onClick: () => setRejecting(true),
 							disabled: busy,

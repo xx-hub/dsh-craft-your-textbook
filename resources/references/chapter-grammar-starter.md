@@ -34,7 +34,7 @@ PMP 是认证类，选"认证应试蓝本"预装配包，拿到 14 张候选卡�
 | quick-judgment | 章末速判脚本里的题 |
 | cross-ref-trace | judgment-card 内"判断依据：回溯 Ch2 原则6"行内回溯 |
 | running-case | scenario-hook 挂靠锦程建工项目 |
-| multi-source-arbitration | META 里三源范式（本书级，非章内板块） |
+| multi-source-arbitration | 写作规范里的三源范式（本书级，非章内板块） |
 
 ### 第四步：确定章骨架
 
@@ -49,7 +49,7 @@ pmbok7_anchor: ...
 ---
 > [锦程建工情境钩子]
 
-（注：PMP 虽为 human-readable 路线，但因认证类多源校验需要，META 显式声明了章级 frontmatter schema，是 human-readable 路线的例外，见 two-routes.md。）
+（注：PMP 虽为 human-readable 路线，但因认证类多源校验需要，写作规范显式声明了章级 frontmatter schema，是 human-readable 路线的例外，见 two-routes.md。）
 
 ## 4.1 [小节标题]
 [叙事 prose]
@@ -81,7 +81,7 @@ pmbok7_anchor: ...
 2. **同一张卡可以出现在不同位置**（precise-definition 在小节内，cross-ref-trace 行内嵌入）
 3. **卡是原子的，板块是组合的**——章骨架是卡组合后的结构，不是卡的平铺
 4. **每章有可选板块的弹性**——声明哪些板块可略去，避免硬凑
-5. **整书级卡（foundation-chapter/multi-source-arbitration/appendix-compilation）不进章骨架**，它们是 OUTLINE 层面的设计
+5. **整书级卡（foundation-chapter/multi-source-arbitration/appendix-compilation）不进章骨架**，它们是章节骨架层面的设计
 
 用同样的走查方法，CPA 一章的骨架会映射为：
 - scenario-hook + character-protagonist → 章首老周视角叙事

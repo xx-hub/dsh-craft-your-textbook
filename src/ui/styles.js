@@ -9,7 +9,7 @@ export const S = {
 	container: {
 		padding: "16px 20px",
 		fontFamily: "inherit",
-		color: "var(--dsw-text, #1f2328)",
+		color: "var(--dsw-alias-label-primary)",
 	},
 	title: { fontSize: "16px", fontWeight: 600, margin: "0 0 4px" },
 	hint: { fontSize: "12px", opacity: 0.65, margin: "0 0 12px" },
@@ -21,32 +21,32 @@ export const S = {
 	},
 	projectBtn: (active) => ({
 		border: active
-			? "1px solid var(--dsw-accent, #4f6ef7)"
-			: "1px solid var(--dsw-border, #d0d7de)",
-		background: active ? "var(--dsw-accent-soft, #eef2ff)" : "transparent",
+			? "1px solid var(--dsw-alias-state-business-primary)"
+			: "1px solid var(--dsw-alias-border-l2)",
+		background: active ? "var(--dsw-alias-state-business-tertiary)" : "transparent",
 		borderRadius: "8px",
 		padding: "6px 10px",
 		fontSize: "13px",
 		cursor: "pointer",
 	}),
 	card: {
-		border: "1px solid var(--dsw-border, #d0d7de)",
+		border: "1px solid var(--dsw-alias-border-l2)",
 		borderRadius: "10px",
 		padding: "12px 14px",
 		marginBottom: "10px",
-		background: "var(--dsw-surface, #ffffff)",
+		background: "var(--dsw-alias-bg-layer-1)",
 		fontSize: "13px",
 	},
 	focus: {
-		border: "1.5px solid var(--dsw-accent, #4f6ef7)",
+		border: "1.5px solid var(--dsw-alias-state-business-primary)",
 		borderRadius: "12px",
 		padding: "14px 16px",
 		marginBottom: "12px",
-		background: "var(--dsw-accent-soft, #eef2ff)",
+		background: "var(--dsw-alias-state-business-tertiary)",
 		fontSize: "13px",
 	},
 	error: {
-		color: "var(--dsw-danger, #cf222e)",
+		color: "var(--dsw-alias-state-error-primary)",
 		fontSize: "13px",
 		margin: "8px 0",
 	},
@@ -57,27 +57,29 @@ export const S = {
 		fontSize: "14px",
 		fontWeight: 600,
 		cursor: "pointer",
-		color: "#ffffff",
+		// 压在强调色实心底上的字：跟主题一起翻的「反色前景」，不再写死 #ffffff
+		// （强调色接宿主之后暗色是浅蓝，白字压上去正是票 19 说的那种不可读）。
+		color: "var(--dsw-alias-label-primary-foreground)",
 		background: primary
-			? "var(--dsw-accent, #4f6ef7)"
-			: "var(--dsw-danger, #cf222e)",
+			? "var(--dsw-alias-state-business-primary)"
+			: "var(--dsw-alias-state-error-primary)",
 	}),
 	// 次级按钮（批 3，2026-09-20）：原来「预览/不满意/认可」三键都是 bigBtn(true)，
 	// 三个一模一样的蓝实心并排，用户看不出该点哪儿。主操作填色，其余描边。
 	ghostBtn: (danger) => ({
-		border: `1px solid ${danger ? "var(--dsw-danger, #cf222e)" : "var(--dsw-border, #d0d7de)"}`,
+		border: `1px solid ${danger ? "var(--dsw-alias-state-error-primary)" : "var(--dsw-alias-border-l2)"}`,
 		borderRadius: "10px",
 		padding: "10px 18px",
 		fontSize: "14px",
 		fontWeight: 600,
 		cursor: "pointer",
 		background: "transparent",
-		color: danger ? "var(--dsw-danger, #cf222e)" : "inherit",
+		color: danger ? "var(--dsw-alias-state-error-primary)" : "inherit",
 	}),
 	smallLink: {
 		border: "none",
 		background: "transparent",
-		color: "var(--dsw-accent, #4f6ef7)",
+		color: "var(--dsw-alias-state-business-primary)",
 		cursor: "pointer",
 		fontSize: "12px",
 		textDecoration: "underline",
@@ -86,7 +88,7 @@ export const S = {
 	input: {
 		width: "100%",
 		borderRadius: "8px",
-		border: "1px solid var(--dsw-border, #d0d7de)",
+		border: "1px solid var(--dsw-alias-border-l2)",
 		padding: "6px 8px",
 		fontSize: "13px",
 		boxSizing: "border-box",
@@ -97,7 +99,7 @@ export const S = {
 		width: "100%",
 		minHeight: "56px",
 		borderRadius: "8px",
-		border: "1px solid var(--dsw-border, #d0d7de)",
+		border: "1px solid var(--dsw-alias-border-l2)",
 		padding: "6px 8px",
 		fontSize: "13px",
 		boxSizing: "border-box",
@@ -120,17 +122,17 @@ export const S = {
 		fontSize: "11px",
 		color:
 			state === "done"
-				? "var(--dsw-text, #1f2328)"
+				? "var(--dsw-alias-label-primary)"
 				: state === "current"
-					? "#ffffff"
-					: "var(--dsw-text, #1f2328)",
+					? "var(--dsw-alias-label-primary-foreground)"
+					: "var(--dsw-alias-label-primary)",
 		background:
 			state === "done"
-				? "var(--dsw-success-soft, #dafbe1)"
+				? "var(--dsw-alias-state-success-tertiary)"
 				: state === "current"
-					? "var(--dsw-accent, #4f6ef7)"
-					: "var(--dsw-border-soft, #eff1f4)",
+					? "var(--dsw-alias-state-business-primary)"
+					: "var(--dsw-alias-bg-skeleton)",
 		border:
-			state === "current" ? "none" : "1px solid var(--dsw-border, #d0d7de)",
+			state === "current" ? "none" : "1px solid var(--dsw-alias-border-l2)",
 	}),
 };

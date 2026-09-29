@@ -10,10 +10,10 @@
 
 | 占位符 | 填什么 |
 |---|---|
-| `{META_PATH}` | META.md 完整路径 |
-| `{OUTLINE_PATH}` | OUTLINE.md 完整路径 |
-| `{STYLE_SPEC_PATH}` | style-spec.md 完整路径 |
-| `{SOURCE_INDEX_PATH}` | 源材料索引.md 完整路径（Mode A 无源时删掉该项） |
+| `{META_PATH}` | 写作规范（契约与铁律）所在路径——skill 侧 `META.md`；本仓 `work/style-spec.md`（两半合写在一份里） |
+| `{OUTLINE_PATH}` | 章节骨架所在路径——skill 侧 `OUTLINE.md`；本仓 `work/outline.md` |
+| `{STYLE_SPEC_PATH}` | 风格与语法所在路径——skill 侧 `style-spec.md`；本仓与写作规范同一份 `work/style-spec.md` |
+| `{SOURCE_INDEX_PATH}` | 源材料索引所在路径——skill 侧 `源材料索引.md`；本仓 `work/explore.md`＋`work/knowledge-map.json`（Mode A 无源时删掉该项） |
 | `{ROUTE}` | `pure-blueprint` 或 `human-readable`（决定读哪些不变量） |
 | `{CHAPTER_FILE}` | 被审章节文件路径（模板 A） |
 | `{GOLD_STANDARD_FILE}` | 金标准章文件路径（模板 B） |
@@ -85,9 +85,9 @@ Subagent (general-purpose):
     - 适用不变量：{ROUTE} 路线（I1-I4 必查；pure-blueprint 加查 I5-I6；human-readable 加查 H1-H3）
 
     ## 任务（§7.0 六项）
-    1. **对照 META.md**：Voice 规则、板块模板、版权铁律、字数——逐条打钩。
-    2. **对照 OUTLINE.md**：标题匹配；核心问题是否全部回答；该章覆盖目标（考纲任务/课标/知识域等）是否完整兑现；判断根锚定列是否有显式回扣。
-    3. **对照 源材料索引.md**：预抽关键条目全部覆盖；硬记锚无遗漏；高频陷阱被提及。
+    1. **对照写作规范**：Voice 规则、板块模板、版权铁律、字数——逐条打钩（填 `{META_PATH}` 指向的那份；skill 侧 `META.md`，本仓 `work/style-spec.md`）。
+    2. **对照章节骨架**：标题匹配；核心问题是否全部回答；该章覆盖目标（考纲任务/课标/知识域等）是否完整兑现；判断根锚定列是否有显式回扣（填 `{OUTLINE_PATH}`；skill 侧 `OUTLINE.md`，本仓 `work/outline.md`）。
+    3. **对照源材料索引**：预抽关键条目全部覆盖；硬记锚无遗漏；高频陷阱被提及（填 `{SOURCE_INDEX_PATH}`；skill 侧 `源材料索引.md`，本仓 `work/knowledge-map.json`）。
     4. **"说清楚了吗"测试**：读者读完能自己说清本章标题承诺的三个核心概念吗？哪些被提到但没展开（读者会"这就完了？"）？
     5. **贯穿案例一致性**：案例场景具体可触摸？概念自然从案例事件引出？
     6. **自测题质量**：全部原创？跨行业覆盖 ≥ 3？每题解析说清"为什么对、为什么错"？
@@ -102,7 +102,7 @@ Subagent (general-purpose):
 
 1. **逐条回权威源/方案设计核实**——审计员也会误判或误读（`audit-and-testing.md §6.2`）；确认属实才改，误判的保留不动、注明否决原因。
 2. **按优先级处理**：P0 立即修；P1 继续前修；P2 记录稍后。
-3. **每条 gap 同时问"根因在不在约束文件里？"**——在 → 回填 META / OUTLINE / 源材料索引（`audit-and-testing.md §八`），否则后面每个并行 agent 重踩同一批坑。
+3. **每条 gap 同时问"根因在不在约束文件里？"**——在 → 回填写作规范 / 章节骨架 / 源材料索引（`audit-and-testing.md §八`），否则后面每个并行 agent 重踩同一批坑。
 4. **修完重读约束文件**，确保新规则不自相矛盾，再进入下一步（金标准 gate / 下一章）。
 
 > 一句话：派发是机械的（填占位符 → 派 → 等报告），处理是审慎的（核实 → 分级 → 回填）。

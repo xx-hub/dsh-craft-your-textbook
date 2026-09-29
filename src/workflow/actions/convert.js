@@ -45,7 +45,7 @@ export async function actConvert(ctx, _req, res, action, sessionId, project, bod
           id: `tb-nudge-${Date.now().toString(36)}`,
           role: 'user',
           content: [{ type: 'text', text: `【工作台催办】${text === '' ? '用户在等你推进工作台上的活，请查 workbench_status 后继续。' : text}` }],
-          source: { kind: 'plugin', plugin: 'dsh-craft-your-textbook', form: 'notice', summary: '工作台：用户催办' },
+          source: { kind: 'plugin:dsh-craft-your-textbook', form: 'notice', summary: '工作台：用户催办' },
         })
         sendJson(res, 200, { ok: true })
       } catch (error) {
@@ -79,7 +79,7 @@ export async function actConvert(ctx, _req, res, action, sessionId, project, bod
             id: `tb-resume-${Date.now().toString(36)}`,
             role: 'user',
             content: [{ type: 'text', text }],
-            source: { kind: 'plugin', plugin: 'dsh-craft-your-textbook', form: 'notice', summary: `工作台：用户点了「让 AI 接着干」（${label || '当前环节'}）` },
+            source: { kind: 'plugin:dsh-craft-your-textbook', form: 'notice', summary: `工作台：用户点了「让 AI 接着干」（${label || '当前环节'}）` },
           })
           if (!clearedPause) appendEvent(project, 'textbook/resume', {})
           // 状态改动走 updateMeta（当场新读）：上面 appendEvent 已经推进过账高，

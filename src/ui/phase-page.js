@@ -18,8 +18,9 @@
  * 两条硬边界（承 ADR-0010）：
  *  1. 产物一律由写着「打开」的显式按钮交给 DSH 右栏（`onOpen`，只读、不进模型上下文）；
  *     **导航本身不开任何文件**。
- *  2. 机器产物（`work/audit-NN.md`）与走卡片内联的（知识地图）都不进"文件"清单——
- *     判据见 `view-rules.openableArtifacts`。
+ *  2. 机器产物（`work/audit-NN.md`）与走卡片内联的（知识地图、章节安排 `work/outline.md`）
+ *     都不进"文件"清单——判据见 `view-rules.openableArtifacts`；后两者的可读形态由本文件的
+ *     `KnowledgeMapBlock` / `OutlineBlock` 就地折叠承担（票 pipeline-wiring-gaps/09）。
  *
  * 「✍️ 定点修改」就地展开确认框：不换屏、不另造一份流程，页脚直接长出「影响预告 + 写一句 + 提交」。
  * 撤销（「↩️ 撤销刚才的定点修改（10 分钟内）」）也归这一页：原来它长在旧的分段单卡里，合并时
@@ -42,7 +43,7 @@ import {
 import { OpenArtifactButton } from "./open-artifact-button.js";
 // 知识地图（机器产物）的人读折叠：与阶段页里就地展开它的 `KnowledgeMapBlock` 共用一份，
 // 别让同一样东西两处两种读法。
-import { foldKnowledgeMap } from "./chapters-map.js";
+import { foldKnowledgeMap, foldOutline } from "./chapters-map.js";
 
 // 每个阶段用哪套布局（用户裁决的那张表；改它等于改设计，别顺手改）。
 const PHASE_LAYOUT = Object.freeze({
@@ -66,16 +67,16 @@ const P = {
 		gap: "8px",
 		padding: "7px 10px",
 		borderRadius: "8px",
-		border: "1px solid var(--dsw-border, #d0d7de)",
+		border: "1px solid var(--dsw-alias-border-l2)",
 		marginBottom: "6px",
-		background: "var(--dsw-bg, #fff)",
+		background: "var(--dsw-alias-bg-base)",
 		fontSize: "13px",
 	},
 	kindTag: {
 		fontSize: "11px",
 		padding: "1px 6px",
 		borderRadius: "999px",
-		background: "var(--dsw-border-soft, #eff1f4)",
+		background: "var(--dsw-alias-bg-skeleton)",
 		opacity: 0.85,
 		whiteSpace: "nowrap",
 	},
@@ -85,7 +86,9 @@ const P = {
 		margin: "8px 0 0",
 		padding: "8px 10px",
 		borderRadius: "8px",
-		background: "var(--dsw-border-soft, #eff1f4)",
+		// 产物代码块走宿主自己的「代码块底色」语义，不复用通用骨架底色（票 19 路线 A；
+		// 取值见 docs/reference/dsh-theme-token-contracts.md §2）。
+		background: "var(--dsw-alias-markdown-code-block)",
 		fontSize: "12px",
 		maxHeight: "260px",
 		overflow: "auto",
@@ -193,11 +196,11 @@ function DeepModifyLink(props) {
 	const downstream = row.downstream ?? [];
 	return h(
 		"div",
-		{ style: { marginTop: "8px", borderTop: "1px dashed var(--dsw-border, #d0d7de)", paddingTop: "8px" } },
+		{ style: { marginTop: "8px", borderTop: "1px dashed var(--dsw-alias-border-l2)", paddingTop: "8px" } },
 		h("p", { style: { margin: "0 0 6px", fontWeight: 600 } }, `✍️ 定点修改「${row.title}」`),
 		h(
 			"p",
-			{ style: { margin: "0 0 6px", fontSize: "12px", color: "var(--dsw-danger, #cf222e)" } },
+			{ style: { margin: "0 0 6px", fontSize: "12px", color: "var(--dsw-alias-state-error-primary)" } },
 			downstream.length === 0
 				? "影响预告：这一步之后没有下游要重做。"
 				: `影响预告：这一步改了，这些要一起重做：${downstream.join("、")}。`,
@@ -271,7 +274,7 @@ function StackBody(props) {
 						...S.card,
 						// 从步清单点进来的那一步：描一圈，指明"你点的是这一个"。
 						...(row.key === props.focusedStepKey
-							? { outline: "2px solid var(--dsw-text, #1f2328)", outlineOffset: "-2px" }
+							? { outline: "2px solid var(--dsw-alias-label-primary)", outlineOffset: "-2px" }
 							: {}),
 					},
 				},
@@ -384,7 +387,7 @@ function SplitBody(props) {
 				style: {
 					width: "190px",
 					flexShrink: 0,
-					border: "1px solid var(--dsw-border, #d0d7de)",
+					border: "1px solid var(--dsw-alias-border-l2)",
 					borderRadius: "10px",
 					padding: "6px",
 					maxHeight: "360px",
@@ -408,7 +411,7 @@ function SplitBody(props) {
 							cursor: "pointer",
 							color: "inherit",
 							background:
-								index === picked ? "var(--dsw-accent-soft, #eef2ff)" : "transparent",
+								index === picked ? "var(--dsw-alias-state-business-tertiary)" : "transparent",
 							opacity: item.status === "pending" ? 0.55 : 1,
 						},
 						onClick: () => setPicked(index),
@@ -564,6 +567,38 @@ export function KnowledgeMapBlock(props) {
 			"div",
 			{ style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
 			h("strong", { style: { fontSize: "13px" } }, "AI 挑出来的重点"),
+			h(
+				"button",
+				{ style: S.smallLink, onClick: () => setOpen((v) => !v) },
+				open ? "收起" : "展开看清单",
+			),
+		),
+		open ? h("pre", { style: P.pre }, body) : null,
+	);
+}
+
+/** 拍板定方案：章节安排（`work/outline.md` 是机器 JSON，人读形态是**就地折叠清单**）。 */
+export function OutlineBlock(props) {
+	const [open, setOpen] = useState(false);
+	const text = typeof props.text === "string" && props.text !== "" ? props.text : null;
+	if (text === null)
+		return h(
+			"div",
+			{ style: S.card },
+			h("p", { style: { margin: 0, fontSize: "12px", opacity: 0.7 } }, "还没有章节安排。"),
+		);
+	// 机器产物（原始 JSON）折成人读清单：与知识地图同一条路（`chapters-map.foldOutline`）——
+	// 解析失败/无内容时回退原文（不假装读懂了）。`work/outline.md` 判 `'inline'` 不开右栏
+	// （票 pipeline-wiring-gaps/09），所以**这里就是它回看时唯一的人读出口**。
+	const folded = foldOutline(text);
+	const body = folded ?? text;
+	return h(
+		"div",
+		{ style: S.card },
+		h(
+			"div",
+			{ style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+			h("strong", { style: { fontSize: "13px" } }, "章节安排"),
 			h(
 				"button",
 				{ style: S.smallLink, onClick: () => setOpen((v) => !v) },
@@ -771,6 +806,9 @@ export function PhasePage(props) {
 	const extras = [];
 	if (phase === 2)
 		extras.push(h(KnowledgeMapBlock, { key: "km", text: props.knowledgeMapText }));
+	// 章节安排：机器 JSON 那一族（`'inline'`）的另一条，就地折叠给人读（票 pipeline-wiring-gaps/09）。
+	if (phase === 3)
+		extras.push(h(OutlineBlock, { key: "outline", text: props.outlineText }));
 	if (phase === 4)
 		extras.push(
 			h(GoldBlock, {

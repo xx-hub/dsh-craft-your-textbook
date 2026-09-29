@@ -289,6 +289,10 @@ const LABEL_EVENT_TYPES = new Set([
  *   ② **label 的形状**（见 `eventLabelArtifacts`）；
  *   ③ **存在性**（在 `workEntryForEvent` 里收口）：候选要真在 `/textbook/work` 的清单里才算数。
  *
+ * ⚠️ 候选的**动作判据（`workEntryAction === 'sidebar'`）对三层一视同仁**，不只作用在 ①：
+ * ②认得出的 `work/outline.md`（章节安排）是机器 JSON，判 `'inline'`（票 pipeline-wiring-gaps/09），
+ * 放它过就是一个点了没反应的「打开」。
+ *
  * ⚠️ **「自查第 N 章」故意没有候选**：它落的是 `work/audit-NN.md`——机器审计 JSON
  * （`{"passed":…,"issues":[…]}`，不是给人读的文件）。既不开右栏，也不给「查看结果」入口：
  * 留一个点了没反应的按钮，正是本轮在修的毛病。每章的检查结论经机器检查清单与
@@ -317,7 +321,12 @@ function eventArtifactCandidates(event, meta) {
 		else if (phase === 5 || phase === 6) candidates.push("work/book.md");
 	}
 
-	return candidates;
+	// ⚠️ **三层的候选一律过产物判据**（票 pipeline-wiring-gaps/09）：label 形状层认得出
+	// 「章节骨架 → work/outline.md」，但那份文件内容是机器 JSON（`productOpenMode` 判 `'inline'`），
+	// 而右栏通道只认 `'sidebar'`——候选放行出去，事件行就长出一个**点了没反应**的「打开」。
+	// 那一族的出口是卡片内联折叠清单（`chapters-map.foldOutline` / `KnowledgeMapBlock`），
+	// 与「自查第 N 章」不给 audit JSON 入口同源：机器产物不生死按钮。
+	return candidates.filter((rel) => workEntryAction(rel) === "sidebar");
 }
 
 /**

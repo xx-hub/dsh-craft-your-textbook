@@ -53,9 +53,9 @@ function bubble(side, text, extraStyle) {
 				alignSelf: side === "user" ? "flex-end" : "flex-start",
 				background:
 					side === "user"
-						? "var(--dsw-accent-soft, #eef2ff)"
-						: "var(--dsw-surface, #ffffff)",
-				border: "1px solid var(--dsw-border, #d0d7de)",
+						? "var(--dsw-alias-state-business-tertiary)"
+						: "var(--dsw-alias-bg-layer-1)",
+				border: "1px solid var(--dsw-alias-border-l2)",
 				...(extraStyle ?? {}),
 			},
 		},
@@ -123,7 +123,7 @@ function badgeSpan(text) {
 			style: {
 				margin: "2px 0 6px 12px",
 				fontSize: "11px",
-				color: "var(--dsw-success, #1a7f37)",
+				color: "var(--dsw-alias-state-success-primary)",
 				lineHeight: 1.5,
 				whiteSpace: "pre-wrap",
 				wordBreak: "break-word",
@@ -258,7 +258,7 @@ export function ChatDesk(props) {
 					bubble(
 						"assistant",
 						`⚠️ 出错了：${data.message ?? node.message ?? ""}`,
-						{ color: "var(--dsw-danger, #cf222e)" },
+						{ color: "var(--dsw-alias-state-error-primary)" },
 					),
 				);
 				break;

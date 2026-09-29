@@ -25,6 +25,7 @@ import {
   advance,
   countProposals,
   scanScaffolding,
+  scaffoldResidue,
   stripLoaderRegion,
   specFingerprint,
   styleSpecDeclaresNoExercises,
@@ -427,6 +428,10 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
             state.pendingStage = null
             state.pendingGate = null
           })
+          // ⚠️ 这个文件**内容是 JSON**（票 pipeline-wiring-gaps/09）：所以
+          // `domain-rules.productOpenMode` 判它 `'inline'`、不开右栏预览——与 `work/audit-NN.md`
+          // 同一条理由。人读形态：章节安排确认卡（拍板前就在屏上）与阶段页第 3 阶段的就地折叠
+          // 清单（`chapters-map.foldOutline`）。演示模式（`engine.js` 那一行）落同一份 JSON，口径相同。
           writeWork(project, 'outline.md', JSON.stringify({ chapters: cleaned }, null, 2))
           appendEvent(project, 'textbook/agent-end', { label: '整理章节骨架', outcome: 'ok', path: 'work/outline.md' })
           if (waived(project, 'outline-skip')) {
@@ -452,13 +457,21 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
             rejectSubmit('gold', `范例章文件缺失或为空：${missing.join('、')}`)
             return
           }
-          // style-spec 节标题软验（真实模式）：写作规范十问契约要求节标题齐全，缺了就拦下让 AI 补全。
+          // style-spec 节标题软验（真实模式）：写作规范十九项契约要求节标题齐全，缺了就拦下让 AI 补全。
+          // ⚠️ 票 20 已知失效路径：这是**软验**（查节标题在不在），**不查列表内容合不合理**——
+          // AI 写一个 30 字的长标题照样过。所以「宽声明 → 误报 → 用户 waive 一次 → 硬编码地板被永久关掉」
+          // 这条路径没有被机器堵死，处置写在票 20 的 `## Comments`（人工边界）。
           // demo 模式的占位 style-spec 没有节标题，不拦。
           if (subMeta.demo !== true) {
             const spec = readFileSync(workFile(project, 'style-spec.md'), 'utf8')
-            const missingSections = ['模式选型', '板块语法', '深度四维承诺'].filter((h) => !spec.includes(h))
+            // 票 20：加「脚手架标题列表」这一项——**否则「AI 被要求写」和「机器查它写了」之间还是同一根断线**。
+            // 其余三个标题是既有判据，一个没动。
+            // ⚠️ 第四项的词**必须与十八项契约第 10 项逐字一致**（两边一个写「列表」一个写「清单」时，
+            // 契约说该写、机器验另一个词 ⇒ 范例章交工恒被拒）。`test-scaffold-declaration.mjs`
+            // 从 `engine.js` 的契约文本里**解析**出那个词来比，不在本文件里硬编码第二份。
+            const missingSections = ['模式选型', '板块语法', '深度四维承诺', '脚手架标题列表'].filter((h) => !spec.includes(h))
             if (missingSections.length > 0) {
-              rejectSubmit('gold', `style-spec 缺节标题：${missingSections.join('、')}（写作规范十问契约见任务说明）`)
+              rejectSubmit('gold', `style-spec 缺节标题：${missingSections.join('、')}（写作规范十九项契约见任务说明）`)
               return
             }
           }
@@ -542,9 +555,14 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
           if (subMeta.demo !== true) {
             const chapterText = readFileSync(chapterPath, 'utf8')
             if (!waived(project, 'scaffold-keep')) {
-              const residue = scanScaffolding(stripLoaderRegion(chapterText))
-              if (residue.length > 0) {
-                rejectSubmit('chapters', `第${n}章正文残留 AI 笔记/脚手架：${residue.slice(0, 3).join('；')}。先拆干净再交工（豁免「保留 AI 的笔记不删」可跳过）。`)
+              // 票 20：通用残留 + **写作规范声明过的本书标题**两个来源都查（复用 engine 的 `scaffoldResidue`，
+              // 与终检 `runQualityChecks` 同一份判据、同一份护栏：escapeRegExp、数量/长度上限、
+              // 没声明就整项不追加、读不到 style-spec 就干净退回通用那一条）。
+              const residue = scaffoldResidue(project, stripLoaderRegion(chapterText))
+              const hits = [...residue.declared, ...residue.generic]
+              if (hits.length > 0) {
+                const kinds = [residue.declared.length > 0 ? '本书声明过的脚手架标题' : null, residue.generic.length > 0 ? '通用脚手架标记' : null].filter(Boolean).join(' ＋ ')
+                rejectSubmit('chapters', `第${n}章正文残留 ${kinds}：${hits.slice(0, 3).join('；')}。先拆干净再交工（豁免「保留 AI 的笔记不删」可跳过）。`)
                 return
               }
             }

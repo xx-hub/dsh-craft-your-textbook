@@ -447,6 +447,9 @@ export function WorkbenchView(props) {
 	const snapshots = coreData === null ? NO_SNAPSHOTS : coreData.snapshots;
 	const bookDir = coreData === null ? null : coreData.bookDir;
 	const knowledgeMapText = coreData === null ? null : coreData.knowledgeMap;
+	// 章节安排原文（`work/outline.md`，内容是机器 JSON）：判 `'inline'`、不开右栏
+	// （票 pipeline-wiring-gaps/09），人读形态是阶段页第 3 阶段那张就地折叠清单。
+	const outlineText = coreData === null ? null : coreData.outline;
 	const pendingStageView = coreData === null ? null : coreData.pending.stage;
 	const pendingGateView = coreData === null ? null : coreData.pending.gate;
 	const pendingReviews = coreData === null ? NO_PENDING_REVIEWS : coreData.pending.reviews;
@@ -746,8 +749,11 @@ export function WorkbenchView(props) {
 	// 两条路按产物判据分岔（domain-rules.productOpenMode，与后端路由同一份清单）：
 	//  - 'preview'（有正文的产物）→ DSH 右栏预览：地址用**工作区相对路径**拼，只读、
 	//    不进模型上下文（用户在这里读到的东西永不进入模型请求）。
-	//  - 'inline'（knowledge-map.json）→ 不在这里开：它的人读形态由阶段页 / 确认卡**就地**
-	//    折叠展示（`KnowledgeMapBlock` / `ExploreConfirmCard`），工作台不再有第二个查看壳。
+	//  - 'inline'（knowledge-map.json / outline.md）→ 不在这里开：它们的内容是机器 JSON，
+	//    人读形态由阶段页 / 确认卡**就地**折叠展示（`KnowledgeMapBlock` / `ExploreConfirmCard`
+	//    / `OutlineBlock` / `OutlineConfirmCard`），工作台不再有第二个查看壳。
+	//    ⚠️ `work/outline.md`（章节安排）也在这一族（票 pipeline-wiring-gaps/09）：名字带 `.md`、
+	//    内容是 `{"chapters":[…]}`，与 `work/audit-NN.md` 同一条理由判掉右栏通道。
 	//  - 'machine'（机器产物/源 PDF）→ 不给人读，什么都不开。
 	const openInSidebar = (rel) => {
 		const bookUi = bookUiRef.current;
@@ -1545,6 +1551,7 @@ export function WorkbenchView(props) {
 							checks,
 							aiReport,
 							knowledgeMapText,
+							outlineText,
 							goldDrafts,
 							goldDraftVersion,
 							onOpen: openInSidebar,
@@ -1789,6 +1796,14 @@ export function WorkbenchView(props) {
 							// 「轮到谁」以 humanTurn 为准（02 屏判读实测：status=running 但拍板正等用户时，
 							// 活性行原来说「我正在做·卡住了」，与同屏状态条的「轮到你」打架）。
 							humanTurn,
+							// 票 14：横幅详情行为空**且这一步已经交办出去**时（`stageScopedProgressDetail`
+							// 返回 `""`，宿主重启后恢复链只补 `stage-start`、没补 `progress` 的那一段窗口），
+							// 这一行不许说没有内容支撑的「🤖 我正在做」——与状态条**同改**、读**同一份判据**。
+							// ⚠️ `pendingStageView` 与 `progressDetail` **两个都要传**：判据是两个前提合取，
+							// 少传一个范围就会宽一格（跑动中但**尚未交办**那一格，那半句是实话，必须留着）。
+							// 取数仍然只算一次（`client-entry.js:1235`），这里只是把同一格递给第二处。
+							progressDetail,
+							pendingStage: pendingStageView,
 							// 这一屏唯一的出口：判定结果是共用那一份（三路输入、一个门槛），
 							// 措辞与时长格式化都归它（见 `src/ui/rules.js`）。
 							stall,
@@ -2188,7 +2203,7 @@ export function WorkbenchView(props) {
 																		style: {
 																			whiteSpace: "pre-wrap",
 																			wordBreak: "break-word",
-																			background: "var(--dsw-surface, #fff)",
+																			background: "var(--dsw-alias-bg-layer-1)",
 																			borderRadius: "6px",
 																			padding: "8px",
 																			fontSize: "12px",
@@ -2217,7 +2232,7 @@ export function WorkbenchView(props) {
 														style: {
 															whiteSpace: "pre-wrap",
 															wordBreak: "break-word",
-															background: "var(--dsw-surface, #fff)",
+															background: "var(--dsw-alias-bg-layer-1)",
 															borderRadius: "6px",
 															padding: "8px",
 															fontSize: "12px",
@@ -2278,8 +2293,8 @@ export function WorkbenchView(props) {
 									alignItems: "center",
 									justifyContent: "flex-end",
 									gap: "8px",
-									background: "var(--dsw-surface, #fff)",
-									borderTop: "1px solid var(--dsw-border, #d0d7de)",
+									background: "var(--dsw-alias-bg-layer-1)",
+									borderTop: "1px solid var(--dsw-alias-border-l2)",
 								},
 							},
 								createElement(
@@ -2331,7 +2346,7 @@ export function WorkbenchView(props) {
 								style: {
 									height: `${deskLiveRef.current ?? deskHeight}px`,
 									flexShrink: 0,
-									borderTop: "1px solid var(--dsw-border, #d0d7de)",
+									borderTop: "1px solid var(--dsw-alias-border-l2)",
 									position: "relative",
 								},
 							},

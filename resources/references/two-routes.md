@@ -46,7 +46,7 @@ digraph route {
 | 过程不变量 | I7-I9（两条路线同等适用，见 invariants.md） | I7-I9 |
 | 正文形态 | 结构化、可含元指令块、技术回溯、yaml frontmatter、emoji 标题 | 流畅 prose，不内嵌元指令 |
 | 教学路线图位置 | 散布于各板块（💬引导方向/双脚本等） | 集中在章末教学区 |
-| 章级 frontmatter | 可选且常用（grep 校验用） | 默认无，META 显式声明 |
+| 章级 frontmatter | 可选且常用（grep 校验用） | 默认无，由写作规范显式声明 |
 | 典型样本 | 英语七上教材 | PMP 认证教材、CPA 审计教材 |
 
 ---
@@ -63,7 +63,7 @@ digraph route {
 - 正文读起来像一本正常的书——段落过渡、叙事桥梁、人物/案例展开
 - 章末教学区是独立板块（markdown 二级标题分隔），包含练习/讨论题/思考题
 - 技术回溯改为可读的交叉引用（"正如第 2 章讨论过的……"而非行内标签）
-- Loader 指令（merge_book.py 自动注入 BOOK.md 顶部，可在脚本 LOADER_TEMPLATE 中定制措辞）：
+- Loader 指令（合并时由**装配脚本**自动注入成品书顶部——skill 侧是 `merge_book.py` 的 `LOADER_TEMPLATE`，本仓无脚本、由 `work/book.md` 的 `<!-- loader:begin -->` 区承载——可在那一处定制措辞）：
 
 ```
 > **AI 老师使用说明**：本书是给人读的流畅教材。正文 prose 是素材库，用你自己的话重组教学；

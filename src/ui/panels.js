@@ -26,6 +26,54 @@ import { phaseUi, gateHuman } from "./view-rules.js";
  */
 const pausedNow = (meta) => meta?.pause != null;
 
+/**
+ * 「这一步**有**内容支撑吗」的唯一判据（票 `walkthrough-fixes/14` · 走查 P40 那一格）。
+ *
+ * 读的是 `stageScopedProgressDetail`（`src/ui/rules.js`）算出来的那一格——**取数口径一个字没动**，
+ * 这里只判它的**空值**。
+ *
+ * 为什么要这张判据：宿主重启后，启动恢复链只补一条 `textbook/stage-start`、**不补 `textbook/progress`**
+ * （那是路线 A「落账侧」，代价是「谁替 AI 说这句话」＝机器代 AI 说话，2026-09-29 用户拍板**不选**），
+ * 于是那一格取数返回 `""`、横幅**详情行整行消失**；可同一屏上那句「🤖 我正在做 · 写完整本」照旧一字未改
+ * ——没有运行中的小助手、没有可停的回合、没有计时、没有一句说明它在做什么。**那是一句纯粹的断言，
+ * 而且已知为假。**（数据一件没丢：走查实测 13 章正文 / 3 份合并审计 / 15 个存档 / 70 条账本事件全在，
+ * 坏的只是横幅的形态——不要把它记成「恢复链坏了」。）
+ *
+ * ⚠️ **它与 `pausedNow` 是两件事，不许合并**：
+ *   · `pausedNow`＝用户自己按了暂停，顶栏那句「⏸ 已暂停」**有内容支撑**（票 22 已收口）；
+ *   · 本条＝机器**什么都没开始**却仍在说「我正在做」，是**没有支撑**的（票 14）。
+ * 合并成一条判据就会得到「一律闭嘴」那种定位不了的假绿。
+ *
+ * ⚠️ 为什么不落成「⚡ 轮到你」：用户此刻**没有任何事要做**（没到拍板点、没到确认点），
+ * 说「轮到你」是拿一句假话换另一句假话。**这一格选了「不出声」**——与暂停那一支同一形态：
+ * 整条不出声，而不是留一个只剩边框的空条，也**不是**新造第四个状态词。
+ * （「progress 为空不算第四个状态词」那句边界说明由兄弟票 `16-状态词同屏打架.md` 落笔到 CONTEXT.md。）
+ */
+const hasProgressDetail = (detail) => typeof detail === "string" && detail.trim() !== "";
+
+/** 「这一步**已经交办出去了**吗」——`pendingStage` 非空（`StatusStrip` 与 `ActivityLine` 共用同一份口径）。 */
+const handedOverNow = (pendingStage) => pendingStage !== null && pendingStage !== undefined;
+
+/**
+ * 「我正在做」这句此刻**没有内容支撑**吗（票 `walkthrough-fixes/14` 的全部判据，**只有这一处**）。
+ *
+ * ⚠️⚠️ **两个前提缺一不可，少一个就变成「一律闭嘴」，而那不是本票的裁决**：
+ *   ① **已交办**（`pendingStage` 非空）——机器已经把某一步交出去了，才谈得上「说了却说不出在做什么」；
+ *   ② **零 `progress`**（`stageScopedProgressDetail` 返回 `""`）——详情行整行消失。
+ *
+ * **只有这两条同时成立**（＝宿主重启后、恢复链补了 `stage-start` 还没补 `progress` 的那一段窗口）
+ * 才摘掉那半句。**下面这些一律留着**：
+ *   · **跑动中、尚未交办**（`status: "running"`、`updatedAt` 刚动、没判停）：AI **确实在跑**，
+ *     「🤖 我正在做」是**实话**；摘掉它等于用一句新的假静默换一句旧的实话（`smoke-test.mjs:5680`
+ *     「活性行·回合中态不对」钉的就是这一格，**它是既有事实，不是过期断言**）。
+ *   · 有 `progress` 详情：那句**有**支撑。
+ * ⚠️ 第一次落地时这里**漏了前提 ①**（只判了 `progressDetail` 空不空），范围比裁决宽了一格，
+ * 连带把上面那条老断言炸了——`StatusStrip` 一侧当时是对的。**两处必须走这一个函数**，
+ * 不许各写各的（这正是本仓反复治的「一处改、另一处漏」）。
+ */
+const activityClaimUnsupported = (pendingStage, progressDetail) =>
+	handedOverNow(pendingStage) && !hasProgressDetail(progressDetail);
+
 /** 「轮到你」时你到底该做什么——一句大白话，按书的 status 给。
  *  批 1（2026-09-20）：状态词收敛成「轮到你 / 我正在做 / 已完成」，见 CONTEXT.md「工作台状态词」。 */
 function humanTurnAction(status, gate, phase) {
@@ -42,10 +90,16 @@ function humanTurnAction(status, gate, phase) {
 }
 
 export function StatusStrip(props) {
-	const { meta, gate, pendingStage, metaLabel, humanTurn } = props;
+	const { meta, gate, pendingStage, metaLabel, humanTurn, progressDetail } = props;
 	const status = meta?.status ?? "active";
 	const phase = meta?.phase ?? 1;
 	const paused = pausedNow(meta);
+	// 票 14：横幅详情行整格为空时，「我正在做」是**没有内容支撑**的断言 ⇒ 这一支整条不出声。
+	// 判据走**唯一那一个函数** `activityClaimUnsupported`（两个前提：已交办 ＋ 零 progress），
+	// 与 `ActivityLine` 同一份——**两处各判各的正是本仓反复治的那个病**。
+	// `pendingStage` 为空时的「🤖 我正在做 · 准备下一步」是**另一格**、不在本票范围内：
+	// 那一格机器压根没交办出去任何一步，它答的是「还没开始」而不是「正在做但说不清在做什么」。
+	const detailEmpty = activityClaimUnsupported(pendingStage, progressDetail);
 	let text = null;
 	let tone = "normal";
 	if (status === "delivered") {
@@ -82,7 +136,10 @@ export function StatusStrip(props) {
 		//
 		// ⚠️ 取数口径一个字没动：`stageScopedProgressDetail` 仍然只算一次、仍然喂给这三处
 		// （票面明写不许为了去重去改它的取数口径）。
-		text = `🤖 我正在做 · ${metaLabel ?? ""}`;
+		//
+		// 票 14：那一格**空**时（`detailEmpty`）整条不出声——横幅详情行整行消失的时候，
+		// 这一句是**已知的假话**。见文件上方 `hasProgressDetail` 的注释。
+		text = detailEmpty ? null : `🤖 我正在做 · ${metaLabel ?? ""}`;
 		tone = "ai";
 	} else {
 		text = "🤖 我正在做 · 准备下一步";
@@ -91,17 +148,17 @@ export function StatusStrip(props) {
 	// 暂停期间这一条整条不出声（上面那一支的唯一出口）。
 	if (text === null) return null;
 	const bg = {
-		ok: "var(--dsw-success-soft, #dafbe1)",
-		you: "var(--dsw-warn-soft, #fff8e1)",
-		ai: "var(--dsw-accent-soft, #eef2ff)",
-		error: "var(--dsw-danger-soft, #ffebe9)",
+		ok: "var(--dsw-alias-state-success-tertiary)",
+		you: "var(--dsw-alias-state-warn-tertiary)",
+		ai: "var(--dsw-alias-state-business-tertiary)",
+		error: "var(--dsw-alias-file-diff-deleted-bg)",
 		normal: "transparent",
 	}[tone];
 	const border = {
 		ok: "#1a7f37",
 		you: "#d4a72c",
-		ai: "var(--dsw-accent, #4f6ef7)",
-		error: "var(--dsw-danger, #cf222e)",
+		ai: "var(--dsw-alias-state-business-primary)",
+		error: "var(--dsw-alias-state-error-primary)",
 		normal: "transparent",
 	}[tone];
 	return createElement(
@@ -140,7 +197,7 @@ export function StatusStrip(props) {
  * 每一条曾经创建过的子代理都算，跟「干完了等你收」没有关系，对用户也没有可操作性。
  */
 export function ActivityLine(props) {
-	const { meta, stall, subagents, humanTurn, onResume } = props;
+	const { meta, stall, subagents, humanTurn, onResume, progressDetail, pendingStage } = props;
 	const runs = { count: 0, runningCount: 0, ...(subagents ?? {}) };
 	const aggText =
 		Number.isSafeInteger(runs.runningCount) && runs.runningCount > 0
@@ -155,6 +212,25 @@ export function ActivityLine(props) {
 	const paused = pausedNow(meta);
 	// 票 22：暂停同理，且必须与状态条同改——只让状态条闭嘴，这一行仍会留着「🤖 我正在做 · 第 N 次拍板」那半句。
 	// 暂停**不**掐掉子助手聚合：那一句说的是小助手（它们确实在跑），与「已暂停」（说的是主笔 AI）不是同一件事。
+	//
+	// 票 14：横幅详情行为空时（`textbook/progress` 一条都还没有，宿主重启后的那一段窗口），
+	// 「🤖 我正在做」是**没有内容支撑**的断言——必须与状态条**同改**、读**同一份判据**，
+	// 只让状态条闭嘴这一行照旧留着。判的是 `stageScopedProgressDetail` 的**空值**，**不是** `paused`
+	// （两件事，理由见文件上方注释）。
+	//
+	// ⚠️⚠️ **判据带「已交办」前提**（`activityClaimUnsupported`），不是「`progressDetail` 空就摘」：
+	// **跑动中、尚未交办**那一格（`status:"running"`、刚动过、没判停）AI **确实在跑**，
+	// 那半句是**实话**——摘掉它等于用一句新的假静默换一句旧的实话
+	// （`smoke-test.mjs:5680`「活性行·回合中态不对」钉的就是这一格）。第一次落地时这里漏了那个前提，
+	// 把范围放宽了一格、连带炸了那条老断言；现在两处走同一个函数。
+	//
+	// ⚠️「从断点继续」那颗按钮**保留**：它答的是「能不能接着做」，是有内容支撑的（9.4 小时没动静
+	// 正是最需要它的时候），把整条收掉等于把那一格唯一可操作的出口一起收走。
+	// 收掉的只是那半句没有支撑的状态词——留下的是**纯事实**（多久没动静）与那颗按钮。
+	const detailEmpty = activityClaimUnsupported(pendingStage, progressDetail);
+	const idlePrefix = detailEmpty
+		? `${humanDuration(stall?.idleMs)}没动静了 `
+		: `🤖 我正在做 · ${humanDuration(stall?.idleMs)}没动静了 `;
 	const content =
 		humanTurn === true || paused
 			? null
@@ -168,7 +244,7 @@ export function ActivityLine(props) {
 						? createElement(
 								"span",
 								null,
-								`🤖 我正在做 · ${humanDuration(stall.idleMs)}没动静了 `,
+								idlePrefix,
 								createElement(
 									"button",
 									{
@@ -184,7 +260,9 @@ export function ActivityLine(props) {
 									"🔁 从断点继续",
 								),
 							)
-						: "🤖 我正在做";
+						: detailEmpty
+							? null
+							: "🤖 我正在做";
 	// 轮到用户、又没有子代理聚合 → 整行不出现（状态条已经说了「轮到你 · 要你做什么」）。
 	if (content === null && aggText === "") return null;
 	return createElement(
@@ -243,8 +321,8 @@ export function InterruptNote(props) {
 				padding: "8px 12px",
 				borderRadius: "8px",
 				fontSize: "13px",
-				background: "var(--dsw-accent-soft, #eef2ff)",
-				border: "1px solid var(--dsw-accent, #4f6ef7)",
+				background: "var(--dsw-alias-state-business-tertiary)",
+				border: "1px solid var(--dsw-alias-state-business-primary)",
 				boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
 				display: "flex",
 				alignItems: "center",
@@ -278,8 +356,8 @@ const AUTO_FOLLOW_BANNER_STYLE = {
 	padding: "8px 12px",
 	borderRadius: "8px",
 	fontSize: "13px",
-	background: "var(--dsw-accent-soft, #eef2ff)",
-	border: "1px solid var(--dsw-accent, #4f6ef7)",
+	background: "var(--dsw-alias-state-business-tertiary)",
+	border: "1px solid var(--dsw-alias-state-business-primary)",
 	boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
 	display: "flex",
 	alignItems: "center",
@@ -351,7 +429,7 @@ export function TopBar(props) {
 				alignItems: "center",
 				gap: "8px",
 				padding: "6px 8px",
-				borderBottom: "1px solid var(--dsw-border, #d0d7de)",
+				borderBottom: "1px solid var(--dsw-alias-border-l2)",
 				flexWrap: "wrap",
 			},
 		},
@@ -435,7 +513,7 @@ export function StylePanel(props) {
 		{
 			style: {
 				...S.card,
-				borderColor: "var(--dsw-accent, #4f6ef7)",
+				borderColor: "var(--dsw-alias-state-business-primary)",
 				marginTop: "8px",
 			},
 		},
@@ -576,7 +654,7 @@ export function PatternPanel(props) {
 		{
 			style: {
 				...S.card,
-				borderColor: "var(--dsw-accent, #4f6ef7)",
+				borderColor: "var(--dsw-alias-state-business-primary)",
 				marginTop: "8px",
 			},
 		},
@@ -651,7 +729,7 @@ export function PatternPanel(props) {
 							marginTop: "8px",
 							padding: "8px 10px",
 							borderRadius: "8px",
-							background: "var(--dsw-success-soft, #dafbe1)",
+							background: "var(--dsw-alias-state-success-tertiary)",
 							fontSize: "12px",
 							lineHeight: 1.6,
 						},

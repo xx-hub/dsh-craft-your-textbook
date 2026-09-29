@@ -348,6 +348,7 @@ export function stageLabelHuman(label) {
 // 见 actions/chapters.js 的 JSON.parse）——名字里的 `.md` 是历史遗留，**不是有正文的产物**。
 // ADR-0010 决策 2 里「自查报告」指的是给人读的 AI 自查报告，不是这个文件；把原始 JSON 送进
 // 右栏等于让家长读 JSON（与它自己否掉「knowledge-map.json 也进右栏」是同一条理由）。
+// ⚠️ **`work/outline.md`（章节安排）也在这一族**（票 pipeline-wiring-gaps/09）：它是 JSON。
 // 双端分工：前端「有正文的产物」开右栏（不经 /textbook/file）；后端该路由按同一判据放行，
 // 所以两端读的是同一份清单，改这里即两端同时改。
 
@@ -370,13 +371,20 @@ export function productOpenMode(rel) {
 		.replace(/\\/g, "/")
 		.replace(/^(?:\.\/)+/, "");
 	if (path === "work/knowledge-map.json") return "inline";
+	// ⚠️ `work/outline.md`（章节安排）**是同一族**（票 pipeline-wiring-gaps/09）：名字带 `.md`，
+	// 内容是机器 JSON（`{"chapters":[…]}`，见 actions/chapters.js 的 JSON.stringify 落盘），
+	// 与 `work/audit-NN.md` 同一个判据——不是「有正文的产物」。它比 audit 那一族多一件东西：
+	// **有人读**，所以不判 `'machine'`（那会把人读出口整个砸掉），而判 `'inline'`——
+	// 人读形态由**就地折叠清单**承担：确认卡（`OutlineConfirmCard`，拍板前就在屏上）
+	// 与阶段页第 3 阶段的 `OutlineBlock`（`chapters-map.foldOutline`）两处，与知识地图同一条路。
+	// 判据是**显式清单**，不是「后缀是 .md 就当正文」——那份清单才是这一族唯一的分界。
+	if (path === "work/outline.md") return "inline";
 	if (
 		NUMBERED_CHAPTER_FILE_RE.test(path) ||
 		ARCHIVED_CHAPTER_RE.test(path) ||
 		GATE_PROPOSAL_RE.test(path) ||
 		CONVERTED_SOURCE_RE.test(path) ||
 		path === "work/explore.md" || // 探查报告
-		path === "work/outline.md" || // 章节安排（设计关卡定下来的方案）
 		path === "work/style-spec.md" || // 写作规范（同为设计文档，步清单把它当产物列出）
 		path === "work/book.md" || // 成品
 		path === "过程记录.md" // 流水账（写给人读的全局产物；ADR-0015 决策 1：从「不给人读」那一族挪回这里）
@@ -386,6 +394,8 @@ export function productOpenMode(rel) {
 	// 机器产物与源 PDF 不开预览（ADR-0010 决策 2/3）：project.json、timeline.jsonl、源 PDF、
 	// 机器审计 JSON（work/audit-NN.md，名字带 .md 也一样）、work/progress.md、work/style-line.md。
 	// ⚠️ 别把「过程记录」再并列回这里——它写给人读，ADR-0015 已把判据改回 `preview`。
+	// ⚠️ 上面两处 `'inline'`（知识地图、章节安排）才是「机器产物但有人读形态」那一档：
+	// 它们既不进右栏，也不落回 `'machine'`，人读形态是卡片内联折叠清单。
 	return "machine";
 }
 

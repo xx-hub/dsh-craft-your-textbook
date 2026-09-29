@@ -28,7 +28,7 @@ export function OpenArtifactButton(props) {
 		{
 			style: {
 				marginLeft: "auto",
-				border: "1px solid var(--dsw-border, #d0d7de)",
+				border: "1px solid var(--dsw-alias-border-l2)",
 				borderRadius: "8px",
 				padding: "4px 12px",
 				fontSize: "12px",

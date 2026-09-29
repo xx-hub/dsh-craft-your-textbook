@@ -11,7 +11,7 @@ import { S } from "./styles.js";
 // 双端共享领域件：六阶段全称、素材角色、角色识别兜底、事件含义表、范例章号（单一事实来源）。
 import { PHASES, ROLES, guessRoleFromName, EVENT_META, MAX_UPLOAD_BYTES, uploadTooLargeMessage, goldChapterNo } from "../domain-rules.js";
 // 界面用词表（批 2）：阶段片不再各写一套短标签，取词只此一处。
-import { PHASE_UI, phaseUi, gateHuman, stageLabelHuman, segmentHuman, eventHuman, checkHuman, materialConversionActivityText } from "./view-rules.js";
+import { PHASE_UI, phaseUi, gateHuman, stageLabelHuman, segmentHuman, eventHuman, checkHuman, materialConversionActivityText, STAGE_HUMAN } from "./view-rules.js";
 // 章完成度的唯一一份口径（票 14）：章级「交工通过」事件（含最佳范例章那一步）+ 该章无未处置意见。
 // 章节卡与状态卡的数字都取它，界面里不许有第二份推导。
 import { deriveDoneSet, hasPendingReview, humanDuration, formatTime } from "./rules.js";
@@ -152,6 +152,13 @@ function cardText(event) {
 		case "textbook/submit-rejected":
 			// 交工/提审被拒（票 audit-matrix-contract/01 (d)）：界面上要读得到「交工被拒：<原因>」，
 			// 不能只留 label 一行（这正是用户被「机器报错、AI 说没事」卡住的那条信息）。
+			//
+			// ⚠️ **这里不印阶段**（票 `audit-matrix-contract/06`，2026-09-29 用户拍板选 ②）。
+			// 四个出口的逐个点名结论是「三个不印、只有 `replayRowDetail` 印」；这里是**第一个**
+			// 不印的出口。**不印的理由**：这一行是**概览行**——同一屏的横幅与状态条已经说出了
+			// 「此刻在哪一步」，这里再加一个阶段标签只是多一处要跟着改的真相；而且票 02 铺满的
+			// 20 条拒收里绝大多数 `reason` 本身就带着阶段线索（「范例章审计不合格」「合并前缺跨章
+			// 审计记录」…），少数不带的那几条由展开详情补上。**这不是漏了，是有意的不对称。**
 			return `🚫 交工被拒：${data.reason ?? ""}`;
 		default:
 			// 兜底读 EVENT_META（label/emoji 双端共用）——绝不回落到 raw 机器串。
@@ -267,6 +274,12 @@ export function replayRowSummary(row, ctx = {}) {
 				[...(data.reasons ?? [])].join("、") + (data.note ? `：${data.note}` : ""),
 			);
 		// P11：交工被拒的原因（机器解析到的行键/样例/契约行形状都在这一句里）。
+		//
+		// ⚠️ **这里也不印阶段**（票 `audit-matrix-contract/06`，2026-09-29 用户拍板选 ②）。
+		// **不印的理由**：摘要是**折叠行**——60 字上限、且行首那截类型词已经在说「这是一次交工被拒」；
+		// 阶段词塞进来要么把真正要说的原因挤出上限，要么逼它另起一段前缀，折叠态下读起来更挤。
+		// 阶段词落在**展开详情**那一层（`replayRowDetail`），那里用户是主动点开要读全文的。
+		// **这不是漏了，是有意的不对称。**
 		case "textbook/submit-rejected":
 			return clipText(data.reason);
 		// P57：机器兜底那一次的 `message` 本身就以「机器兜底发现 N 项没过：」开头
@@ -311,6 +324,37 @@ export function replayRowSummary(row, ctx = {}) {
 }
 
 /**
+ * 账本 `data.stage`（**机器阶段名**：`explore`／`gate`／`outline`／`gold`／`chapters`／`merge`／`final`）
+ * → 界面人话阶段词。
+ *
+ * ⚠️ 票 `audit-matrix-contract/06`（2026-09-29 用户拍板选 ②）**唯一的印字出口**就是下面
+ * `replayRowDetail` 这一处；`cardText`／`replayRowSummary`／引擎侧 `announceText` 三处一律不印
+ * （各处理由写在那三处的注释里，**别当成漏了去补**）。
+ *
+ * 取词只用**票 05 补齐的那张表**（`view-rules.STAGE_HUMAN` ＝ domain-rules「界面词」区再导出的
+ * 同一份），**不另建一份**、也不走 `stageHuman()` 的兜底：
+ *   · `stageHuman()` 对**未登记**的阶段**原样返回那个机器串**（那是 `client-entry.js` 渲染路径上
+ *     「宁可露出机器词，也不猜错」的有意取向，见 view-rules 注释）；但这一格是**拼给人看的正文**，
+ *     摆一个 `gates` 进去就是把机器身份词端上屏——与同文件 `stageNameFromLabel()`「译不动就整格不出」
+ *     同一口径。⇒ 这里查表查不到就**不出这一格**。
+ *   · 于是「把 `STAGE_HUMAN.gate` 改回 `gate`」这类改坏**两条判据都会红**（票 05 逐格那条 + 票 06
+ *     正向那条），不存在「改坏了照样出词」的缝。
+ */
+const stageWordForEvent = (data) => {
+	const raw = typeof data?.stage === "string" ? data.stage : "";
+	if (raw === "") return "";
+	return Object.hasOwn(STAGE_HUMAN, raw) ? STAGE_HUMAN[raw] : "";
+};
+
+/** 展开详情的第一行补上「这一步卡在哪个阶段」——票 06 的全部落点就是这里。 */
+const withStageWord = (body, data) => {
+	const word = stageWordForEvent(data);
+	if (word === "") return String(body ?? "");
+	const text = String(body ?? "").trim();
+	return `阶段：${word}${text === "" ? "" : `\n${text}`}`;
+};
+
+/**
  * 回放行的**全文**（行内那颗纯展开控件展开后给的东西）。
  * 「有超出摘要之外的全文才给展开控件」：没有全文的行（阶段开始、豁免放行……）一个控件都不长，
  * 既不摆死按钮，也不撞「同一排可点性一致」。
@@ -332,7 +376,13 @@ export function replayRowDetail(row) {
 			.join("\n");
 	switch (event.type) {
 		case "textbook/submit-rejected":
-			return String(data.reason ?? "");
+			// 票 06：**唯一印阶段词的那一格**。票 02 把 `rejectSubmit(stage, reason)` 铺到 20 条
+			// 拒收路径，其中 6 条 `reason` 本身不带阶段线索（「章节缺少 title」「需要 preface」
+			// 「需要 report」「方案不完整…」「styleCheck 的 status 只能…」「conflict（冲突）必须写一句
+			// 理由…」）——用户在概览行看到这几条，看不出卡在合并还是最后检查。展开详情里补上人话
+			// 阶段词，缺口就在那里补齐；概览行维持现状（理由见上面 `cardText` / `replayRowSummary`
+			// 两处注释）。**印的是人话词、不是机器阶段名**——判据在 `test-wording-invariants.mjs`。
+			return withStageWord(data.reason, data);
 		case "textbook/error":
 			return String(data.message ?? "");
 		case "textbook/hint":
@@ -423,7 +473,7 @@ export function PhaseBar(props) {
 					style: {
 						...S.seg(state),
 						...(clickable ? { cursor: "pointer" } : {}),
-						outline: isViewed ? "2px solid var(--dsw-text, #1f2328)" : "none",
+						outline: isViewed ? "2px solid var(--dsw-alias-label-primary)" : "none",
 						outlineOffset: isViewed ? "-2px" : "0",
 					},
 					// hover 文案**两态同形**（都写「去「X」这一步 · 有几份文件」）：目的地信息一致，
@@ -682,9 +732,9 @@ export function WizardCard(props) {
 					fontSize: "12px",
 					lineHeight: 1.6,
 					opacity: 0.75,
-					border: "1px solid var(--dsw-border, #d0d7de)",
+					border: "1px solid var(--dsw-alias-border-l2)",
 					borderRadius: "8px",
-					background: "var(--dsw-surface, #fff)",
+					background: "var(--dsw-alias-bg-layer-1)",
 				},
 			},
 			createElement(
@@ -698,7 +748,7 @@ export function WizardCard(props) {
 						target: "_blank",
 						rel: "noopener noreferrer",
 						style: {
-							color: "var(--dsw-accent, #4f6ef7)",
+							color: "var(--dsw-alias-state-business-primary)",
 							textDecoration: "underline",
 						},
 					},
@@ -717,13 +767,13 @@ export function WizardCard(props) {
 						target: "_blank",
 						rel: "noopener noreferrer",
 						style: {
-							color: "var(--dsw-accent, #4f6ef7)",
+							color: "var(--dsw-alias-state-business-primary)",
 							textDecoration: "underline",
 						},
 					},
 					"【破卷】",
 				),
-				"，即可享受3A游戏的沉浸感以及三倍以上的学习效率。",
+				"，即可享受3A游戏的沉浸感以及三倍学习效率。",
 			),
 		),
 	);
@@ -1054,10 +1104,10 @@ export function StatusCard(props) {
 			humanError.includes("Token") || humanError.includes("token");
 		return createElement(
 			"div",
-			{ style: { ...S.focus, borderColor: "var(--dsw-danger, #cf222e)" } },
+			{ style: { ...S.focus, borderColor: "var(--dsw-alias-state-error-primary)" } },
 			createElement(
 				"strong",
-				{ style: { color: "var(--dsw-danger, #cf222e)" } },
+				{ style: { color: "var(--dsw-alias-state-error-primary)" } },
 				"⚠️ 这一步出错了",
 			),
 			createElement("p", { style: { margin: "6px 0" } }, humanError),
@@ -1092,7 +1142,7 @@ export function StatusCard(props) {
 							style: {
 								marginTop: "8px",
 								paddingTop: "8px",
-								borderTop: "1px dashed var(--dsw-border, #d0d7de)",
+								borderTop: "1px dashed var(--dsw-alias-border-l2)",
 							},
 						},
 						createElement(
@@ -1106,7 +1156,7 @@ export function StatusCard(props) {
 									{
 										style: {
 											...S.smallLink,
-											color: "var(--dsw-danger, #cf222e)",
+											color: "var(--dsw-alias-state-error-primary)",
 										},
 										onClick: onDeleteConfirm,
 										disabled: busy,
@@ -1118,7 +1168,7 @@ export function StatusCard(props) {
 									{
 										style: {
 											...S.smallLink,
-											color: "var(--dsw-danger, #cf222e)",
+											color: "var(--dsw-alias-state-error-primary)",
 										},
 										onClick: onDeleteStart,
 									},
@@ -1131,10 +1181,10 @@ export function StatusCard(props) {
 	if (meta.status === "needs-config") {
 		return createElement(
 			"div",
-			{ style: { ...S.focus, borderColor: "var(--dsw-danger, #cf222e)" } },
+			{ style: { ...S.focus, borderColor: "var(--dsw-alias-state-error-primary)" } },
 			createElement(
 				"strong",
-				{ style: { color: "var(--dsw-danger, #cf222e)" } },
+				{ style: { color: "var(--dsw-alias-state-error-primary)" } },
 				"🔑 需要先配置",
 			),
 			createElement("p", { style: { margin: "6px 0" } }, needsConfig),
@@ -1268,7 +1318,7 @@ export function StatusCard(props) {
 							style: {
 								height: "8px",
 								borderRadius: "4px",
-								background: "var(--dsw-border, #d0d7de)",
+								background: "var(--dsw-alias-border-l2)",
 								overflow: "hidden",
 							},
 						},
@@ -1276,7 +1326,7 @@ export function StatusCard(props) {
 							style: {
 								height: "100%",
 								width: `${Math.round((chapterProgress.done / chapterProgress.total) * 100)}%`,
-								background: "var(--dsw-accent, #4f6ef7)",
+								background: "var(--dsw-alias-state-business-primary)",
 								borderRadius: "4px",
 								transition: "width 0.6s",
 							},
@@ -1364,7 +1414,7 @@ export function DeliveryCard(props) {
 						style: {
 							margin: "10px 0",
 							padding: "8px 10px",
-							background: "var(--dsw-accent-soft, #eef2ff)",
+							background: "var(--dsw-alias-state-business-tertiary)",
 							borderRadius: "8px",
 							fontSize: "12px",
 						},
@@ -1386,7 +1436,7 @@ export function DeliveryCard(props) {
 							margin: "10px 0",
 							padding: "8px 10px",
 							borderRadius: "8px",
-							border: "1px solid var(--dsw-border, #d0d7de)",
+							border: "1px solid var(--dsw-alias-border-l2)",
 						},
 					},
 					createElement(
@@ -1479,7 +1529,7 @@ export function DeliveryCard(props) {
 							target: "_blank",
 							rel: "noopener noreferrer",
 							style: {
-								color: "var(--dsw-accent, #4f6ef7)",
+								color: "var(--dsw-alias-state-business-primary)",
 								textDecoration: "underline",
 							},
 						},
@@ -1523,13 +1573,13 @@ export function DeliveryCard(props) {
 						onClick: (e) => copyInvite(e, "SCR-FEJXMQ"),
 						title: copied ? "已复制" : "点击复制邀请码",
 						style: {
-							background: "var(--dsw-accent-soft, #eef2ff)",
+							background: "var(--dsw-alias-state-business-tertiary)",
 							borderRadius: "4px",
 							padding: "1px 6px",
 							letterSpacing: "0.5px",
 							cursor: "pointer",
 							userSelect: "all",
-							color: "var(--dsw-accent, #4f6ef7)",
+							color: "var(--dsw-alias-state-business-primary)",
 						},
 					},
 					copied ? "✓ 已复制" : "SCR-FEJXMQ",
@@ -1567,7 +1617,7 @@ export function FinalApprovalCard(props) {
 						style: {
 							margin: "10px 0",
 							padding: "8px 10px",
-							background: "var(--dsw-accent-soft, #eef2ff)",
+							background: "var(--dsw-alias-state-business-tertiary)",
 							borderRadius: "8px",
 							fontSize: "12px",
 						},
@@ -1591,7 +1641,7 @@ export function FinalApprovalCard(props) {
 							margin: "10px 0",
 							padding: "8px 10px",
 							borderRadius: "8px",
-							border: "1px solid var(--dsw-border, #d0d7de)",
+							border: "1px solid var(--dsw-alias-border-l2)",
 						},
 					},
 					createElement(
@@ -1635,8 +1685,8 @@ export function FinalApprovalCard(props) {
 					padding: "8px",
 					borderRadius: "8px",
 					border: needNote
-						? "1px solid var(--dsw-danger, #cf222e)"
-						: "1px solid var(--dsw-border, #d0d7de)",
+						? "1px solid var(--dsw-alias-state-error-primary)"
+						: "1px solid var(--dsw-alias-border-l2)",
 					fontSize: "13px",
 					boxSizing: "border-box",
 				},
@@ -1655,7 +1705,7 @@ export function FinalApprovalCard(props) {
 						style: {
 							margin: "6px 0 0",
 							fontSize: "12px",
-							color: "var(--dsw-danger, #cf222e)",
+							color: "var(--dsw-alias-state-error-primary)",
 						},
 					},
 					"⚠️ 先在上面写一句「要改什么」，再点「不满意」——AI 得照着你这句话改整本。",
@@ -1746,7 +1796,7 @@ export function GatePanel(props) {
 			{
 				style: {
 					marginTop: "10px",
-					borderTop: "1px dashed var(--dsw-border, #d0d7de)",
+					borderTop: "1px dashed var(--dsw-alias-border-l2)",
 					paddingTop: "8px",
 				},
 			},
@@ -1761,7 +1811,7 @@ export function GatePanel(props) {
 					style: {
 						margin: "0 0 6px",
 						fontSize: "12px",
-						color: "var(--dsw-danger, #cf222e)",
+						color: "var(--dsw-alias-state-error-primary)",
 					},
 				},
 				"这一步之后新推进的部分会被重做；回退前会先存一版，之后还能再回退。",
@@ -1905,7 +1955,7 @@ export function GatePanel(props) {
 					{
 						style: {
 							whiteSpace: "pre-wrap",
-							background: "var(--dsw-surface, #fff)",
+							background: "var(--dsw-alias-bg-layer-1)",
 							borderRadius: "8px",
 							padding: "10px",
 							fontSize: "12px",
@@ -1922,7 +1972,7 @@ export function GatePanel(props) {
 					"div",
 					{
 						style: {
-							background: "var(--dsw-surface, #fff)",
+							background: "var(--dsw-alias-bg-layer-1)",
 							borderRadius: "8px",
 							padding: "10px",
 							fontSize: "12px",
@@ -1948,7 +1998,7 @@ export function GatePanel(props) {
 					{
 						style: {
 							marginTop: "10px",
-							borderTop: "1px dashed var(--dsw-border, #d0d7de)",
+							borderTop: "1px dashed var(--dsw-alias-border-l2)",
 							paddingTop: "8px",
 						},
 					},
@@ -2019,7 +2069,7 @@ export function GatePanel(props) {
 								createElement("textarea", {
 									style: {
 										...S.textarea,
-										borderColor: "var(--dsw-accent, #4f6ef7)",
+										borderColor: "var(--dsw-alias-state-business-primary)",
 									},
 									placeholder:
 										"例：每个知识点先给一个生活中的真实场景引出概念，再配一道由浅入深的例题……",
@@ -2115,10 +2165,10 @@ export function MineruTokenCard(props) {
 	if (mineruSet === false) {
 		return createElement(
 			"div",
-			{ style: { ...S.card, borderColor: "var(--dsw-danger, #cf222e)" } },
+			{ style: { ...S.card, borderColor: "var(--dsw-alias-state-error-primary)" } },
 			createElement(
 				"strong",
-				{ style: { color: "var(--dsw-danger, #cf222e)" } },
+				{ style: { color: "var(--dsw-alias-state-error-primary)" } },
 				"🔑 还差一步：MinerU Token",
 			),
 			createElement(
@@ -2141,7 +2191,7 @@ export function MineruTokenCard(props) {
 	}
 	return createElement(
 		"div",
-		{ style: { ...S.card, borderColor: "var(--dsw-success, #1a7f37)" } },
+		{ style: { ...S.card, borderColor: "var(--dsw-alias-state-success-primary)" } },
 		createElement(
 			"div",
 			{

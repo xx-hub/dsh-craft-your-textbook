@@ -314,7 +314,15 @@ function logEntryText(event) {
     case 'textbook/pattern-added':
       return `📇 已加自定义模式：${data.name ?? ''}`
     // 交工/提审被拒（票 01 (d)）：写进《过程记录.md》的那一行——`stage` 与原因都在事件 data 里，
-    // 人读文本按票面口径说「交工被拒：<原因>」（不印机器阶段名）。
+    // 人读文本说「交工被拒：<原因>」。
+    //
+    // ⚠️ **`logEntryText` 这一个出口不印阶段**（票 `audit-matrix-contract/06`，2026-09-29 用户拍板
+    // 选 ②；这条注释就是票面要求的「四个出口逐个点名、各有理由」里 engine 侧那一处的落笔）。
+    // **不印的理由**：这一行是**已经发生的事**的流水记录，阶段从「事件属于哪一步」已经能由上一条
+    // `textbook/stage-start` 读出来；在这里再印一次等于同一屏/同一份文件里把同一件事说两遍。
+    // 而**尚未解决的**那一条（用户此刻要知道「我这次交工卡在合并还是最后检查」）由界面事件行的
+    // **展开详情**那一格承担（`src/ui/event-cards.js` 的 `replayRowDetail`，印人话词）。
+    // 与上面 `announceText` 是两处**同理由、不同对象**（一份是文件流水、一份是对话播报）。
     case 'textbook/submit-rejected': return `🚫 交工被拒：${data.reason ?? ''}`
     default: return null
   }
@@ -489,6 +497,13 @@ function announceText(event) {
         : `↩️ 章节安排已被驳回，AI 正在重新安排`
     case 'textbook/gold-seal': return `🏆 最佳范例章已定稿（v${data.version ?? '?'}），意见沉淀入风格线（${data.count ?? 0} 条）`
     // 交工/提审被拒（票 01 (d)）：用户看得见机器挡下了什么——这正是被「机器报错、AI 说没事」坑过的那个用户。
+    //
+    // ⚠️ **这里也不印阶段**（票 `audit-matrix-contract/06`，2026-09-29 用户拍板选 ②）。
+    // **不印的理由**：这句是**发给主笔 AI、由它转述给用户**的对话流播报（判定线③），不是给人直接看的
+    // 界面行——它整句被 `.slice(0, 200)` 截断，再塞一个阶段前缀就是拿配额换一句用户已经能从横幅
+    // 看到的话；而 `reason` 本身已经是**机器拟的可行动报错**，主笔 AI 拿到它就知道该回哪一步。
+    // 界面上用户要读的那一格是事件行的**展开详情**（`src/ui/event-cards.js` 的 `replayRowDetail`），
+    // 那里才印人话阶段词。**这不是漏了，是四个出口里逐个点名后的第三处「不印」。**
     case 'textbook/submit-rejected': return `🚫 交工被拒：${String(data.reason ?? '').slice(0, 200)}`
     default: return null
   }
@@ -518,22 +533,39 @@ function announceToSession(ctx, sessionId, text) {
     const firstLine = (text.split('\n', 1)[0] ?? text).trim()
     // user/message 的 data 就是消息本身（不是 assistant/message 的 {message:...} 包裹）。
     // 写错形状会让宿主模型请求构建时读 data.source.kind 崩（.kind undefined），已修。
+    // ⚠️ source 必须是 **v4 的 producer-owned 形状**：`{ kind: 'plugin', plugin: '…' }` 那个
+    // v3 包装已被宿主 0.1.7 的会话格式准入门**明确退役**（dsh-session-format-v3-to-v4
+    // `source()`：`kind === 'plugin'` 直接抛 `format v4 message requires a producer-owned
+    // source kind`，整轮判失败）。宿主自己的改写口径见同文件 `producerKind()`：
+    // kind 变成 `plugin:<名字>`，且 **`plugin` 键被丢掉**，form/summary 原样保留。
     const message = {
       id: `tb-note-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       role: 'user',
-      source: { kind: 'plugin', plugin: 'dsh-craft-your-textbook', form: 'notice', summary: `工作台：${firstLine.slice(0, 60)}` },
+      source: { kind: 'plugin:dsh-craft-your-textbook', form: 'notice', summary: `工作台：${firstLine.slice(0, 60)}` },
       content: [{ type: 'text', text }],
     }
     const agent = ctx.get('agents')?.get?.(sessionId)
     if (agent !== undefined) {
       const status = typeof agent.status === 'string' ? agent.status : undefined
       if (status === 'running') {
-        if (typeof agent.inject !== 'function') return
+        // ⚠️ 双轴 review（2026-09-29，票 announce-adjacency/02）修的两处：
+        // 「保守放弃」在本函数里**只有一种报法**——放弃必须 warn。
+        // 原来这里是静默 `return`，而同一条路径上「拿不到 status」是 warn 的：
+        // 同一个动作、两种报法，用户排查时会以为「没有放弃」，实际是被丢掉了。
+        if (typeof agent.inject !== 'function') {
+          ctx.logger.warn('textbook: 播报跳过——agent.inject 不可用（宿主 facade 与本仓用的不是同一枚）')
+          return
+        }
         agent.inject(message)
         return
       }
+      // ⚠️ 同上第二处：这条 warn 原文写「拿不到 agent.status」，但它**也**在
+      // 「拿到了、且不是 idle」时触发（上游新增任何一个状态值都会落这里）。
+      // 文案与覆盖范围不符 ⇒ 排查会被引向「facade 改名了」这个错方向。
+      // 两个读数都点出来：**读到的值**与**它为什么不能当成收口**。
       if (status !== 'idle') {
-        ctx.logger.warn('textbook: 播报跳过——拿不到 agent.status，无法确认回合已收口')
+        const read = status === undefined ? '读不到' : `读到 ${JSON.stringify(status)}`
+        ctx.logger.warn(`textbook: 播报跳过——${read} agent.status，无法确认回合已收口（只有 idle 才落会话）`)
         return
       }
     }
@@ -551,15 +583,48 @@ function announceToSession(ctx, sessionId, text) {
  *  暂存按 project 记（进程内即可；跨重启最多丢一次合并机会，无实质影响）。 */
 const pendingPhaseEnd = new Map()
 
+
+/** 拒收去重记忆：project → 上一次**已开口**的 `(stage, 逐字 reason)` 键（票 `audit-matrix-contract/04`，
+ *  裁决**乙**：同 project 的**连续同文**拒收不再原样 inject 第二遍）。
+ *
+ *  ⚠️ 消的是「返工循环里同文反复堆叠」，**不是**「单次事件里 400 与 notice 各一份」——单次那两份
+ *  来自**两个不同的面**（工具结果 400 / 对话流 notice），工具结果那一份本票不该动。
+ *
+ *  合并键：**三者全同**才合并（project 天然按 key 分桶，故比的是 `stage` + 逐字 `reason`）。
+ *  两者是 `===` 逐字比，**刻意不用 `includes`／归一化**——票 02 铺满的 20 处 reason 逐字未改，
+ *  「异文」是真实情形；宽松判据会把两次不同的拒收并成一条看不出所以然的记录。
+ *  **至少保留第一次开口**：只有「上一次开口就是同一篇」时才吞掉这一次。
+ *  任何**别的**播报插在中间即清空记忆——「连续」按对话流里真正相邻判，不是「同 project 历史上出现过」。
+ *  进程内暂存即可（跨重启最多多播一次，与 `pendingPhaseEnd` 同一取舍）。 */
+const lastRejectAnnounce = new Map()
+
+/** 拒收的合并键：`stage` + NUL + **逐字** `reason`。分隔符取 NUL，任何 stage/reason 组合都不会撞键。 */
+function rejectDedupKey(data) {
+  const stage = String(data?.stage ?? '')
+  return `${stage}\u0000${String(data?.reason ?? '')}`
+}
+
 function announceEventToSession(ctx, projectId, meta, event) {
   const sessionId = meta.session
   if (typeof sessionId !== 'string' || sessionId === '') return
   if (event.type === 'textbook/phase-end') {
+    // 它迟早会占掉对话流里的一行 ⇒ 同样打断「连续」，一并清空拒收去重记忆。
+    lastRejectAnnounce.delete(projectId)
     pendingPhaseEnd.set(projectId, { text: announceText(event), time: event.time })
     return
   }
   const text = announceText(event)
   if (text === null) return
+  // 拒收去重（票 `audit-matrix-contract/04` · 乙）：只在「上一次开口就是同一篇」时吞掉这一次，
+  // 所以第一次照旧开口（机器确实挡了的那条线索不许消失）。判据逐字，比键不含任何宽松匹配。
+  if (event.type === 'textbook/submit-rejected') {
+    const key = rejectDedupKey(event.data)
+    if (lastRejectAnnounce.get(projectId) === key) return
+    lastRejectAnnounce.set(projectId, key)
+  } else {
+    // 别的播报插在中间 ⇒ 不再「连续」：下一次同文拒收必须重新开口。
+    lastRejectAnnounce.delete(projectId)
+  }
   const held = pendingPhaseEnd.get(projectId)
   pendingPhaseEnd.delete(projectId)
   if (held !== undefined && held.text !== null) {
@@ -1084,7 +1149,9 @@ function wakeMainAI(ctx, projectId) {
     id: `tb-task-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'dsh-craft-your-textbook', form: 'notice', summary: `工作台：轮到 AI 动手（${label}）` },
+    // v4 producer-owned source（不是已退役的 `{ kind: 'plugin', plugin: … }` 包装）——
+    // 那一版会被宿主 0.1.7 的会话准入门整轮判失败，病因与口径见 announceToSession 上方注释。
+    source: { kind: 'plugin:dsh-craft-your-textbook', form: 'notice', summary: `工作台：轮到 AI 动手（${label}）` },
   }
   try {
     agent.followup(message)
@@ -1636,6 +1703,9 @@ async function runPhase3(ctx, projectId, meta) {
         const outline = await generateContent(runtime, 'outline', {})
         // 改在改法里写（不拿手里那份旧状态整份写回）：生成要 await，期间账本可能已经动过。
         updateMeta(projectId, (state) => { state.outline = outline })
+        // ⚠️ 演示模式写的是**同一份 JSON**（与 `actions/chapters.js` 的真实模式一个文件、一个形状）：
+        // 所以产物判据对两条路是同一条——`work/outline.md` 判 `'inline'`、不开右栏预览
+        // （票 pipeline-wiring-gaps/09），人读形态是章节安排确认卡与阶段页第 3 阶段的就地折叠清单。
         writeWork(projectId, 'outline.md', JSON.stringify(outline, null, 2))
       })
       if (outlineResult !== 'advanced') return outlineResult
@@ -1863,6 +1933,90 @@ function scanScaffolding(text) {
 }
 
 
+/** 正则元字符转义（票 20 护栏 ①）。
+ *  * 为什么必须有它*：`runQualityChecks` 是**同步调用**（`chapters.js` 的单章验货与终检各一处），
+ *  AI 在 style-spec 里声明的标题会**原样进 `new RegExp`**——`## 备注（草稿` 这种写法抛 `SyntaxError`，
+ *  抛出即把一次交工打成 500。**闸门会被声明文本杀死**，是本条最坏的一种失败。
+ *  超长/超量标题在 `declaredScaffoldTitles` 里已先收口，这里是最后一道。 */
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** 声明「本书没有这类标题」的写法——**认出它等于不追加，不是关闭扫描**。 */
+const NO_SCAFFOLD_TITLES = /^(无|没有|不需要|无额外|不适用|无额外标题|本书无)/
+/** 数量上限（票 20 护栏 ③）：再宽的声明也会把 check note 变成一本账。 */
+const DECLARED_TITLE_MAX = 12
+/** 长度上限：与 `parseStyleSpecList` 既有的 ≤20 字符过滤同档（它先收口，这里是显形的第二道）。 */
+const DECLARED_TITLE_MAX_LEN = 20
+
+/**
+ * 票 20：读 style-spec 行首的「脚手架标题：」声明（**复用 `parseStyleSpecList`**，判据句式与豁免出口
+ * 照抄现有实现——必含板块/禁用词那两项就是这么读的）。
+ *
+ * 契约原则（`parseStyleSpecList` 的注释与 CONTEXT.md 质量门词条逐字记着）：**没显式列出就跳过该项，
+ * 不以硬编码词表误判**。读不到文件 / 没声明 → `state` 不是 `declared`，调用方**不追加任何检查项**
+ * （那不是「绿」，是「这项没跑」——两者的区别在 check note 上写明）。
+ *
+ * @returns {{state:'unreadable'|'undeclared'|'declared-none'|'declared', items:string[], dropped:number}}
+ */
+export function declaredScaffoldTitles(projectId) {
+  const path = workFile(projectId, 'style-spec.md')
+  if (!existsSync(path)) return { state: 'unreadable', items: [], dropped: 0 }
+  const parsed = parseStyleSpecList(readFileSync(path, 'utf8'), '脚手架标题')
+  if (parsed === null) return { state: 'undeclared', items: [], dropped: 0 }
+  const items = []
+  let dropped = 0
+  for (const raw of parsed) {
+    const title = String(raw).replace(/^`+|`+$/g, '').trim()
+    if (title === '') continue
+    // 「无／不需要／无额外标题」= 显式声明「没有」：**不追加**，也**不**当成「关闭扫描」。
+    if (NO_SCAFFOLD_TITLES.test(title)) continue
+    if (title.length > DECLARED_TITLE_MAX_LEN) { dropped += 1; continue }
+    if (items.length >= DECLARED_TITLE_MAX) { dropped += 1; continue }
+    if (items.includes(title)) continue
+    items.push(title)
+  }
+  return { state: items.length === 0 ? 'declared-none' : 'declared', items, dropped }
+}
+
+/**
+ * 按声明的标题扫残留（票 20）。逐条独立正则 + `escapeRegExp`——**一个标题炸掉不该让整轮验货炸掉**。
+ * @returns {string[]} 形如 `「写作笔记」（第 12 行：…）`
+ */
+export function scanDeclaredScaffolding(text, titles) {
+  const found = []
+  for (const title of titles) {
+    let re
+    try {
+      re = new RegExp(escapeRegExp(title), 'g')
+    } catch {
+      found.push(`「${title}」（声明的标题无法编译，已跳过匹配）`)
+      continue
+    }
+    for (const match of text.matchAll(re)) {
+      const lineNo = text.slice(0, match.index).split('\n').length
+      const line = text.slice(0, match.index).split('\n').pop()?.trim().slice(0, 60) ?? ''
+      found.push(`「${match[0]}」（第 ${lineNo} 行：${line}）`)
+    }
+  }
+  return found
+}
+
+/**
+ * 票 20：脚手架残留的**两个来源分开报**，报告里不混成一条。
+ *   · `declared` —— AI 在 style-spec 声明「本书写作时会用哪些元数据板块标题」的那些（**它要求的**）
+ *   · `generic`  —— 硬编码的通用残留标记（`META`/`TODO`/`FIXME`/`HACK`/审计批注/未决问题/loader 指令）
+ * ⚠️ 分开是因为两者性质不同：通用残留是**任何书都不该留的**，声明项是**本书特有**的；
+ * 混成一条就会让「AI 声明要拆的」看起来像通用规则，而它其实是本书自己定的。
+ */
+export function scaffoldResidue(projectId, text) {
+  const declared = declaredScaffoldTitles(projectId)
+  return {
+    generic: scanScaffolding(text),
+    declared: declared.state === 'declared' ? scanDeclaredScaffolding(text, declared.items) : [],
+  }
+}
+
 /** 剥掉 human 路线的 loader 指令区（装配说明，留给 AI 老师，不是成品脚手架残留）。 */
 function stripLoaderRegion(text) {
   return String(text).replace(/<!-- loader:begin -->[\s\S]*?<!-- loader:end -->/g, '')
@@ -1929,7 +2083,12 @@ function runQualityChecks(projectId) {
   const bookText = readFileSync(bookPath, 'utf8')
   // human 路线的 loader 指令区是给 AI 老师的装配说明（保留在成品里），扫脚手架前剥掉，避免误判残留。
   const scanText = meta?.route === 'human' ? stripLoaderRegion(bookText) : bookText
+  // 票 20：通用残留与「AI 声明要拆的」**分两个来源收**（报告里也是两条，不混）。
+  // 声明项在 style-spec 没显式声明时**整项不追加**（契约原则：不以硬编码词表误判）——
+  // 注意「没跑」与「跑过且全绿」在 note 上必须说得出来，否则界面会拿「没查」当「查过了」。
+  const declaredTitles = declaredScaffoldTitles(projectId)
   const residue = scanScaffolding(scanText)
+  const declaredResidue = declaredTitles.state === 'declared' ? scanDeclaredScaffolding(scanText, declaredTitles.items) : []
   const auditNames = readdirSync(workDir(projectId)).filter((name) => /^audit-\d+\.(md|json)$/.test(name))
   const auditWaived = waived(projectId, 'audit-skip')
   const scaffoldWaived = waived(projectId, 'scaffold-keep')
@@ -1970,8 +2129,10 @@ function runQualityChecks(projectId) {
           : `少了这些成品文件：${missingArtifacts.slice(0, 3).map((i) => i.rel).join('、')}`),
     },
     { name: '所有章节都有审计记录', ok: auditNames.length >= chapterCount || auditWaived, note: auditWaived ? '你已同意：不要求每章都有独立检查' : `${auditNames.length}/${chapterCount} 章有检查记录` },
+    // 票 20：这一条现在**只管通用残留**（硬编码的 8 个标记）。AI 在写作规范里声明的那些本书特有标题
+    // 由下面单独一条查——两者性质不同，混成一条会让「AI 声明要拆的」冒充通用规则。
     {
-      name: '没有遗留的 AI 笔记/脚手架',
+      name: '没有遗留的通用脚手架标记',
       ok: residue.length === 0 || scaffoldWaived,
       note: scaffoldWaived ? '你已同意：保留 AI 的笔记不删' : (residue.length === 0 ? '没有留下 AI 的草稿痕迹' : `发现这些标记没清掉：${residue.slice(0, 3).join('；')}`),
     },
@@ -1979,6 +2140,32 @@ function runQualityChecks(projectId) {
     { name: '与已拍板的设计一致', ok: gatesApproved || gateWaived, note: gateWaived ? '你已同意：跳过设计拍板' : (gatesApproved ? '三次设计拍板都过了' : '还有设计拍板没过') },
     { name: '源材料引用可追溯', ok: sourceCount > 0 || otherWaived, note: otherWaived ? '你已同意：以你的说明为准' : `${sourceCount} 份源材料都用上了` },
   ]
+  // 票 20：声明项**只在写作规范显式声明时才追加这一条**。状态四分：
+  //   `declared`      有条目 → 真查；
+  //   `declared-none` 明写「无/不需要/无额外标题」→ 追加一条**显形**的说明，**不是静默绿**
+  //                    （静默绿会被读成「机器查过了、没查到」，而实际是「AI 说不用查」）；
+  //   `undeclared` / `unreadable` → **整项不追加**（契约原则：不以硬编码词表误判）。
+  if (declaredTitles.state === 'declared' || declaredTitles.state === 'declared-none') {
+    checks.push({
+      name: '没有遗留本书声明的脚手架标题',
+      ok: declaredResidue.length === 0 || scaffoldWaived,
+      note: scaffoldWaived
+        ? '你已同意：保留 AI 的笔记不删'
+        : (declaredTitles.state === 'declared-none'
+          ? '写作规范里明写「本书无额外脚手架标题」，这一项按声明不追加（不是查过没查到）'
+          : (declaredResidue.length === 0
+            ? `本书声明的 ${declaredTitles.items.length} 个脚手架标题都没留在成品里`
+            : `这些本书声明过的脚手架标题还留着：${declaredResidue.slice(0, 3).join('；')}`)),
+    })
+  }
+  if (declaredTitles.state === 'declared' && declaredTitles.dropped > 0) {
+    // 护栏 ③ 的可见面：越界的声明不能悄悄消失——AI 要看得见自己写宽了。
+    checks.push({
+      name: '脚手架标题声明未越界',
+      ok: true,
+      note: `声明里超过 ${DECLARED_TITLE_MAX} 条、或超过 ${DECLARED_TITLE_MAX_LEN} 字符的 ${declaredTitles.dropped} 条已忽略（只按剩下的 ${declaredTitles.items.length} 条查）`,
+    })
+  }
   // 风格线条条有着落（真实模式）：机器只验「每条 active 都有处置」，不搜关键词伪验。
   if (meta?.demo !== true) {
     const activeStyles = (meta.styleNotes ?? []).filter((n) => n.status === 'active')
@@ -2265,6 +2452,30 @@ function withTailSections(clipped, rel, headings) {
  * 所以 §十 第三轮「终检 AI 自查 + 机器硬检查质量门」这条判据此前从未进过终检 brief——
  * 定向注入顺带补上这一格。
  */
+/**
+ * 票 22（2026-09-29 用户裁决）：`references/invariants.md` **挂进 brief，但按 route 选节**。
+ *
+ * 口径三条，缺一不可：
+ * ① 挂在哪几个阶段 = 下面 `INVARIANTS_STAGES` / `INVARIANTS_GATES` 两张表
+ *    （`gold`/`merge`/`final` 已有 `delivery-checklist.md` 覆盖 I8，**不重复挂**）。
+ * ② 按 `meta.route` 选节 = 下面这张**按 route 的节清单表**。
+ *    ⚠️ **它不是 `METHODOLOGY_TAIL_BY_STAGE`**：那张是「同一份文件被 9000 截断线切掉之后按阶段补尾节」，
+ *    由 `test-tool-discipline.mjs` 逐字反解比对，**一个字都不许动**。本表是「另一份文件按路线选节」，两回事。
+ * ③ **不许用 `mtlWithTail`**：`invariants.md` 只有约 3000 字符、**从不截断**，对它调 `mtlWithTail`
+ *    = 整份原文 ＋ 重复的小节 ＋ 一句**事实错误的**横幅（「以下 N 节排在 9000 字截断线之后」）。
+ *
+ * 节号口径来自 `invariants.md` 自己的四段结构：I1-I4 跨路线 / I5-I6 仅 blueprint /
+ * H1-H3 仅 human / I7-I9 过程（两条路线同等适用）。`writing-agent-prompt.md:17` 的占位符映射与此同源。
+ */
+const INVARIANTS_SECTIONS_BY_ROUTE = {
+  'blueprint': ['## 一、', '## 二、', '## 四、'],
+  'human-readable': ['## 一、', '## 三、', '## 四、'],
+}
+/** 挂的阶段：`explore`（否则 `SKILL.md` 那条 REQUIRED 是个**空指针**）与 `chapters`（铺章全程）。 */
+const INVARIANTS_STAGES = new Set(['explore', 'chapters'])
+/** 关卡阶段挂哪几关：②（教学模式选型）与 ③（整书教学架构）——最需要底线的两个设计路口。 */
+const INVARIANTS_GATES = new Set(['2', '3'])
+
 const METHODOLOGY_TAIL_BY_STAGE = {
   gold: ['## 八、', '## 十、', '## 十一、', '## 十二、'],
   chapters: ['## 八、', '## 十、', '## 十一、', '## 十二、'],
@@ -2282,7 +2493,31 @@ function buildStageBrief(projectId) {
   const sources = (meta.sources ?? [])
     .filter((source) => source.converted === true)
     .map((source) => ({ file: source.file, role: source.role ?? '', md: `sources-md/${source.md}` }))
-  const mtl = (rel) => clipMethodology(resourceText(rel), 9000, rel)
+  /** 本 brief 实际挂了哪几份共用方法论文档——**记下来随 brief 一起交出去**（`brief.methodologyDocs`）。
+   *  「哪个阶段挂了哪几份」从此是**生产路径上的一个事实**，不是靠人反解 `engine.js` 源码猜的
+   *  （`test-brief-doc-closure.mjs` 的传递闭包断言读的就是这一份）。 */
+  const methodologyDocs = []
+  const mtl = (rel) => {
+    methodologyDocs.push(rel)
+    return clipMethodology(resourceText(rel), 9000, rel)
+  }
+  // 票 22：按 route 选节的不变量底线（**只对挂了的那几个阶段追加**）。
+  const attachInvariants = (stageKey) => {
+    if (!invariantsAttached(stageKey, gate)) return
+    const headings = INVARIANTS_SECTIONS_BY_ROUTE[meta.route ?? 'blueprint'] ?? INVARIANTS_SECTIONS_BY_ROUTE['blueprint']
+    const sections = pickSections(resourceText('references/invariants.md'), headings)
+    if (sections === '') return
+    // 路线名照 meta.route 逐字取（'blueprint' / 'human-readable'），不另造一套译法——
+    // 这里写错会让 AI 看到「适用本路线（blueprint）」却拿到 human 的小节。
+    const routeLabel = INVARIANTS_SECTIONS_BY_ROUTE[meta.route] === undefined ? 'blueprint' : meta.route
+    brief.methodology = `${brief.methodology ?? ''}\n\n↓ 以下是不变量底线里**适用本路线（${routeLabel}）**的 ${headings.length} 节（resources/references/invariants.md 的其余小节属于另一条路线，不适用本书；本文件从不截断，所以没有「排在截断线之后」那回事）：\n\n${sections}`
+    methodologyDocs.push('references/invariants.md')
+  }
+  /** 某份 brief 该不该挂不变量底线（阶段 + 关卡两维；`gold`/`merge`/`final` 一律不挂）。 */
+  function invariantsAttached(stageKey, gateKey) {
+    if (stageKey === 'gate') return INVARIANTS_GATES.has(String(gateKey))
+    return INVARIANTS_STAGES.has(stageKey)
+  }
   /** 票 09：某个阶段该补哪几节尾节（没登记的阶段就是没有，不补）。 */
   const mtlWithTail = (rel, stage) => {
     const headings = METHODOLOGY_TAIL_BY_STAGE[stage] ?? []
@@ -2323,7 +2558,7 @@ function buildStageBrief(projectId) {
       brief.gateTask = {
         '1': '分析源材料并推导学习目标：这本书让学习者最终能做到什么？最大的坑是什么？',
         '2': '教学模式选型与板块语法：读了模式库，考虑过哪些、拒绝哪些、为什么；选中的模式解决本书哪个教学问题；设计每章的板块结构。',
-        '3': '整书教学架构：知识链主线、卷/部划分、逐章骨架表（每章五行：章号/标题/类型/知识链位置/锚定知识点）、特殊章、跨章引用机制、附录策略、贯穿案例约定；以及体量设计：整书总字数与预计学时、每章字数区间、依据（材料知识量/学习目标/读者背景），体量须在大白话摘要中呈现。',
+        '3': '整书教学架构：知识链主线、卷/部划分、逐章骨架表（每章五行：章号/标题/类型/知识链位置/锚定知识点——**第 5 列统一是知识点**，无源书没有知识点清单、那一列改写锚定的源任务或概念）、特殊章、跨章引用机制、附录策略、贯穿案例约定；以及体量设计：整书总字数与预计学时、每章字数区间、依据（材料知识量/学习目标/读者背景），体量须在大白话摘要中呈现。**另有两件在**这一步**就要答、不能拖到写范式章才答**：①本书第一读者是谁（AI 老师 / 人类读者）；②防螺旋铁律的**设计期禁令**——从这一关拍板到写作规范产出之间，不许自行加章/加附录/加机制级板块，真要加等用户走定点修改重新拍板（style-spec 里的「防螺旋铁律」那一项记的是**定稿之后**的回炉规则，两半不是一回事）。',
       }[String(gate)] ?? ''
       brief.previousDecision = current === null || current.gate !== gate ? null : {
         version: current.version, status: current.status,
@@ -2368,7 +2603,15 @@ function buildStageBrief(projectId) {
       brief.targetWords = meta.outline?.chapters?.[gn - 1]?.targetWords ?? meta.targetWords ?? 6000
       brief.chapterSource = chapterSource
       brief.outputs = [
-        'work/style-spec.md -- 写作规范（十问契约，节标题齐全）：模式选型（考虑过哪些/拒绝了哪些/为什么；每个模式对应本书哪个教学问题）、章内板块语法完整版、情境钩子写法、正文语言风格、量化参考密度、深度四维承诺表（四维各用什么板块兑现到什么程度）、最佳范例章写作惯例区（本稿回填）、防幻觉铁律、写作纪律（一个 agent 写几章/篇幅约束/排除项）、脚手架标题清单（交付前拆除用）。',
+        // 票 19：这份契约文本是「审计要查的东西、producer 不许写」那条悬空契约的**生产端**。
+        // 十八项与 `resources/references/subagent-prompts/audit-agent-prompt.md §审计要求`、
+        // `audit-and-testing.md §7.0` 两份审计清单**逐项对齐**；差集断言（`test-contract-gap.mjs`）
+        // 从两侧**解析**出集合来比，本文件里不硬编码第二份清单。
+        // 「N. **名字**」的编号+加粗是**给解析器看的**：改成不带编号的散文，那条断言会立刻空转
+        // （它会报「生产集合解析出 0 项」）。
+        // 版权铁律／字数／frontmatter schema 三项**要求写的是「有意不做 + 理由」**，不是写内容——
+        // 2026-08-18 走查 :73 的原裁是「补产物**或**写明『有意不做』的理由」，仓里有先例。
+        'work/style-spec.md -- 写作规范（十九项契约，**每项都要有一个同名小节**，逐项打钩）：1. **模式选型**（考虑过哪些/拒绝了哪些/为什么；每个模式对应本书哪个教学问题）、2. **章内板块语法**（必含/循环/可选板块的完整语法）、3. **情境钩子写法**、4. **Voice 规则**（正文语言风格：正式程度/术语处理/本书特有禁用词）、5. **量化参考密度**（参考非铁律，本稿回填实测）、6. **深度四维承诺**（四维各用什么板块兑现到什么程度）、7. **最佳范例章写作惯例区**（本稿回填）、8. **防幻觉铁律**（最危险的断言类型/回源到哪/追不到怎么降级）、9. **写作纪律**（一个 agent 写几章/并行度/篇幅约束/排除项）、10. **脚手架标题列表**（交付前拆除用）、11. **本书定位**（一句话说清这本书是什么、给谁用）、12. **读者意识声明**（本书第一读者是谁；**写每一块之前先问自己什么问题**——这半句落在这里，「第一读者是谁」那一半在第 3 次拍板（整书教学架构）的提案里）、13. **章末教学区规范**（板块结构/长度/格式）、14. **frontmatter schema**（需要章级 yaml 就定义字段+校验规则；不需要就逐字声明「本书无章级 frontmatter」）、15. **AI 老师使用方式**（顺序讲/地基章先吃透/按需检索）、16. **防螺旋铁律**（定稿后不许自行加章/附录/机制级板块；确需加由用户走定点修改重新拍板）、17. **多源同级声明**（本书若有两本并行的权威源且说法不同，逐字写出「以哪本为准 ＋ 为什么是它」；冲突先按问题类型四路分派定权威源——定义/原则、操作步骤、考试覆盖范围、敏捷——四路分不出来才用「根真相源 > 教学讲义 > 碎片笔记」那条线性刻度，**考纲是覆盖校验基准、不进那条刻度**）、18. **版权铁律**、19. **字数**。⚠️ **18 与 19 是「有意不做」项**：照 2026-08-18 实书走查的裁决，本仓不设版权声明模板、也**不设任何字数/篇幅闸门**（与「机器永不查字数」的口径一致，超一点没关系）——这两项**必须写下来的是那句「有意不做 + 理由」，不是内容**；14 同理，只能二选一（有 schema / 无 schema），不许留空。',
         `work/chapter-${String(gn).padStart(2, '0')}.md —— 第 ${gn} 章全文（按 style-spec，含全部板块与答案；约 ${brief.targetWords} 汉字，是写作体量参考、**不是闸门**——机器不验字数，宁可多写不可敷衍）`,
         `work/audit-${String(gn).padStart(2, '0')}.md —— 审计记录（四层审计 + 试教[条件触发]，严格 JSON：{"passed":true,"issues":[{"level":"错误|警告|提示","text":"具体问题"}]}）`,
       ]
@@ -2476,22 +2719,34 @@ function buildStageBrief(projectId) {
       break
     }
     case 'final': {
-      brief.task = `最后检查：亲自读 work/book.md，逐项自查（成品完整、每章有自查记录、无 AI 脚手架残留、练习与答案齐全、与已拍板设计一致、材料可追溯、无引用矛盾与事实矛盾），发现问题先修，再把你的自查报告（人话）随 stage-submit（stage=final, report=...）交工。${REPORT_WORDING_RULE}交工时若本书还有生效中的风格线（workbench_status 的 styleNotes 里 status 为 active 的那些），必须对**每一条**逐条交代去向，用 styleCheck:[{id, status, note?, chapter?}] 随交工一起交：adopted＝已落实（写清落实在哪章）、conflict＝与哪一章冲突（note 必写一句冲突理由）、superseded＝已不再适用；漏一条机器会拒收。机器硬检查会兜底（乱码/章节数/必含板块/禁用词，判据来自已拍板的 style-spec/outline）；全过后你在工作台等用户「认可」才算交付。`
+      // 票 walkthrough-fixes/32 · ADR-0027：终检改派 5 个小助手分查。**协调员不读正文**（§6.1 硬约束）——
+      // 终检是全书体量最大、上下文余量最小的那个时点，让它亲自通读 book.md 等于把最贵的读放在最没余量的地方。
+      // 三层归属在这条字符串里必须自洽：协调员**不读正文** / **仍能改点名的条目** / **styleCheck 逐条交代由分报告做**。
+      brief.task = `最后检查**分头查，不要自己通读**（口径见 audit-and-testing.md §十「派 5 个小助手分查」那一节）：按那一节派 5 个上下文干净的小助手分查 work/book.md，各查各负责的范围（成品完整与每章自查记录 / AI 脚手架残留与练习答案齐全 / 与已拍板设计一致 / 材料可追溯与引用矛盾 / 事实与跨章一致性），**派发那一刻你手里一章正文都不许有**，只收 5 份报告。五份各自出结论（通过／不通过）＋**条目级**点名（「第 3 章有问题」不算点名，要指到具体哪一处）。**五份不合成**：你只做汇总裁决，不逐条回正文复核（核实是写那份报告的助手自己的活）；按点名的那几条**直接改**——只改点名的条目，不通读全书、不顺手重写别的章。改完把五份结论汇成一份自查报告（人话）随 stage-submit（stage=final, report=...）交工。${REPORT_WORDING_RULE}**风格线逐条交代由五份分报告各自做、你不读正文所以不做**：交工时要对**每一条**生效中的风格线（workbench_status 的 styleNotes 里 status 为 active 的那些）都有交代——把五份报告里各自交代的去向合并成一份 styleCheck:[{id, status, note?, chapter?}] 随交工一起交：adopted＝已落实（写清落实在哪章）、conflict＝与哪一章冲突（note 必写一句冲突理由）、superseded＝已不再适用；漏一条机器会拒收（哪一路没交代就唤醒那一路补，别自己凭印象编）。机器硬检查会兜底（乱码/章节数/必含板块/禁用词/重复标题，判据来自已拍板的 style-spec/outline）；全过后你在工作台等用户「认可」才算交付。`
       brief.counts = { chapters: (meta.outline?.chapters ?? []).length, sources: (meta.sources ?? []).length }
       brief.methodology = `${mtl('references/delivery-checklist.md')}\n\n${mtlWithTail('references/audit-and-testing.md', 'final')}`
       brief.outputs = ['维护 work/progress.md（每章一行：写完/审计/验货）']
+      // 票 32 · ADR-0027 决策 4：上下文余量**解绑**进终检——分派把书摘下去了，但五份报告回流、
+      // 汇总、改点名条目仍在协调员身上，余量仍然是它该盯的数（读不到读数就整句不出现，同铺章那一族）。
+      brief.hints = ['派完这 5 路之后别断线：五份齐了才进下一步；某一路超载就拆范围（或唤醒原助手补），别硬扛。', '五份报告只信「条目级点名」的那几条——点名不到具体位置的打回重做。']
+      {
+        const occupancyLine = contextOccupancyBriefLine(meta.session)
+        if (occupancyLine !== null) brief.hints.push(occupancyLine)
+      }
       // 终检被用户驳回后的修订意见（final-approve approved=false → 原地循环）。
       // 意见在 stage-submit final 通过时才销号（2026-08-27 grill 修订）：领任务改纯读、无副作用，
       // AI 重领任务/机器打回后重领都仍带意见；「重做意见只对本轮生效」语义不变（与 exploreRedoNote/goldRedoNote 同构）。
       if (meta.finalRedoNote != null) {
         brief.userFeedback = meta.finalRedoNote
-        brief.hints = [...(brief.hints ?? []), `这是最后检查的修订：用户对整本书的意见是「${meta.finalRedoNote}」。按意见修整本（改 book.md），改完重新自查一遍再交工。`]
+        brief.hints = [...(brief.hints ?? []), `这是最后检查的修订：用户对整本书的意见是「${meta.finalRedoNote}」。按意见改整本（改 book.md）——仍按 §十「派 5 个小助手分查」那一节的分工：优先**唤醒原来那 5 路**去查改动处，够不着的再派新的干净上下文助手；改完五份齐了再汇总交工，不要自己通读全书。`]
       }
       break
     }
     default:
       brief.task = '（这个阶段的说明还没有补齐，先按状态机提示与用户确认该做什么。）'
   }
+  // 票 22：不变量底线只对裁决里那四个阶段/关卡追加（explore / 关卡② / 关卡③ / chapters）。
+  attachInvariants(stage)
   // 深改注入的重做意见：只交给被改段的那个阶段。
   if (meta.deepRedoNote != null) {
     const segOfStage = { explore: 'explore', gate: `gate-${gate ?? ''}`, outline: 'outline', gold: 'gold', chapters: 'chapters', merge: 'merge', final: 'final' }
@@ -2514,6 +2769,9 @@ function buildStageBrief(projectId) {
     brief.pendingInterventions = pendingIv.map((i) => ({ text: i.text, target: i.target ?? null, at: i.at }))
     brief.hints = [...(brief.hints ?? []), `有 ${pendingIv.length} 条用户留言要先处理（见 pendingInterventions），处理完用 workbench_act(action=intervene-done, id=...) 逐条销号，再继续手头的活。`]
   }
+  // 票 22：随 brief 交出「这一份挂了哪些共用方法论文档」（去重后保序）——
+  // 这是把「哪份文档该出现在哪个 brief」变成**可测事实**的那一步，不是给人看的新负担。
+  brief.methodologyDocs = [...new Set(methodologyDocs)]
   return brief
 }
 
