@@ -11,22 +11,20 @@ import {
 	chapterBadge,
 	deriveDoneSet,
 	hasPendingReview,
+	isReviewPending,
 	reviewState,
 	reviewText,
+	contextOccupancySentence,
 } from "./rules.js";
 import { GoldReader } from "./gold-table.js";
-// 界面用词表（批 2）：步清单按 seg.key 取界面词，不再直接渲染服务端账本 label。
-import {
-	PHASE_UI,
-	artifactName,
-	stepCount,
-	stepWord,
-	stepsOf,
-	workEntryAction,
-} from "./view-rules.js";
+// 界面用词表（批 2）：章节清单按 seg.key 取界面词，不再直接渲染服务端账本 label。
+// ⚠️ 候选 06：步模型的四态词 / 分组 / 计数 / rowText **不再**从这里取——它们住在
+// `stage-step-model.js` 的 projection 里，行自带 `rowText` / `detailLines` / `target`。
+// 本 module 只保留章节卡要的 `PHASE_UI` / `artifactName` / `workEntryAction`。
+import { PHASE_UI, artifactName, chapterAuditFreshnessText, workEntryAction } from "./view-rules.js";
 // 票 09：章节卡非过目态那颗「打开」＝票 02 那颗共用按钮，住中性模块（阶段页再导出它）。
-// ⚠️ 不许从 `./phase-page.js` import：那个文件已经 import 本文件（`foldKnowledgeMap` /
-// `stepRowText`），反向 import 会成环（`chapters-map → phase-page → chapters-map`）。
+// ⚠️ 不许从 `./phase-page.js` import：那个文件已经 import 本文件（`foldKnowledgeMap`），
+// 反向 import 会成环（`chapters-map → phase-page → chapters-map`）。
 import { OpenArtifactButton } from "./open-artifact-button.js";
 import { goldChapterNo } from "../domain-rules.js";
 
@@ -37,24 +35,83 @@ import { goldChapterNo } from "../domain-rules.js";
  */
 const chapterRel = (n) => `work/chapter-${String(n).padStart(2, "0")}.md`;
 
+// 票 27 · P38 ①：章节卡那颗「打开」按态分——**没定稿的章在按钮自己身上说清这一点**。
+//
+// 为什么不在共用件 `open-artifact-button.js` 里做：那个是**中性件**（阶段页三处 ＋ 事件行行内
+// ＋ 章节卡共用，见该文件 :4-13），「这一章定没定稿」对它毫无意义。所以分态留在**调用点**，
+// 只给章节卡这一处传自己的 `label` / `title`。
+//
+// ⚠️ 措辞只此一份（CONTEXT.md「界面用词表」：界面上的字只此一份）：
+//   · 标签给**状态**（「未定稿」四个字），悬浮提示给**后果**（「你读到的东西还会被变」）——
+//     **不复述 AI 在干嘛**（「正在检查」「正在复核」这类说法正是今天那行章卡小徽章失效的原因：
+//     它说的是 AI 的流程视角，不是你读到的东西会不会变）。
+//   · **不与 `view-rules.js` 那个 `freshness === "stale"` 的「旧稿」混用**：那个判的是
+//     「检查记录 vs 正文」的新旧，本条判的是「这一章算不算完」，**是两件事**（票面 :113-114）。
+//   · 「不保证是最后的样子」是**留了余地的说法**（spec.md:195 不变量 12「文案不得承诺没有兑现
+//     机制的能力」）：`done === false` 的确会被继续改，但本票**不承诺**它一定改、也不编改法。
+const DRAFT_QUALIFIER = "（未定稿）";
+
+/** 未定稿那一档的悬浮提示：说清「读到的东西还会被变」这一层。 */
+const draftOpenTitle = (name) =>
+	`在右栏打开「${name}」；这一章还没定稿，AI 还可能再改它，现在读到的内容不保证是最后的样子`;
+
+
 // ── 章节清单卡（铺章阶段 · 人+AI 协同抽查面板） ───────────────────────────────
 
 /**
- * 一条意见在章节卡上的一行（票 10：本程对 `src/ui/` 的**唯一**开口）。
+/**
+ * AI 声称「已按抽查意见修订」的那一行账，按章号归拢（票 10 · P16/P47 落点①）。
  *
- * 用户在自己读那条意见的地方就能看见它被怎么处置了：`pending` 照旧显示（它正拦着这一章交工）；
- * `applied` 显示成「已处置 · <how>」并在**同一行**给一个「翻案」按钮（就地，不另起界面）；
- * `revoked` 显示「已作废」。翻案＝把这条退回未处置（服务端的 `review-revoke` 把 `status` 写回
- * `pending` 并清掉 `how`），该章交工因此重新被拦——见 `.scratch/dead-gates/issues/10-*.md`。
+ * **只读账本，不改状态**：`project.json` 里那条意见的 `status` 仍然是 `pending`、仍然红字拦着
+ * 这一章交工——「不搞交工自动全销号」是已拍板的设计（不信任 AI 的自报），一个字都不松。
+ * 这里只是让那句人话在用户读那条意见的地方**看得见**（§十一 · 11.5 ③ 那一行账的界面回声）。
+ *
+ * 落账格式由规则正文钉死（`第 N 章：已按抽查意见修订（做了 X、Y、Z）`），所以这里按
+ * 「含这句话 ＋ 能认出第几章」两条取；认不出的（AI 写得不合规）不硬套到任何一章上。
+ * 事件按 seq 递增，后来的覆盖先前的 = 留下**最近一条**。
+ */
+function reviewProgressByChapter(events) {
+	const byChapter = new Map();
+	for (const event of events ?? []) {
+		if (event?.type !== "textbook/progress") continue;
+		const text = `${event.data?.label ?? ""}　${event.data?.detail ?? ""}`.trim();
+		if (!text.includes("已按抽查意见修订")) continue;
+		const match = /第\s*(\d+)\s*章/.exec(text);
+		if (match === null) continue;
+		byChapter.set(Number(match[1]), text.replace(/\s+/g, " "));
+	}
+	return byChapter;
+}
+
+/**
+ * 一条意见在章节卡上的一行（票 10：本程对 `src/ui/` 的**唯一**开口；票 09 补了反方向的出口）。
+ *
+ * 用户在自己读那条意见的地方就能看见它被怎么处置了：`pending` 照旧显示（它正拦着这一章交工）、
+ * 并给一个**撤回**按钮；`applied` 显示成「已处置 · <how>」并在**同一行**给一个「翻案」按钮
+ * （就地，不另起界面）；`revoked` 显示「已撤回」。两条出口方向相反：
+ *   撤回＝把这条**作废**（服务端 `gold-opinion-revoke` 置 `revoked`：不再发给 AI、不再拦交工）；
+ *   翻案＝把这条退回未处置（服务端 `review-revoke` 把 `status` 写回 `pending` 并清掉 `how`，
+ *          该章交工因此重新被拦）——见 `.scratch/dead-gates/issues/10-*.md`。
+ *
+ * 票 10 · P16/P47 落点①：处置态**一个字不改**（红字「还没处置 · 这一章交工前要先处置它」照旧），
+ * 只在它旁边补一句**进展说明**——账上那行「AI 说它改好了」原话摆在这儿，用户过目之前先看得见
+ * AI 自称做了什么。⚠️ 这一句**不是第四个状态词**，也不改徽章的三词上限（`chapterBadge` 原样）；
+ * 它是意见行上的进展说明，与 `已处置 · <how>` 同一形状（状态 ＋ AI 的原话）。
  */
 function ChapterReviewLine(props) {
-	const { review, busy, onRevoke } = props;
+	const { review, busy, onRevoke, progressText } = props;
 	const state = reviewState(review);
 	const text = reviewText(review);
-	// 翻案要按 id 点名（服务端 review-revoke 只认 id）：老账本里没写 id 的意见给不出翻案按钮，
-	// 不给一个点了没反应（或点了 404）的死按钮。
+	// 两个动作都按 id 点名（老账本里没写 id 的意见给不出按钮），不给一个点了没反应（或点了 404）
+	// 的死按钮。`revocable` 只答「有没有出口」，**出口是哪个动作按 `state.key` 分派**。
 	const canRevoke =
 		state.revocable && typeof review?.id === "string" && review.id !== "";
+	const withdrawing = state.key === "pending";
+	// 进展说明只挂在**还没处置**那一条上：已处置的 `how` 本身就是那句话，已撤回的更不该提。
+	// 用词走票 09 收口后的正名（`CONTEXT.md`「撤回（意见）」词条）；那张票的机械验收是
+	// 全 `src/` 搜旧写法零命中，所以这里连注释里也不许把它写出来。
+	const showProgress =
+		state.key === "pending" && typeof progressText === "string" && progressText !== "";
 	return createElement(
 		"div",
 		{
@@ -88,16 +145,32 @@ function ChapterReviewLine(props) {
 			},
 			state.text,
 		),
+		showProgress
+			? createElement(
+					"span",
+					{
+						style: {
+							flex: "1 1 100%",
+							marginLeft: "14px",
+							color: "var(--dsw-text, #1f2328)",
+							opacity: 0.75,
+						},
+					},
+					`AI 说它改好了，等你确认：${progressText}（这句是 AI 自述，你点头才销号）`,
+				)
+			: null,
 		canRevoke
 			? createElement(
 					"button",
 					{
 						style: S.smallLink,
-						onClick: onRevoke,
+						onClick: () => onRevoke(state.key, review),
 						disabled: busy,
-						title: "把这条意见退回未处置：这一章的交工会重新被它拦住",
+						title: withdrawing
+							? "撤回这条意见：AI 不再照它改，这一章也不再被它拦着交工（不回滚已经改好的正文）"
+							: "把这条意见退回未处置：这一章的交工会重新被它拦住",
 					},
-					"翻案",
+					withdrawing ? "撤回" : "翻案",
 				)
 			: null,
 	);
@@ -116,8 +189,11 @@ export function ChaptersCard(props) {
 		onApproveAll,
 		events,
 		workFiles,
+		chapterSegments,
 		project,
 		session,
+		// 票 28：主 AI 上下文占用百分比（null = 宿主读不到，界面不显示这一格）。
+		contextPercent,
 		postAction,
 		initialOpenChapter,
 		chapterTextOverride,
@@ -131,6 +207,12 @@ export function ChaptersCard(props) {
 			? initialOpenChapter
 			: null,
 	);
+	// 票 30①：内联展开**不再只挂在 reviewMode 上**。
+	// 过目态下提一条意见，服务端会把书从「全章过目」翻回「我正在做」——那是**正确**的状态迁移
+	// （过目态提意见确实要交办修订），本票不去修它。原先的投影却是粗暴的：`reviewMode` 一变 false，
+	// 13 张章卡**同时**收起，用户正在读的那一章当场合上，看起来像自己点坏了。
+	// 解耦办法只解耦**这一章**：把刚提交意见的那一章钉在展开态；其余卡照旧按 `reviewMode` 收。
+	const [keepOpenChapter, setKeepOpenChapter] = useState(null);
 	const [chapterText, setChapterText] = useState(null);
 	const [chapterError, setChapterError] = useState(null);
 	useEffect(() => {
@@ -186,31 +268,67 @@ export function ChaptersCard(props) {
 		() => deriveDoneSet(events, goldChapterNo(meta)),
 		[events, meta],
 	);
+	// 票 10 · P16/P47 落点①：AI 自称「已按抽查意见修订」的那一行账，按章号归拢。
+	// 它只让那句人话在意见行上看得见——**不销号、不改任何状态**（界面上那条红字照旧）。
+	const reviewProgress = useMemo(() => reviewProgressByChapter(events), [events]);
 	// 「打开」按钮置灰：chapter 文件不在产物清单里就禁用（旧账本/未拉取时 ?? 兜底不误灰）。
 	const hasChapterFile = (n) => {
 		const files = workFiles ?? [];
 		if (files.length === 0) return true;
 		return files.some((f) => f.path === chapterRel(n));
 	};
-	// 「已完成 X/Y 章」＝**闸门口径**（票 14）：服务端下发的 `chapterStatus[].done` 就是过目闸门认的
+	// 「这一章算不算完成」＝**闸门口径**（票 14）：服务端下发的 `chapterStatus[].done` 就是过目闸门认的
 	// 「这一章算完成了」（两份产物 ＋ 章级交工通过 ＋ 该章无未处置意见）——有它就照它，两个数字必然一致；
 	// 老服务端/样张没带 `done` 时退回本地同一判据（章级交工通过事件 + 该章无未处置意见）。
 	// ⚠️ 不再按「文件在不在」数（旧口径会把没交工的章也算完成）；章级徽章另用 doneSet（见上），
 	// 它要照旧显示「有意见待 AI 修订」这一态。
-	const done = rows.filter((row) => {
-		const found = (chapterStatus ?? []).find(
-			(r) => Number(r.n) === row.n,
-		);
+	//
+	// 票 27：这一份判据**两个出口**——①「已完成 X/Y 章」那个计数；②章节卡那颗「打开」的
+	// 「（未定稿）」后缀。原先这里只有 `.filter(...).length` 一个计数出口，票 27 要按章问
+	// 「这一章是不是定稿」，所以**先把判据提成逐章谓词，再让计数从它派生**——
+	// **不许两处各写一份**：两份判据一旦分叉，「已完成 3/13 章」和 13 颗按钮上的
+	// 「（未定稿）」就会互相说假话，而且那种分叉没有任何既有测试抓得到（票面 :74-76 逐字警告：
+	// 这条布局/文案改动不撞 `test-layout-anchors.mjs`，也没有别的回归网）。
+	const chapterIsDone = (n) => {
+		const found = (chapterStatus ?? []).find((r) => Number(r.n) === n);
 		if (typeof found?.done === "boolean") return found.done;
-		return doneSet.has(row.n) && !hasPendingReview(pendingReviews, row.n);
-	}).length;
+		return doneSet.has(n) && !hasPendingReview(pendingReviews, n);
+	};
+	const done = rows.filter((row) => chapterIsDone(row.n)).length;
 	const prepared = (chapterStatus ?? []).length > 0;
+	// 票 30③：进度数字倒退**要有解释**。过目态提一条意见后「已完成 13/13」会退回「12/13」，
+	// 那个 1 差在哪、是不是白干，屏上不点名字就说不出来。判据**读已有的那一份**
+	// （`isReviewPending`，与章徽章、「已完成 X/Y 章」、交工拦截同口径），不另写一份算法。
+	const pendingByChapter = rows
+		.filter((row) => hasPendingReview(pendingReviews, row.n))
+		.map((row) => ({
+			n: row.n,
+			count: (pendingReviews ?? []).filter(
+				(review) =>
+					Number(review.chapter) === Number(row.n) && isReviewPending(review),
+			).length,
+		}));
+	const pendingExplain =
+		pendingByChapter.length === 0
+			? ""
+			: `（${pendingByChapter
+					.map((item) => `第 ${item.n} 章有 ${item.count} 条意见待修订`)
+					.join("；")}）`;
+
+	// 票 28：主 AI 上下文占用（走查 P46）——「计量」，**不是第四个状态词**：
+	// 它不进 chapterBadge()、也不进任何返回状态词的函数（CONTEXT.md 三词上限不动）。
+	// 读不到（contextPercent 不是有限数）时这里是空串，那一格**整句不出现**，不显示 0%。
+	const contextNote = contextOccupancySentence(contextPercent);
+	const contextNoteText = contextNote === "" ? "" : `（${contextNote}）`;
 
 	const sendReview = (n) => {
 		if (comment.trim() === "") return;
 		void onReview(n, comment.trim()).then(() => {
 			setReviewing(null);
 			setComment("");
+			// 票 30①：章卡「✍️ 写意见」这一条入账路径也要把这一章钉在展开态——
+			// 段落三键那一支已经做了，只改一条等于没改全。
+			setKeepOpenChapter(n);
 		});
 	};
 
@@ -251,8 +369,16 @@ export function ChaptersCard(props) {
 			{ style: { margin: "4px 0 8px", fontSize: "12px", opacity: 0.75 } },
 			// 票 10：①「审计」→「检查」（判定三 #8，界面一律说检查）；②判定四③ 原句 117 字压到 90 字内，
 			// 删掉与全览条重复的步数解释与「与过目同一口径」这类内部口径说明，保留用户要做的事。
-			`每章流程：小助手执笔 → 小助手检查 → AI 最后把关。已完成 ${done}/${rows.length} 章；想细看点「看看这章」，有意见直接写，AI 照改，处置过的意见能翻案。`,
+			// 两处并排是**两次独立票据**落在同一句话上，不是二选一：pendingExplain 解释的是
+			// 紧邻其左的那个「已完成 N/M 章」为什么会倒退（票 30），contextNoteText 是一个独立计量
+			// （票 28，不占状态词位）。两段各自要么是空串、要么是自带括号的一整段，串起来不会出现
+			// 半截括号，也不需要第三种分隔符。
+			`每章流程：小助手执笔 → 小助手检查 → AI 最后把关。已完成 ${done}/${rows.length} 章${pendingExplain}${contextNoteText}；想细看点「看看这章」，有意见直接写，AI 照改，处置过的意见能翻案。`,
 		),
+		// 票 25（走查 P20）：这一块是进度叙述的**主出口**（第 5 阶段）——同一段叙述曾经在这里
+		// 与顶部横幅各出一遍，一屏渲染两遍。既定分工：叙述在主卡（就近可读）出全文，
+		// 横幅只出状态词那半截（见 `panels.js` 的 `StatusStrip`）。
+		// ⚠️ 不搬进折叠区、不截断、不改写原文——长叙述恰恰要就地看得见。
 		progressDetail !== null &&
 			progressDetail !== undefined &&
 			progressDetail !== ""
@@ -282,7 +408,10 @@ export function ChaptersCard(props) {
 			// 点下去会发生什么只能靠误触学习——判「不合法」。现在两种形态各自只有一个后果、文案自证目的地：
 			//   非过目态＝共用那颗「打开」（可见文案「第 N 章 打开」，点它只开右栏，不展开任何东西）；
 			//   过目态　＝「▸ 展开第 N 章正文 / ▾ 收起」（点它只换这张卡的内联内容，不开右栏、不发动作）。
-			const chapterOpen = reviewMode && openChapter === row.n;
+			// 票 30①：刚提交过意见的那一章（`keepOpenChapter`）**不随 reviewMode 一起收**——
+			// 其余卡照旧按 `reviewMode` 收（13 张卡全留着展开反而没法看）。
+			const chapterOpen =
+				(reviewMode || keepOpenChapter === row.n) && openChapter === row.n;
 			// 该章已挂的段落级意见（chapter 维度、未撤销）：喂给 GoldReader 标段与两态键。
 			const rowOpinions = (pendingReviews ?? []).filter(
 				(r) =>
@@ -310,7 +439,11 @@ export function ChaptersCard(props) {
 			]
 				.filter(Boolean)
 				.join(" · ");
-			return createElement(
+				// 票 10 · P47 落点②：这一章的检查记录是不是**比正文旧**（旧稿）。措辞与步清单那份
+			// `artifactFactText` 同源（同一个出口、同一个判据）；服务端没下发、或这一章还没写
+			// 检查记录 → 空串，不编一句。
+			const auditFreshness = chapterAuditFreshnessText(chapterSegments, row.n);
+		return createElement(
 				"div",
 				{
 					key: row.n,
@@ -356,6 +489,13 @@ export function ChaptersCard(props) {
 							sourceIndex,
 						)
 					: null,
+					auditFreshness !== ""
+					? createElement(
+						"div",
+						{ style: { margin: "2px 0 0", fontSize: "11px", opacity: 0.6 } },
+						auditFreshness,
+					)
+				: null,
 				createElement(
 					"div",
 					{
@@ -375,6 +515,9 @@ export function ChaptersCard(props) {
 									style: S.smallLink,
 									onClick: () => {
 										setOpenChapter(chapterOpen ? null : row.n);
+										// 票 30①：用户自己动了展开态，那枚「钉在展开态」的钉子就作废
+										// （否则点开另一章会同时留下两章展开）。
+										setKeepOpenChapter(null);
 										setChapterText(null);
 										setChapterError(null);
 									},
@@ -389,14 +532,23 @@ export function ChaptersCard(props) {
 							)
 						: // 非过目态：共用那颗「打开」——可见文案「<产物名> 打开」自证目的地（产物名走
 							// 「产物名」词表＝「第 N 章」，与事件行行内那颗同形），点它只开右栏。
+							// 票 27 · P38 ①：没定稿的章那颗「打开」**自己说清这一点**——标签加「（未定稿）」、
+							// 悬浮提示说清后果（读到的东西还会被变）；**定稿的章逐字保持原样，一个字不加**。
+							// ⚠️ 判据取 `chapterIsDone`（与上面「已完成 X/Y 章」**同一份**，不另写一条）。
+							// ⚠️ `fileMissing` 那一支优先级更高：文件都还没出来，谈不上定没定稿，保持原样。
+							// ⚠️ `open-artifact-button.js` 的默认值一个字不动（中性件，阶段页与事件行共用）。
 							createElement(OpenArtifactButton, {
 								item: { path: chapterRel(row.n) },
 								onOpen: () => onView(row.n),
-								label: `${artifactName(chapterRel(row.n))} 打开`,
+								label: chapterIsDone(row.n)
+									? `${artifactName(chapterRel(row.n))} 打开`
+									: `${artifactName(chapterRel(row.n))} 打开${DRAFT_QUALIFIER}`,
 								disabled: fileMissing,
 								title: fileMissing
 									? "这一章还没写出来（或文件改名了），暂时看不了"
-									: undefined,
+									: chapterIsDone(row.n)
+										? undefined
+										: draftOpenTitle(artifactName(chapterRel(row.n))),
 								// 这一排按钮照旧左对齐（本件默认 `marginLeft:auto` 是给产物行靠右用的）。
 								style: { marginLeft: 0 },
 							}),
@@ -409,13 +561,23 @@ export function ChaptersCard(props) {
 										setReviewing(open ? null : row.n);
 										setComment("");
 									},
+									// 票 10 · P13：同一排里可点性必须一致（CONTEXT.md「热区」第 2 条）。旁边那颗「打开」
+									// 对没写出来的章已经 disabled，这颗原来 13 章全 enabled——于是能给还没写出来的那一章
+									// 提意见，承诺的兑现时点根本不存在（账本照收）。置灰判据与悬浮提示都与「打开」同源。
+									disabled: fileMissing,
+									title: fileMissing
+										? "这一章还没写出来（或文件改名了），暂时提不了意见"
+										: open
+											? "收起这一章的意见输入框"
+											: "给这一章写一条抽查意见，AI 照改后由你确认",
 								},
 								open ? "收起" : "✍️ 写意见",
 							)
 						: null,
 				),
 				// 票 10：该章的意见就在「写意见」这一区下面逐条列出来。未处置的（正拦着这章交工）
-				// 照旧显示；已处置的显示「已处置 · <how>」+ 同行「翻案」；已作废的显示「已作废」。
+				// 照旧显示、并给「撤回」；已处置的显示「已处置 · <how>」+ 同行「翻案」；
+				// 已撤回的显示「已撤回」（票 09 统一措辞，正名取 `rules.js` 的 `REVIEW_REVOKED_TEXT`）。
 				rowReviews.length > 0
 					? createElement(
 							"div",
@@ -445,9 +607,22 @@ export function ChaptersCard(props) {
 											: `review-${row.n}-${index}`,
 									review,
 									busy,
-									onRevoke: () => {
+									progressText: reviewProgress.get(row.n) ?? null,
+									onRevoke: (key, review) => {
 										if (postAction === undefined) return;
-										// 翻案：服务端把这条 status 写回 pending（并清 how），
+										// 票 09：按处置态分派两个**方向相反**的动作。两条都复用契约目录里
+										// 已有的名字（`gold-opinion-revoke` / `review-revoke`，都已是工作台可调用），
+										// **不新增动作名**——新增会让契约动作目录那几处写死的计数四处红。
+										if (key === "pending") {
+											// 撤回（还没处置 → 作废）：置 `revoked`。下游三处过滤都认这个态——
+											// 不再随交办发给 AI、不再拦这一章交工、不再当段落标记。
+											void postAction({
+												action: "gold-opinion-revoke",
+												id: review.id,
+											});
+											return;
+										}
+										// 翻案（已处置 → 还没处置）：服务端把这条 status 写回 pending（并清 how），
 										// 这一章的交工重新被它拦住。postAction 成功后自带刷新。
 										void postAction({
 											action: "review-revoke",
@@ -504,15 +679,39 @@ export function ChaptersCard(props) {
 											"div",
 											null,
 											createElement(
-												"p",
+												"div",
 												{
 													style: {
 														margin: "0 0 6px",
 														fontSize: "12px",
 														opacity: 0.75,
+														display: "flex",
+														alignItems: "baseline",
+														gap: "8px",
+														flexWrap: "wrap",
 													},
 												},
 												`第 ${row.n} 章正文（鼠标停在哪一段，那段右侧亮出 😕🗑✏️ 提意见）：`,
+												// 票 30①：被钉住的那一章此刻不是过目态，卡片上那颗按钮已经是「打开」
+												// （它只开右栏），于是**收起**这条路上没有控件了。补这一颗：
+												// 身份＝纯展开收起，不发动作、不开右栏，与「打开」各干一件事。
+												!reviewMode
+													? createElement(
+															"button",
+															{
+																style: S.smallLink,
+																onClick: () => {
+																	setOpenChapter(null);
+																	setKeepOpenChapter(null);
+																	setChapterText(null);
+																	setChapterError(null);
+																},
+																disabled: fileMissing,
+																title: "收起这一章正文（正文就在这张卡里）",
+															},
+															"▾ 收起这一章正文",
+														)
+													: null,
 											),
 											createElement(GoldReader, {
 												text: shownText,
@@ -520,6 +719,8 @@ export function ChaptersCard(props) {
 												busy,
 												onOpinion: (kind, wish, para, hint) => {
 													if (postAction === undefined) return;
+													// 票 30①：段落三键这一条入账路径同样把这一章钉在展开态。
+													setKeepOpenChapter(row.n);
 													void postAction({
 														action: "gold-opinion",
 														kind,
@@ -545,65 +746,31 @@ export function ChaptersCard(props) {
 		createElement(
 			"p",
 			{ style: { margin: "8px 0 0", fontSize: "12px", opacity: 0.7 } },
-			// 票 14（承诺账 B，来源票 15-Q2 的裁决）：全仓 `writeSnapshot(` 只有四个写点
-			// （阶段交办 / 每关首次与修订提案 / 回退前），**没有「每章」写点**；reason 也不是拍板点
-			// （阶段交办类写的是「交办「写完整本」之前」）。所以这里改说「关键节点自动存档」＋
-			// 「最近一次存档」——机制侧「seq 不再覆盖旧版本」由票 19 落地。
-			"📌 关键节点会自动存档，随时能回到最近一次存档；想改更早的决定，展开上面的步清单点那一步，用「定点修改」。",
+			// 票 14（承诺账 B，来源票 15-Q2 的裁决）：这里原来只能说「关键节点自动存档」＋「最近一次存档」，
+			// 因为全仓 `writeSnapshot(` 只有四个写点（阶段交办 / 每关首次与修订提案 / 回退前），
+			// **没有「每章」写点**；reason 也不是拍板点（阶段交办类写的是「交办「写完整本」之前」）。
+			// 票 05 / P36（2026-09-27 用户拍板「逐章交工各存一次」）：逐章交工成功路径补上了第五个写点
+			// （`chapters.js` 的 `writeSnapshot(project, '交工「第 N 章《标题》」之后')`），于是「最近一次存档」
+			// 在写完整本那段时间里**不再停在整段之前**，而是停在上一章交完的地方——这句承诺因此第一次说得准，
+			// 也照票面记档把「随时能回到最近一次存档」原样留着（密度已修好，不再欠账）。
+			// 🚫 不在这句里加「最近一次存档：xx 时间」：用户 2026-09-27 明确**没选**显示存档时间与数量。
+			"📌 每交完一章、每次交办或拍板前都会自动存档；随时能回到最近一次存档——写完整本那段时间里，它就停在上一章交完的地方。想改更早的决定，展开上面的步清单点那一步，用「定点修改」。",
 		),
 	);
 }
 
 // ── 全书步清单（2026-09-21 用户裁决：左栏过程地图不再需要）────────────────────
 // 左栏整栏删掉后，那份步清单搬到焦点区顶部：一条「全书 N 步 · 还剩 M 步」的全览条，
-// 点「展开清单」展出按阶段分组的清单。**清单本身与阶段页取同一份四态行**（见下面的
-// `stepIcon` / `stepRowText`），只是搬家，不是重做——用户看的是同一件事。
+// 点「展开清单」展出按阶段分组的清单。
 //
-// 2026-09-24 票 04（`.scratch/workbench-implementation/issues/04-overview-bar-consumes-steps.md`）：
-// 抬头与清单都改吃**步**（`view-rules.stepsOf` / `stepCount`）——一章＝写/审/复核三行、
-// 总数 3N+10。旧口径按**分段**数报，一本 17 段的书会说"全书 17 步"，与票 01「一步是什么」
-// 的裁决对不上；「还剩 M 步」也随之改口径（旧 `remainingSteps` 数分段，已删——同一件事不许
-// 留第二份实现）。
+// ⚠️ 候选 06（`.scratch/stage-step-model/`）：抬头与清单都改吃 **`stage-step-model` 的
+// `project({kind:"overview"})` projection**——分组、四态行（`row.rowText`）、计数、headline
+// 全部由模型一次推导；本 module **不再**自己按 `phase` 重新分组、不再各拼四态行、不再调
+// `stepsOf` / `stepCount`（那两份实现已随 06 迁进模型并从 `view-rules` 退役）。
+// `stepIcon` / `stepRowText` 这两份旧具名件也随之移进模型（行自带 `rowText`），本文件不再导出。
 //
-// ⚠️ 展开体是**同层的兄弟 div**（不是浮层、也不铺进焦点区滚动流）。旧注释写"浮在浮层里"
-// 与代码不符（spec §2 D 勘误 ①）：真判据只有一条——**收起时不渲染清单内容**。
-// 它仍然会把下面的内容往下顶（`maxHeight` 约 46vh），这是有意的。
-
-/**
- * 四态行（票 04：全览条清单与阶段页**共用这一份**，不许两屏各写一套）。
- *
- * 出处：`workbench-transitions/spec.md` §2 D「清单与阶段页取**同一份四态行**，不许各写一套」
- * ＋ `CONTEXT.md`「全览条」同一句。四态＝轮到你 / 我正在做 / 已完成 / 还没到：状态词一律经
- * `view-rules.stepWord` 取（工作台状态词只此一份），图标只在这里定义一次。
- *
- * ⚠️ 接线分工（两个 agent 并发改同一个文件，按裁决分家）：**票 04 出这一份**（`chapters-map.js`
- * 的具名导出 + 全览条 `StepList` 用它），**票 05 在 `phase-page.js` 里接线**（它的 `STEP_ICON`
- * 与「标题 + 状态词」两段渲染换成 import 这一个，见 commit `54254b4`）——同一份行，两个调用点。
- *
- * 形态是一串**文字**、不包一层元素：两屏的行都长在真 `<button>` 里，而冒烟测试找按钮的
- * helper 只认按钮的**第一个文本子节点**（spec Testing Decisions 明写），包成元素会让它找不到。
- */
-const STEP_ICON = Object.freeze({ done: "·", "waiting-user": "⚡", active: "▶", pending: "○" });
-
-/** 四态图标（没登记的态退回"还没到"的圈，不猜）。 */
-export function stepIcon(state) {
-	return STEP_ICON[state] ?? STEP_ICON.pending;
-}
-
-/**
- * 四态行的可见文字：`图标 步名（状态词）`。
- * 输入是一"行"——`stepsOf` 的一步与阶段页 `phaseSummary.segs` 的一行都带
- * `title`/`status`/`statusWord`，两屏因此共用同一份行，不必各自再拼一遍状态词。
- */
-export function stepRowText(row) {
-	if (row === null || row === undefined || typeof row !== "object")
-		throw new Error("stepRowText 要一行（一步／阶段页的一行），不给空值");
-	const word =
-		typeof row.statusWord === "string" && row.statusWord !== ""
-			? row.statusWord
-			: stepWord(row.status);
-	return `${stepIcon(row.status)} ${row.title ?? ""}（${word}）`;
-}
+// ⚠️ 展开体是**同层的兄弟 div**（不是浮层、也不铺进焦点区滚动流）。真判据只有一条——**收起时
+// 不渲染清单内容**。它仍然会把下面的内容往下顶（`maxHeight` 约 46vh），这是有意的。
 
 function stepStyle(isViewed, state) {
 	return {
@@ -650,50 +817,66 @@ function GroupHead(props) {
 		},
 		Number.isInteger(props.phase)
 			? `第 ${props.phase} 阶段 · ${PHASE_UI[props.phase] ?? ""}`
-			: // 阶段号认不出的分段（旧 payload 连 kind 都没有）：`stepsOf` 把它们挂在末尾、
+			: // 阶段号认不出的分段（旧 payload 连 kind 都没有）：模型把它们挂在末尾、
 				// `phase` 为 null——**不静默丢**，给一个说得出口的组名（票 04）。
 				"阶段待定",
 	);
 }
 
-/** 按阶段分组的步清单（全览条展开体用）：一行一步，四态行与阶段页同源（`stepRowText`）。 */
+/**
+ * 按阶段分组的步清单（全览条展开体用）：一行一步，四态行与阶段页同源。
+ *
+ * ⚠️ 候选 06：`groups` 直接来自 `project({kind:"overview"})`——**本 module 不再按 `phase` 重新
+ * 分组**（模型才是分组的唯一拥有者）。行自带 `rowText`（四态行唯一出处）、`detailLines`、
+ * `target`（导航目标）。
+ */
 export function StepList(props) {
-	const { steps, browsingKey, onPickStep, onPickPhase } = props;
-	const rows = Array.isArray(steps) ? steps : [];
-	// 按 `step.phase` 分组；`stepsOf` 的输出已按阶段 1→6 排好，认不出的（null）挂在末尾。
-	const groups = [];
-	for (const step of rows) {
-		const phase = step?.phase ?? null;
-		const last = groups[groups.length - 1];
-		if (last !== undefined && last.phase === phase) last.rows.push(step);
-		else groups.push({ phase, rows: [step] });
-	}
+	const { groups, browsingKey, onPickStep, onPickPhase } = props;
+	const list = Array.isArray(groups) ? groups : [];
 	return createElement(
 		"div",
 		null,
-		...groups.map((group) =>
+		...list.map((group) =>
 			createElement(
 				"div",
 				{ key: `g-${group.phase ?? "other"}`, style: { marginBottom: "6px" } },
 				createElement(GroupHead, { phase: group.phase }),
-				...group.rows.map((step) =>
+				...group.rows.map((row) =>
 					createElement(
 						"button",
 						{
-							key: step.key,
+							key: row.key,
 							// 全览条只在"现在"那一屏渲染，点任何一行立刻换屏，所以这一圈高亮其实看不到；
 							// 仍按「正在看的那一步」算（`browsing` 就是步 key，票 04）。
-							style: stepStyle(browsingKey !== null && browsingKey === step.key, step.status),
-							// 有段的行交**步 key**（阶段页自己认得出焦点落在哪一步；`viewPhaseOfBrowsing`
-							// 也从步反查阶段）；没有段的行（材料准备＝第一步、旧 payload 补出来的章步）走
-							// `onPickPhase`——落到那一阶段的清单页，**不是**浏览态（票 04 明写）。
+							style: stepStyle(browsingKey !== null && browsingKey === row.key, row.status),
+							// 行自带 `target`（候选 06）：`step` 目标交**步 key**（阶段页自己认得出焦点
+							// 落在哪一步；工作台焦点也从步反查阶段）；`phase` 目标（材料准备＝第一步、旧
+							// payload 补出来的章步）走 `onPickPhase`——落到那一阶段的清单页，**不是**
+							// 浏览态（票 04 明写）。UI 不再看 `segmentKey` / `MATERIAL_STEP_KEY`。
 							onClick: () =>
-								step.segmentKey === null
-									? onPickPhase?.(step.phase)
-									: onPickStep?.(step.key),
-							title: stepWord(step.status),
+								row.target?.kind === "step"
+									? onPickStep?.(row.target.ref)
+									: onPickPhase?.(row.target?.phase ?? row.phase),
+							title: row.statusWord,
 						},
-						stepRowText(step),
+						row.rowText,
+						...(row.detailLines ?? []).map((line, index) =>
+							createElement(
+								"span",
+								{
+									key: `detail-${index}`,
+									style: {
+										display: "block",
+										marginTop: "2px",
+										fontSize: "11px",
+										lineHeight: "1.35",
+										fontWeight: "normal",
+										opacity: 0.72,
+									},
+								},
+								line,
+							),
+						),
 					),
 				),
 			),
@@ -701,19 +884,20 @@ export function StepList(props) {
 	);
 }
 
-/** 焦点区顶部的全览条：全书几步、还剩几步、现在在第几阶段 + 展开清单（兄弟 div，收起即不渲染）。 */
+/**
+ * 焦点区顶部的全览条：全书几步、还剩几步、现在在第几阶段 + 展开清单（兄弟 div，收起即不渲染）。
+ *
+ * ⚠️ 候选 06：本组件现在只吃 **`projector`**（由 WorkbenchView 用 useMemo 建一次传入）——
+ * 抬头、currentPhaseText、分组清单全部来自 `project({kind:"overview"})`。props 从「传
+ * segments/meta 自己推导」迁为「传 projector」；导出名与用户可见行为不变。
+ */
 export function ProgressOverview(props) {
 	const [open, setOpen] = useState(false);
-	const { segments, meta, browsingKey, currentPhase } = props;
-	// 票 04：抬头按**步**数（spec §2 D 的 canonical 口径）——只由 `view-rules` 出数，界面不许自己数。
-	//   章已排定 →「全书 3N+10 步 · 还剩 M 步」（M=0 时保留旧说法「已全部完成」，那是同一件事的收尾态）；
-	//   章未排定 →「已知 N 步 · 章节排定后补齐」（只数结构上已经存在的步，不按默认章数猜）。
-	// 另保留「现在在第 N 阶段 · 阶段名」那半句：spec 用户故事 2 要"一眼看出走到第几阶段、还剩几步"。
-	const steps = stepsOf({ segments, meta });
-	const count = stepCount({ segments, meta });
-	const headline = count.chaptersPlanned
-		? `全书 ${count.total} 步 · ${count.remaining === 0 ? "已全部完成" : `还剩 ${count.remaining} 步`}`
-		: `已知 ${count.known} 步 · 章节排定后补齐`;
+	const { projector, browsingKey, onPickStep, onPickPhase } = props;
+	// 票 04 + 候选 06：抬头按**步**数、分组、每行四态——全部由模型一次推导，界面不许自己数/自己分。
+	//   headline：`全书 3N+10 步 · 还剩 M 步`（M=0 →「已全部完成」）/ `已知 N 步 · 章节排定后补齐`。
+	//   currentPhaseText：`现在在第 N 阶段 · 阶段名`（spec 用户故事 2）。
+	const overview = projector.project({ kind: "overview" });
 	return createElement(
 		"div",
 		{ style: { marginBottom: "10px" } },
@@ -730,11 +914,11 @@ export function ProgressOverview(props) {
 			createElement(
 				"div",
 				{ style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
-				createElement("strong", { style: { fontSize: "13px" } }, `🗺 ${headline}`),
+				createElement("strong", { style: { fontSize: "13px" } }, `🗺 ${overview.headline}`),
 				createElement(
 					"span",
 					{ style: { fontSize: "12px", opacity: 0.65 } },
-					`现在在第 ${currentPhase ?? 1} 阶段 · ${PHASE_UI[currentPhase ?? 1] ?? ""}`,
+					overview.currentPhaseText,
 				),
 				createElement(
 					"button",
@@ -765,13 +949,79 @@ export function ProgressOverview(props) {
 						},
 					},
 					createElement(StepList, {
-						steps,
+						groups: overview.groups,
 						browsingKey,
-						onPickStep: props.onPickStep,
-						onPickPhase: props.onPickPhase,
+						onPickStep,
+						onPickPhase,
 					}),
 				)
 			: null,
+	);
+}
+
+// ── 右栏挤压时的一句提示（票 26 · P27 ＋ P37，2026-09-27 用户拍板：只做那一句提示）─────
+//
+// 病：宿主右栏一开，主区从 990px 塌到 414px（1280 视口：77% → 32%），**没有任何地方告诉用户
+// 「收起右栏能让这里宽一倍」**——那颗按钮就在顶栏（走查实测 x=2520,y=11，标签随状态在
+// 「打开右侧边栏」↔「收起右侧边栏」之间切换）。2K 视口下同一颗按钮让主区 1110 → 2270，
+// 行也顺带变短（同一颗按钮也是「正文太宽」的解药——票 26 记档：两层一起说，但**不许新造第二句**）。
+//
+// ⚠️ **布局一个字不动**：走查 `:656` 那个 `min-width` 方案已被作者自己在 `:662-664` 撤回，
+// 本票只加文案：不引入 min-width、不引覆盖式浮层、不碰任何宿主布局属性。
+//
+// ⚠️ **热区身份**（CONTEXT「热区」八个合法动作值）：这是**纯提示**——一个 `<p>`，不可点、
+// 不发动作、不换屏、不开文件，所以**它根本不是一个热区**，也就没有「一个热区两个身份」的问题。
+// 🚫 不许把它做成整块热区去替用户点那颗宿主按钮，也**不许新造一个收起动作**（收起那颗按钮是
+// 宿主的，本票只指路）。
+
+/** 主区窄于此（px）就提一句。真机数：1280 右栏开着 w≈414 / 收起 w≈990；2K 开 w≈1110 / 收 w≈2270。 */
+export const NARROW_MAIN_WIDTH = 700;
+
+/** 主区右边缘离视口右边这么远（px）＝右边被别的东西占着（＝右栏开着）。 */
+export const SIDEBAR_OPEN_RIGHT_GAP = 64;
+
+/** 那一句提示（纯提示，不点）。含「收起右栏」这个可行动的说法，也点名那颗按钮在顶栏。 */
+export const NARROW_MAIN_HINT_TEXT =
+	"👉 正文区太窄了。点顶栏那颗「收起右侧边栏」（收起右栏），这里能宽一倍，正文行也不会太长。";
+
+/**
+ * 判据（纯函数，可测）：主区是不是被右栏挤窄了。
+ *
+ * 两个量都来自**主区自己**的盒子（工作台根容器），不读宿主 DOM、不查宿主状态：
+ *   · `mainWidth` —— 主区宽度；量不到（页签没激活、盒子还没长出来）一律**不显示**，不猜。
+ *   · `mainRightGap` —— 主区右边缘到视口右边的距离：右栏开着时右边被占一大块（真机 586 / 1170px），
+ *     收起时主区一路顶到视口右边（真机只剩 ~10px）。用它把「右栏开着」这一条落实了，
+ *     免得窗口本来就窄、右栏没开时也冒出一句指错方向的提示。
+ *
+ * @param {number|null|undefined} mainWidth    主区宽度（px）
+ * @param {number|null|undefined} mainRightGap 主区右边缘到视口右边的距离（px）
+ * @returns {boolean} 该不该显示这一句
+ */
+export function narrowMainHintShown(mainWidth, mainRightGap) {
+	if (!Number.isFinite(mainWidth) || mainWidth <= 0) return false;
+	if (!Number.isFinite(mainRightGap) || mainRightGap < SIDEBAR_OPEN_RIGHT_GAP) return false;
+	return mainWidth < NARROW_MAIN_WIDTH;
+}
+
+/** 提示本体：不满足条件就**什么都不渲染**（收起右栏后它自己消失，且不留占位的一行）。 */
+export function NarrowMainHint(props) {
+	const { mainWidth, mainRightGap } = props ?? {};
+	if (!narrowMainHintShown(mainWidth, mainRightGap)) return null;
+	return createElement(
+		"p",
+		{
+			style: {
+				margin: "0 0 8px",
+				padding: "6px 10px",
+				fontSize: "12px",
+				lineHeight: "1.5",
+				borderRadius: "8px",
+				border: "1px solid var(--dsw-border, #d0d7de)",
+				background: "var(--dsw-bg, #fff)",
+				opacity: 0.85,
+			},
+		},
+		NARROW_MAIN_HINT_TEXT,
 	);
 }
 
@@ -792,7 +1042,7 @@ export function ProgressOverview(props) {
  * 见 `SocratopiaAd`。原先把它塞进这一行是个错误——那既看不见、又丢掉了广告的视觉。
  */
 export function FocusFooter(props) {
-	const { status, onDelete, deleting, busy, bookDir, onCancelDelete } = props;
+	const { status, onDelete, deleting, busy, bookDir, onCancelDelete, onOpenProcessLog } = props;
 	return createElement(
 		"div",
 		{
@@ -820,6 +1070,21 @@ export function FocusFooter(props) {
 				)
 			: null,
 		createElement("span", { style: { flex: 1 } }),
+		// 票 workbench-transitions/24（ADR-0015 决策 2）：《过程记录.md》判成「有正文的产物」，
+		// 入口摆在这条**常驻小条**上——它是全局产物、不属任何一步，所以不进任何一步的文件清单。
+		// 走父级给的同一个打开回调（→ DSH 右栏预览、只读），小条因此从「状态 + 危险操作」
+		// 变成「状态 + 只读入口 + 危险操作」，这代价 ADR-0015 有意接受。
+		typeof onOpenProcessLog === "function"
+			? createElement(
+					"button",
+					{
+						style: { ...S.smallLink, fontSize: "11px", opacity: 0.55 },
+						onClick: onOpenProcessLog,
+						title: "在右栏查看「过程记录」（这一本书从建档到现在的流水账，只读）",
+					},
+					"过程记录",
+				)
+			: null,
 		typeof onDelete === "function"
 			? createElement(
 					"button",

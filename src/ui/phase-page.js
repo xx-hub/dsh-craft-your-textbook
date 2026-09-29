@@ -8,9 +8,10 @@
  *   写完整本    主从两栏：一章三步（写 / 审 / 复核），左栏选一步、右栏看那一步
  *   其余四步    堆叠回看卡：步少，每一步都值得一整张卡（状态/拍板结论/文件/定点修改）
  *
- * ⚠️ **行单位是「步」，不是分段**（票 01 的裁决；见 `view-rules.phaseSteps`）：本页与全览条
- * 取**同一份步模型**（`stepsOf`），四态词的**文字与图标**也共用同一份具名件
- * （`chapters-map.stepRowText`，票 04 抽出）——不许在页内再拼一套。
+ * ⚠️ **行单位是「步」，不是分段**（票 01 的裁决；候选 06 起见 `stage-step-model`）：本页与全览条
+ * 取**同一份步模型**——都吃 `stage-step-model` 的 `project({kind})` projection，行自带
+ * `rowText`（四态行的文字与图标，模型是唯一出处）、`detailLines`、`target`、`modify`——
+ * 不许在页内再拼一套。
  * 阶段的**专属东西**也各就各位：读材料挑重点摆人读的重点清单、最佳范例章摆稿次与旧稿、
  * 最后检查摆机器逐项检查与 AI 检查报告。
  *
@@ -23,7 +24,7 @@
  * 「✍️ 定点修改」就地展开确认框：不换屏、不另造一份流程，页脚直接长出「影响预告 + 写一句 + 提交」。
  * 撤销（「↩️ 撤销刚才的定点修改（10 分钟内）」）也归这一页：原来它长在旧的分段单卡里，合并时
  * 随旧卡掉出了渲染路径，2026-09-21 接回这里——**就地改、就地撤**（见 `UndoButton`）。
- * 2026-09-23 票 11 补上两件：① 确认框的影响预告说真话（下游名单由 `phaseSteps` 译成人读名字）；
+ * 2026-09-23 票 11 补上两件：① 确认框的影响预告说真话（下游名单由模型译成人读名字）；
  * ② **提交后仍停在这一页**，被改的那一段就地标成「我正在做」（乐观标记，见 `PhasePage` 顶部）。
  * ⚠️ 「回到现在」**不在这一页**（2026-09-22 票 12：它长在阶段片「当前阶段」那一格上）——
  * 阶段页里任何换屏动作都不许有。
@@ -31,22 +32,17 @@
 import { createElement as h, useEffect, useState } from "react";
 import { S } from "./styles.js";
 import {
-	phaseSummary,
-	phaseSteps,
 	checkHuman,
 	stepWord,
-	MATERIAL_STEP_KEY,
 	PHASE_UI,
+	materialConversionActivityText,
 } from "./view-rules.js";
 // 「打开这份文件」按钮：票 09 起住中性模块（章节卡也要用它，直接从本文件 import 会成环，
 // 理由见那一件顶部的注释）——本文件原样**再导出**它，票 02 的导出表面不变。
 import { OpenArtifactButton } from "./open-artifact-button.js";
 // 知识地图（机器产物）的人读折叠：与阶段页里就地展开它的 `KnowledgeMapBlock` 共用一份，
 // 别让同一样东西两处两种读法。
-// 四态行（票 04 抽出、票 05 接线）：`stepRowText` 是全览条清单与阶段页**共用**的那一份
-// （spec §2 D 明写「清单与阶段页取同一份四态行，不许各写一套」）——阶段页原先自己抄了一份
-// `STEP_ICON`，本票收掉：行的图标、步名与状态词只从这一处出。
-import { foldKnowledgeMap, stepRowText } from "./chapters-map.js";
+import { foldKnowledgeMap } from "./chapters-map.js";
 
 // 每个阶段用哪套布局（用户裁决的那张表；改它等于改设计，别顺手改）。
 const PHASE_LAYOUT = Object.freeze({
@@ -97,6 +93,31 @@ const P = {
 	},
 };
 
+/** 一步的产物事实明细：与全览条共用行上的 `detailLines`，只作第二视觉行，不碰四态行。 */
+function StepDetailLines(props) {
+	const lines = Array.isArray(props.step?.detailLines) ? props.step.detailLines : [];
+	if (lines.length === 0) return null;
+	return h(
+		"div",
+		{ style: { marginTop: "4px" } },
+		...lines.map((line, index) =>
+			h(
+				"span",
+				{
+					key: `detail-${index}`,
+					style: {
+						display: "block",
+						fontSize: "11px",
+						lineHeight: "1.35",
+						opacity: 0.72,
+					},
+				},
+				line,
+			),
+		),
+	);
+}
+
 /**
  * 票 09：`OpenArtifactButton` 已搬去中性模块 `./open-artifact-button.js`（章节卡也要用它，
  * 而本文件已经 import 了 `chapters-map.js`——反向 import 会成环）。这里**原样再导出**，
@@ -145,7 +166,10 @@ function ArtifactList(props) {
 function DeepModifyLink(props) {
 	const { row, onDeepModify, busy, openKey, onOpenKey } = props;
 	const [note, setNote] = useState("");
-	if (row.canDeepModify !== true) return null;
+	// 候选 06：写意图只看行上的 `modify`（模型已把「有真实段 + 段允许定点修改」判完）；
+	// 材料准备 / 合成章步 / 异常 identity 的 `modify:null` ——本页不再自己判 `canDeepModify`，
+	// 也不拿 `row.segmentKey ?? row.key` 猜提交目标。
+	if (row.modify === null || row.modify === undefined) return null;
 	const open = openKey === row.key;
 	const close = () => {
 		onOpenKey(null);
@@ -163,7 +187,7 @@ function DeepModifyLink(props) {
 			"✍️ 定点修改这一步",
 		);
 	}
-	// 票 11：`row.downstream` 由 `view-rules.phaseSteps` 从段上的 `seg.downstream`（服务端
+	// 票 11：`row.downstream` 由**模型**从段上的 `seg.downstream`（服务端
 	// `deepAffected` 的**段 key** 数组）译好——出口已是人读名字（`segmentHuman`），页里不许
 	// 再碰 key，也不许在 tooltip 里补一份机器词（CONTEXT.md「界面用词表」）。
 	const downstream = row.downstream ?? [];
@@ -214,9 +238,10 @@ function DeepModifyLink(props) {
 					style: S.bigBtn(false),
 					disabled: busy === true || note.trim() === "",
 					onClick: () => {
-						// ⚠️ 定点修改的粒度是**段**（票 01 Q9）：步比段细，交出去的一律是段 key
-						// （`chapter-1:write` 这种步 key 后端不认；点在章内任何一步上＝整章重做）。
-						onDeepModify?.(row.segmentKey ?? row.key, note.trim());
+						// ⚠️ 定点修改的粒度是**段**（票 01 Q9 / ADR-0014）：步比段细，交出去的一律是
+						// 段 key（`chapter-1:write` 这种步 key 后端不认；点在章内任何一步上＝整章重做）。
+						// 候选 06：目标直接取模型判好的 `row.modify.segmentKey`——页面不再兜底猜。
+						onDeepModify?.(row.modify.segmentKey, note.trim());
 						onOpenKey(null);
 						setNote("");
 					},
@@ -261,9 +286,11 @@ function StackBody(props) {
 						},
 					},
 					// 四态行（票 04 抽出、票 05 接线）：图标 + 步名 + 状态词走全览条清单同一份
-					// `stepRowText`，本页不再自己拼一份。
-					h("strong", { style: { fontSize: "14px" } }, stepRowText(row)),
-				),				row.decision !== null
+					// 行上的 `row.rowText`，本页不再自己拼一份。
+					h("strong", { style: { fontSize: "14px" } }, row.rowText),
+				),
+				h(StepDetailLines, { step: row }),
+				row.decision !== null
 					? h("p", { style: { margin: "6px 0 0", fontSize: "12px" } }, `拍板：${row.decision}`)
 					: null,
 				h(ArtifactList, {
@@ -284,6 +311,58 @@ function StackBody(props) {
 }
 
 // ── 布局二：主从两栏（每章三步：左栏一步步选、右栏看那一步）─────────────────
+
+/**
+ * 选中一章时，右栏给它的机器检查结论摘要。
+ *
+ * `issues[].text` 已经是检查契约要求的大白话（问题、原因、建议怎么改），这里原样摆出；
+ * 不再套一层有限词表，免得把具体卡点翻成泛化标签。原始 audit JSON 仍不进入右栏。
+ */
+function ChapterAuditSummary(props) {
+	const summary = props.summary ?? null;
+	const heading = h(
+		"p",
+		{ style: { ...P.sectionLabel, margin: "10px 0 4px" } },
+		"机器检查结论",
+	);
+	if (summary === null)
+		return h("div", null, heading, h("p", { style: P.empty }, "还没有检查结论。"));
+
+	const passed = summary.passed === true;
+	const issues = Array.isArray(summary.issues) ? summary.issues : [];
+	const issueCount = Number.isSafeInteger(summary.issueCount) ? summary.issueCount : issues.length;
+	return h(
+		"div",
+		null,
+		heading,
+		h(
+			"p",
+			{
+				style: {
+					margin: "0 0 4px",
+					fontSize: "13px",
+					fontWeight: 600,
+					color: passed ? "var(--dsh-success, #1a7f37)" : "var(--dsh-danger, #cf222e)",
+				},
+			},
+			passed ? "✅ 这一章通过了" : "❌ 这一章还没通过",
+		),
+		issueCount === 0
+			? h("p", { style: P.empty }, passed ? "没有卡点。" : "检查记录没有列出具体问题。")
+			: h(
+					"div",
+					{ style: { marginTop: "4px" } },
+					h("p", { style: { ...P.sectionLabel, margin: "0 0 3px" } }, passed ? `另有 ${issueCount} 处提醒：` : `卡在 ${issueCount} 处：`),
+					...issues.map((issue, index) =>
+						h(
+							"p",
+							{ key: `${index}:${issue.text}`, style: { margin: "0 0 3px", fontSize: "12px" } },
+							`${index + 1}. ${issue.text}`,
+						),
+					),
+				),
+	);
+}
 
 function SplitBody(props) {
 	const { steps, onOpen, onDeepModify, busy } = props;
@@ -334,8 +413,8 @@ function SplitBody(props) {
 						},
 						onClick: () => setPicked(index),
 					},
-					// 四态行（票 04 抽出、票 05 接线）：左栏一行一步，与全览条清单同一份 `stepRowText`。
-					stepRowText(item),
+					// 四态行（候选 06 收进模型）：左栏一行一步，与全览条清单同一份 `row.rowText`。
+					item.rowText,
 				),
 			),
 		),
@@ -353,10 +432,14 @@ function SplitBody(props) {
 					},
 				},
 				// 右栏那一行（四态行，与全览条同一份）：状态词在行文里，不再另起一格。
-				h("strong", { style: { fontSize: "14px" } }, stepRowText(row)),
+				h("strong", { style: { fontSize: "14px" } }, row.rowText),
 			),
+			h(StepDetailLines, { step: row }),
 			row.decision !== null
 				? h("p", { style: { margin: "6px 0 0", fontSize: "12px" } }, `拍板：${row.decision}`)
+				: null,
+			row.chapter !== null
+				? h(ChapterAuditSummary, { summary: row.auditSummary })
 				: null,
 			h(ArtifactList, {
 				artifacts: row.artifacts.map((item) => ({ ...item, stepKey: row.key })),
@@ -379,14 +462,15 @@ function SplitBody(props) {
 /**
  * 阶段 1 的那一步。
  *
- * 票 01 Q2/Q3 的裁决：**材料准备本身就是第一步**（判据＝书已进阶段 2，见 `materialStepStatus`），
- * 不是"零步阶段"。所以这里摆的是**那一步**（名字 + 四态词，与全览条同一份 `stepsOf`/`stepWord`），
+ * 票 01 Q2/Q3 的裁决：**材料准备本身就是第一步**（判据＝书已进阶段 2，见模型的 `materialStepStatus`），
+ * 不是"零步阶段"。所以这里摆的是**那一步**（名字 + 四态词，与全览条同一份 `rowText`），
  * 材料清单是它的产物行。旧那句写死的「这一步没有小步：把材料传上来…」与这条裁决直接矛盾，
  * 2026-09-23（票 05）已删——别再写回来。
  */
 function MaterialsBody(props) {
 	const sources = props.sources ?? [];
 	const step = props.step;
+	const conversionText = materialConversionActivityText(props.meta, props.events);
 	return h(
 		"div",
 		{ style: S.card },
@@ -400,20 +484,23 @@ function MaterialsBody(props) {
 					gap: "10px",
 				},
 			},
-			// 四态行（票 04 抽出、票 05 接线）：材料准备那一步的名字与四态词走全览条清单同一份
-			// `stepRowText`。
+			// 四态行（候选 06）：材料准备那一步的名字与四态词吃行上算好的 `rowText`。
 			// ⚠️ 兜底那一支**不许手写**「材料准备」（2026-09-23 代码审查）：界面上的字只此一份
-			// （CONTEXT.md「界面用词表」），组件里手写阶段短标签正是它点名要避免的。而且这一支
-			// 事实上到不了——`stepsOf` 无条件 push 材料准备那一步（`view-rules.js:755`），
-			// 它的 `title` 就是 `PHASE_UI[1]`。留兜底只为不崩，词一律从表里取。
+			// （CONTEXT.md「界面用词表」）。而且这一支事实上到不了——模型无条件 push 材料准备
+			// 那一步，它的 `title` 就是 `PHASE_UI[1]`。留兜底只为不崩，词一律从表里取。
 			h(
 				"strong",
 				{ style: { fontSize: "14px" } },
-				step === null || step === undefined
-					? (PHASE_UI[1] ?? "")
-					: stepRowText(step),
+				step === null || step === undefined ? (PHASE_UI[1] ?? "") : step.rowText,
 			),
 		),
+		conversionText !== null
+			? h(
+					"p",
+					{ style: { margin: "6px 0 0", fontSize: "12px" } },
+					`🤖 ${conversionText}`,
+				)
+			: null,
 		sources.length === 0
 			? h("p", { style: { margin: "6px 0 0", fontSize: "13px" } }, "还没有上传材料。")
 			: h(
@@ -447,11 +534,7 @@ function MaterialsBody(props) {
 										// 不再自造「查看转换内容」这种说法；这一份叫什么由按钮 tooltip 给出
 										// （`artifactName` →「x 的转换稿」）。
 									})
-								: h(
-										"span",
-										{ style: { fontSize: "12px", opacity: 0.6 } },
-										"转换中",
-									),
+								: null,
 						),
 					),
 				),
@@ -495,6 +578,14 @@ export function KnowledgeMapBlock(props) {
 export function GoldBlock(props) {
 	const drafts = props.goldDrafts ?? [];
 	const sealed = props.goldSealed ?? null;
+	// 票 gold-revision-flow/02：那句断言原先**不看状态**——修订在飞（`meta.status === 'running'`、
+	// 待办正是最佳范例章）时也照写「现在是第 N 稿，等你过目」，于是「稿次先于写完/审完成立」。
+	// 用词只取「工作台状态词」那三个，不新造说法：修订在飞＝「我正在做」，等你过目＝「轮到你」。
+	// ⚠️ 待办阶段**只认 gold**：原式把 `pendingStage === null/undefined` 也算进来，于是任何
+	// 「运行中但待办不在最佳范例章」的状态（例如下一步已交办、等 AI 自己走）都会误报成
+	 // 「我正在改第 N 稿」——这一格说的是这一章的稿子，得由这一章的待办说话。
+	// （`/code-review` 的 Spec 轴审出来的）
+	const revising = sealed === null && props.status === "running" && props.pendingStage === "gold";
 	return h(
 		"div",
 		{ style: S.card },
@@ -507,7 +598,9 @@ export function GoldBlock(props) {
 				{ style: { fontSize: "12px", opacity: 0.75 } },
 				sealed !== null
 					? `✅ 已定稿（第 ${sealed.version ?? "?"} 稿）`
-					: `现在是第 ${props.goldDraftVersion ?? 1} 稿，等你过目`,
+					: revising
+						? `我正在做 · 改第 ${props.goldDraftVersion ?? 1} 稿，改完就请你过目`
+						: `现在是第 ${props.goldDraftVersion ?? 1} 稿，等你过目`,
 			),
 		),
 		drafts.length === 0
@@ -594,18 +687,19 @@ function UndoButton(props) {
 }
 
 export function PhasePage(props) {
-	const { phase, meta, segments, workFiles, onOpen } = props;
+	const { phase, meta, onOpen } = props;
 	// 票 11：提交「✍️ 就这么改，重做下游」后**不换屏**（热区表判"提交后替用户换屏"不合法），
 	// 被改的那一段就地标成「我正在做」——工作台状态词只许三个，重做中的说法就是它，不另造词。
 	// 乐观标记（本地先标、真值一到就让位）的理由：提交到下一份 `/textbook/process` 到货之间
-	// 有一段真实延迟（POST + 连锁 `loadAll`），那段窗口里行文不许还停在「已完成」；而
-	// `/textbook/process` 每 2 秒刷一次、每次都给一份**新的** `segments`（`refreshProcess`），
-	// 所以「任何一份新 payload 到货就清掉标记」＝本地标记绝不活得比服务端真值久
-	// （服务端没接受、或重做已完成时，下一份 payload 立刻把这一行还原成真实状态）。
+	// 有一段真实延迟（POST + 连锁 `loadAll`），那段窗口里行文不许还停在「已完成」。
+	// ⚠️ 候选 06：清除信号**必须是 process 身份**（`processToken`＝当前 `segments` 数组），
+	// 不是 projector 身份——`meta` 与 `process` 是两个独立到达的请求，用 projector 身份会在
+	// `/textbook/process` 新 payload 还没到时就提前清掉标记（`meta` 先到就会重建 projector）。
 	const [redoKey, setRedoKey] = useState(null);
+	const processToken = props.processToken ?? null;
 	useEffect(() => {
 		setRedoKey(null);
-	}, [segments]);
+	}, [processToken]);
 	// 就地定点修改所需的两件（`onLocate` 已退役：新建的那份卡就在原地改，不再换屏）。
 	const modProps = {
 		// 提交那一下先把这一段标成「我正在做」（乐观），再交给接线层发 `deep-modify`。
@@ -615,36 +709,23 @@ export function PhasePage(props) {
 		},
 		busy: props.busy,
 	};
-	// 阶段名与开场白仍借 `phaseSummary`（它的段级契约不动）；这一页的**行单位是「步」**——
-	// 与全览条共取 `stepsOf`（票 01），四态词与步名因此只有一处来源。
-	const page = phaseSummary(segments, phase, workFiles);
-	const steps = phaseSteps({ segments, meta }, phase, workFiles).map((row) =>
-		// 乐观标记只覆写四态词/状态：行是**段**级的活（章内三步共属一段，整章一起重做，
-		// 所以章段的三行会一起说「我正在做」——那正是事实）。
-		redoKey !== null && row.segmentKey === redoKey
-			? { ...row, status: "active", statusWord: stepWord("active") }
-			: row,
-	);
-	const currentPhase = meta?.phase ?? 1;
+	// 候选 06：阶段名 / 开场白 / 完整行 / 焦点 / 计数**全部**来自模型的 phase projection
+	//（`project({kind:"phase", phase, focus, optimisticSegmentKey})`）——本页不再自己跑
+	// `phaseSummary` / `phaseSteps`、不再自己找焦点、不再自己数 done / 去重文件。乐观 redo
+	// 作为显式 `optimisticSegmentKey` 交给 projection 在末端叠加（同时重算 status/rowText），
+	// 页面不持有第二份组合规则。
+	const page = props.projector.project({
+		kind: "phase",
+		phase,
+		focus: props.focusedStep ?? null,
+		optimisticSegmentKey: redoKey,
+	});
+	const steps = page.rows;
 	const layout = PHASE_LAYOUT[phase] ?? "stack";
-
-	// 从步清单点进来的那一步（`focusedSegment` 这名字是接线层的历史包袱：今天全览条的清单仍按
-	// **分段**出行，所以它先是段 key；票 04 之后一行一步，它会变成**步 key**）——两种都认。
-	// 落点取**第一个命中的步**：一章段现在展开成「写 / 审 / 复核」三步，而页面同一时刻只能说清
-	// "你点的是这一个"（三行都描＝谎称点了三步），右栏也一次只装得下一步；描「写」＝那一段的起点，
-	// 与"点了一章"的语义对得上（章内五态没上报时，`stepsOf` 也只认第一步在动）。
-	const focusedStepKey = (() => {
-		const focused = props.focusedSegment;
-		if (focused === null || focused === undefined) return null;
-		const hit = steps.find((row) => row.key === focused || row.segmentKey === focused);
-		return hit?.key ?? null;
-	})();
-
-	const doneSteps = steps.filter((row) => row.status === "done").length;
-	// 「份文件」按**路径去重**数：章内三步共属同一段，不去重会把一章的正文数成三份。
-	const fileCount = new Set(
-		steps.flatMap((row) => row.artifacts.map((item) => item.path)),
-	).size;
+	const currentPhase = meta?.phase ?? 1;
+	const focusedStepKey = page.focusedStepKey;
+	const doneSteps = page.doneCount;
+	const fileCount = page.uniqueFileCount;
 
 	const head = h(
 		"div",
@@ -656,9 +737,9 @@ export function PhasePage(props) {
 			// 票 10（判定一 #11）：这一处原来手写「轮到你 / 已完成 / 还没到这一步」——
 			// 与 view-rules.stepWord 是同一组状态词的第二份实现（「界面上的字只此一份」）。
 			// ⚠️ 阶段 1 不再在这里报状态：那一步的四态词由它自己那张卡承担（见 MaterialsBody），
-			// 同屏说两遍同一件事没必要。其余阶段按**步**计数（票 05 起行单位是步，不再数分段）。
+			// 同屏说两遍同一件事没必要。其余阶段按**步**计数（`doneCount` / `rows.length` 来自模型）。
 			// 「N/M 小步已完成」里的「小步」是退役词（票 01 / spec 不变量 7 / §6 越界清单），
-			// 本票改成「N/M 步已完成」；「份文件」按**路径去重**（`fileCount`），不把一章正文数三遍。
+			// 这里用「N/M 步已完成」；「份文件」按**路径去重**（`uniqueFileCount`），不把一章正文数三遍。
 			phase === 1
 				? null
 				: h(
@@ -675,8 +756,12 @@ export function PhasePage(props) {
 	const body =
 		layout === "materials"
 			? h(MaterialsBody, {
-					step: steps.find((row) => row.key === MATERIAL_STEP_KEY) ?? null,
+					// 候选 06：材料准备那一步是 phase-1 里 `target.kind === "phase"` 的**唯一**行
+					// ——不再拿 `MATERIAL_STEP_KEY` 机器 key 找（key 泄漏已从 UI 移除）。
+					step: steps.find((row) => row.phase === 1 && row.target?.kind === "phase") ?? null,
 					sources: meta?.sources ?? [],
+					meta,
+					events: props.events,
 					onOpen,
 				})
 			: layout === "split"
@@ -693,6 +778,10 @@ export function PhasePage(props) {
 				goldSealed: meta?.goldSealed ?? null,
 				goldDrafts: props.goldDrafts,
 				goldDraftVersion: props.goldDraftVersion,
+				// 票 gold-revision-flow/02：把「这一稿处在哪一态」传进去（`meta.status` + 待办阶段），
+				// 调用点不替组件推导状态——组件自己按真实状态选词。
+				status: meta?.status ?? null,
+				pendingStage: meta?.pendingStage ?? null,
 				onOpen,
 			}),
 		);

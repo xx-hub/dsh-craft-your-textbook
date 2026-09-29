@@ -24,7 +24,9 @@ export function formatTime(time) {
 //     `legacy.partial`——会话快照里没有这个字段，于是这一路**恒为 false**（钩子接错了，
 //     宿主自己一处都没消费过 `partial`）。
 //   · `subagentRunningCount`——有几个小助手在跑，由 `indexSubagentDescendants` 从会话摘要聚合
-//     （宿主推送，不再由插件自己轮询计数）。
+//     （宿主推送，不再由插件自己轮询计数）。**注意它的口径**（票 walkthrough-fixes/01 · 走查 P44）：
+//     宿主的 `running` 是「记录还驻留」，**驻留但空闲的也算在跑**——见
+//     `indexRunningSubagentActivity` 的说明，那正是它需要配一路「多久没动静」的原因。
 //   · `lastWriteAt`——账本最后一次被写入的时刻（`meta.updatedAt`）：取时基准只此一份。
 //     精度到分钟的理由：这行跟着 2 秒轮询重画，显示秒会一跳两秒，看着像坏了。
 
@@ -53,44 +55,68 @@ export function humanDuration(ms) {
 }
 
 /**
- * 「多久没动静」的唯一判定：三个输入、一个门槛。
+ * 「多久没动静」的唯一判定：四路输入、一个门槛。
  *
- * 三路里**任一路**说"在推进"就不判停——这是这次误报的根因所在：「主 AI 派活 → 等小助手 →
+ * 前三路里**任一路**说"在推进"就不判停——这是这次误报的根因所在：「主 AI 派活 → 等小助手 →
  * 汇总交工」这段主 AI 与账本都不动，工作正在几十个小助手那里跑，只看账本必然误报，
  * 且误报的正是最忙的时候。
  *
- * 取不到数时一律**不消音**：小助手数缺失（宿主状态还没到 / 字段缺失）按 0 算——宁可报警，
- * 也不许变成永久消音器（旧实现拉取失败保留旧值，一旦它参与抑制就再也报不出来）。
+ * 第四路（票 walkthrough-fixes/01 · 走查 P44）反过来堵另一个洞：**"有小助手在跑"不等于
+ * "它在干活"**。宿主把 `running` 定义成「记录还驻留」，驻留但空闲的也算在跑，于是一个
+ * 早就干完、结论一直没被消费的小助手会**把自己的报警器一直按住**（实测：终检小助手干了
+ * 7 分 13 秒就结束，之后 3 小时 34 分钟零事件零新文件，界面一声不吭；它自己在名单里明明
+ * 写着「可继续 · 当前未运行」）。所以这一路读的是 `subagentActiveSince`——**自称在跑的那
+ * 些小助手里，最老的一次动静是什么时候**（宿主侧字段走 `indexRunningSubagentActivity`，
+ * 与 `indexSubagentDescendants` 同口径聚合）。它自称在跑、却已经到门槛，就算不再算"在推进"。
+ *
+ * 取数方向上两路刻意**相反**，别改错：
+ *   · 小助手数取不到 → 按 0 算，**宁可报警**（旧实现拉取失败保留旧值，一旦它参与抑制就是
+ *     永久消音器）；
+ *   · 「小助手多久没动静」取不到（宿主没给 `updatedAt` / 还没接线）→ **维持原判据**（照旧算
+ *     "在推进"）。这里缺的是「它真停住了」的证据；拿不到证据就翻案，会把每一次正常的派活
+ *     都报成没动静——那是拿新误报换旧漏报，不划算。
  * 反过来，账本一个读数都没有（`lastWriteAt` 非正数）时**不下判断**：没有可陈述的事实。
  *
- * @param {{ mainAiRunning?: unknown, subagentRunningCount?: unknown, lastWriteAt?: unknown, now?: number }} input
+ * @param {{ mainAiRunning?: unknown, subagentRunningCount?: unknown, subagentActiveSince?: unknown, lastWriteAt?: unknown, now?: number }} input
  * @returns {{ stalled: boolean, idleMs: number }}
  */
 export function deriveStallJudgment(input) {
-	const { mainAiRunning, subagentRunningCount, lastWriteAt, now } = input ?? {};
+	const { mainAiRunning, subagentRunningCount, subagentActiveSince, lastWriteAt, now } = input ?? {};
 	const at = Number.isFinite(lastWriteAt) && lastWriteAt > 0 ? lastWriteAt : null;
-	const idleMs =
-		at === null ? 0 : Math.max(0, (Number.isFinite(now) ? now : Date.now()) - at);
+	const clock = Number.isFinite(now) ? now : Date.now();
+	const idleMs = at === null ? 0 : Math.max(0, clock - at);
 	const subagentsRunning =
 		Number.isSafeInteger(subagentRunningCount) && subagentRunningCount > 0;
+	// 自称在跑的小助手里最老的那次动静（取不到 = 不知道，维持原判据）。
+	const activeSince =
+		Number.isFinite(subagentActiveSince) && subagentActiveSince > 0 ? subagentActiveSince : null;
+	const progressing =
+		subagentsRunning &&
+		(activeSince === null || clock - activeSince < STALL_THRESHOLD_MS);
 	return {
 		stalled:
 			at !== null &&
 			mainAiRunning !== true &&
-			!subagentsRunning &&
+			!progressing &&
 			idleMs >= STALL_THRESHOLD_MS,
 		idleMs,
 	};
 }
 
 /**
- * 小助手血缘聚合（**与宿主同口径**）：筛出 `origin === 'subagent'` 的会话，顺着父子关系往上走，
+ * 小助手血缘聚合：筛出 `origin === 'subagent'` 的会话，顺着父子关系往上走，
  * 对每个祖先累计 `{ count, runningCount }`。
  *
- * 算法与 `@deepseek-ai/dsh-client-ui-subagent` 的 `indexSubagentDescendants` 逐字同构
- * （依据与形状见 `docs/reference/dsh-session-contracts.md`）——DSH 自己的页头谱系计数就是这个
- * 口径，本工作台照抄，避免「同一件事两套数」。两处细节照抄：**孙辈也累计进祖先**（不是只数直接
- * 子级）、普通 fork（没有 `origin`）不算、断链只挂到它写明的父 id 名下。防环的 `seen` 同样照抄。
+ * **⚠️ 这份口径曾经是照抄宿主的**（0.1.5-rc.3 的
+ * `@deepseek-ai/dsh-client-ui-subagent` `indexSubagentDescendants` 逐字同构）。**0.1.7 起
+ * 宿主不再提供对应实现**：那一族类型（`subagent-lineage.d.ts` / `LineageEntry` /
+ * `SubagentDescendantSummary`）连文件带函数整份删除，宿主页头改成的
+ * `SubagentCatalogAction` 只数**直接子级**、不再递归累计。所以这份口径**是工作台自己的**
+ * ——依据、形状与退役事实见 `docs/reference/dsh-session-contracts.md` §3，登记闸门
+ * `web-session-lineage` 断的正是「宿主那一族类型确实已退役」＋「这四条语义在样例上成立」。
+ *
+ * 四条语义：**孙辈也累计进祖先**（不是只数直接子级，累计的是"这条后代自己"的 `running`）、
+ * 普通 fork（没有 `origin`）不算、断链只挂到它写明的父 id 名下、防环的 `seen` 收敛。
  *
  * @param {Record<string, { id?: string, parentId?: string, origin?: string, running?: boolean }>} summaries
  * @returns {Map<string, { count: number, runningCount: number }>}
@@ -117,6 +143,56 @@ export function indexSubagentDescendants(summaries) {
 				aggregate.count += 1;
 				if (descendant.running) aggregate.runningCount += 1;
 			}
+			current = summaries[current.parentId];
+		}
+	}
+	return indexed;
+}
+
+/**
+ * 「自称在跑、却已经多久没动静」的聚合（票 walkthrough-fixes/01 · 走查 P44）。
+ *
+ * **为什么 `indexSubagentDescendants` 答不了这个问题**：宿主的 `running` 位是「记录还驻留」，
+ * **驻留但空闲的也算在跑**（口径见 `docs/reference/dsh-subagent-contracts.md` §1 与
+ * `docs/reference/dsh-session-contracts.md` §1）。P44 实测里那个终检小助手 10:20:59 干完就
+ * 再没动过，宿主名单上它明明写着「可继续 · 当前未运行」——可谱系计数里它**一直**算"在跑"，
+ * 于是「有没有小助手在跑」这一路把告警按了 3 小时 34 分钟。**这不是数错了，是那个位本来
+ * 就不表达"在干活"。**
+ *
+ * 所以这里不动 `indexSubagentDescendants`（它与宿主逐字同构，动了就是契约漂移），另起一份
+ * **同口径**的血缘聚合：同样筛 `origin === 'subagent'`、同样沿 `parentId` 往上走、同样
+ * 孙辈累计进祖先、同样 `seen` 防环、断链只挂它写明的父 id 名下；**只多认一个字段
+ * `updatedAt`**（会话摘要里声明的那一位，见 `docs/reference/dsh-session-contracts.md` §1）。
+ * 它只搬事实、**不下判断**：门槛与比较全在 `deriveStallJudgment`（门槛只此一份）。
+ *
+ * 只统计 `running === true` 的那些——「在跑却没动静」才是要问的那一类；本来就写着没在跑的
+ * 不必再问一遍（`subagentRunningCount` 那边已经数过了）。
+ *
+ * ⚠️ **取不到 `updatedAt` 的行不进这张表**：没有可陈述的事实就别造一个（`Number.NaN` / 0 /
+ * 缺字段一律跳过）。于是「宿主没给这一位」时下游拿到的是"没有这一路事实"，判定照旧走
+ * 原来的三路——**宁可维持现状，也不用一个猜出来的时刻去翻案**（见 `deriveStallJudgment`
+ * 里两路取数方向为什么相反）。
+ *
+ * @param {Record<string, { id?: string, parentId?: string, origin?: string, running?: boolean, updatedAt?: number }>} summaries
+ * @returns {Map<string, number>} 祖先 id → 它名下「自称在跑」的后代里**最老**的那次动静时刻
+ */
+export function indexRunningSubagentActivity(summaries) {
+	const indexed = new Map();
+	for (const descendant of Object.values(summaries ?? {})) {
+		if (descendant?.origin !== "subagent" || descendant.running !== true) continue;
+		const since = descendant.updatedAt;
+		if (!Number.isFinite(since) || since <= 0) continue;
+		const seen = new Set();
+		let current = descendant;
+		while (
+			current?.origin === "subagent" &&
+			current.parentId !== undefined &&
+			!seen.has(current.id)
+		) {
+			seen.add(current.id);
+			const known = indexed.get(current.parentId);
+			// 取 min：一群小助手里**最老**的那个才是这件事的上限（最老的还没动静 = 全都没动静）。
+			if (known === undefined || since < known) indexed.set(current.parentId, since);
 			current = summaries[current.parentId];
 		}
 	}
@@ -218,12 +294,25 @@ export function reviewText(review) {
 }
 
 /**
+ * 意见被撤回（`status === 'revoked'`）在界面上的**唯一正名**（`CONTEXT.md`「撤回（意见）」）。
+ *
+ * 出口只有这一处：章节卡的处置态（`reviewState`）、谈判桌意见单的状态词与撤回行都从这里取词。
+ * 此前同一个状态在意见单与章节卡里各写了一份同义说法，四条走查意见（走查 P25/P26/P32/P52）全踩这个坑。
+ * ⚠️ `revoked` 这个**机器身份词**（`status` 的值）一个字不改，这里统一的是界面字。
+ */
+export const REVIEW_REVOKED_TEXT = "已撤回";
+
+/**
  * 一条意见此刻的处置态（章节卡的「该章的意见」列表与翻案入口用）。
  *
  * - `pending`：还没处置——它正拦着这一章交工（机器只拦这一个态）。
  * - `applied`：主笔 AI 交工时点名处置过、并写了怎么处置的（`how`）；可翻案。
- * - `revoked`：已作废。
+ * - `revoked`：已撤回（`REVIEW_REVOKED_TEXT`）。
  * - 其余（老账本没写 `status`）：早先的意见，不拦交工，也不假装处置过。
+ *
+ * ⚠️ `revocable` 只答「这一态**有没有**出口」，**不答出口是哪个动作**——`pending` 的出口是
+ * 「撤回」（作废），`applied` 的出口是「翻案」（取消处置），方向相反。去哪一个由
+ * `chapters-map.js` 的 `ChapterReviewLine` 按 `key` 分派，别让一个布尔表达两种语义（票 09）。
  */
 export function reviewState(review) {
 	if (review?.status === "applied") {
@@ -235,17 +324,20 @@ export function reviewState(review) {
 		};
 	}
 	if (review?.status === "revoked")
-		return { key: "revoked", text: "已作废", revocable: false };
+		return { key: "revoked", text: REVIEW_REVOKED_TEXT, revocable: false };
 	if (review?.status === "pending")
 		return {
 			key: "pending",
 			text: "还没处置 · 这一章交工前要先处置它",
-			revocable: false,
+			// 票 09：还没处置的意见也能**撤回**（`gold-opinion-revoke` 置 `revoked`）。原先这里
+			// 是 false，于是这一态在界面上**一个按钮都没有**——唯一那条反悔路是「重置重做」，
+			// 代价是整本书推倒重来（而那时这一章已经被 AI 改完了）。
+			revocable: true,
 		};
 	return { key: "legacy", text: "早先的意见（不再拦交工）", revocable: false };
 }
 
-// F22（2026-08-20）**已撤销**（2026-09-22 票 12 裁决，见 `workbench-transitions/spec.md`
+// F22（2026-08-20）那条旧规则**已不成立**（2026-09-22 票 12 裁决，见 `workbench-transitions/spec.md`
 // 不变量 13 与 `CONTEXT.md`「阶段片」2026-09-22 修订条）：旧规则是「浏览历史（browsing 非空）时
 // 主进度条隐藏」，撤销它的理由是**回看态下没有可见的「回到现在」入口**——入口不该随看点深浅
 // 消失。现在阶段片（那排六格）**常驻**：有书就渲染，浏览某一步 / 停在阶段页时照常在，回看态下
@@ -358,6 +450,31 @@ function isRoundedOpaqueBox(box) {
 	return Number.isFinite(parts[3]) ? parts[3] > 0 : true;
 }
 
+// ── 焦点区吸底决策条（走查 P3 / `walkthrough-fixes` 票 20）────────────────────────
+//
+// 确认点上的推进键（「✅ 满意，继续设计」）原本埋在几千字报告底下：真机量到焦点区滚动容器
+// `clientH 1165 / scrollH 2949`，那颗键在容器内 `top 2926`＝要滚过约 2.9 个视口高度才摸得到。
+// 票面把形态留给实现者定，只钉三条硬要求：
+//   ①**只在 `scrollH > clientH`（内容超出）时出现**——不超出时凭空插一条是纯噪音；
+//   ②出现时给滚动区留出**等于自身高度**的下边距，最后一行可点元素不许被它压住；
+//   ③它不是容器级 `onClick` 的整块热区（spec 不变量 2）——条上那颗按钮自己就是热区，
+//     身份＝**发动作**（推进键那条动作），不是"又展开又发动作"的整块。
+//
+// 判据收在这里一处（纯函数、可独立测）；`client-entry.js` 只负责量、只负责渲染。
+// ⚠️ 真几何（2.9 个视口那个数、吸底后 `elementFromPoint` 命中谁）node 侧量不到，
+// 这里只判"出不出、留多少"，不冒充位置级事实。
+export function stickyDecisionBar({ enabled, scrollHeight, clientHeight, barHeight }) {
+	const content = Number(scrollHeight);
+	const view = Number(clientHeight);
+	// 量不到（还没布局 / 页签未激活，`clientHeight` 为 0）时不猜：宁可不出这条。
+	const overflow = Number.isFinite(content) && Number.isFinite(view) && view > 0 && content > view;
+	if (enabled !== true || overflow === false) return { show: false, paddingBottom: 0 };
+	const height = Math.round(Number(barHeight));
+	// 自身高度还没量到时留 0（宁可先不挡，也不要按猜的数留白）；量到了就一字不差地留出来。
+	return { show: true, paddingBottom: Number.isFinite(height) && height > 0 ? height : 0 };
+}
+
+
 /** 段级最长公共子序列对比：返回按稿面顺序排好的操作序列（下标 0 基）。 */
 export function diffParagraphs(oldParas, newParas) {
 	const n = oldParas.length;
@@ -396,4 +513,28 @@ export function diffParagraphs(oldParas, newParas) {
 		j += 1;
 	}
 	return ops;
+}
+// ── 主 AI 上下文占用（票 28）──────────────────────────────────────────────
+//
+// 走查 P46 报的「书还没写完，主 AI 的上下文已经用掉一半」——数是宿主自己算好的
+// `contextPressure` 会话投影，与宿主输入区角标「上下文已用 51%」同一份数据；
+// 工作台之前是**没去读**，不是宿主没传。
+//
+// 折算口径不在这里：**它是两侧都必须知道的规则**
+//（领任务说明那一半也要折同一份数），故它居于 `src/domain-rules.js`
+// 的 `contextOccupancyPercent`。**这里只做再导出**，前端 import 路径一个字都不用改。
+export { contextOccupancyPercent } from "../domain-rules.js";
+
+/**
+ * 章节清单头部那一句人话（**计量，不是状态**）——单侧展示文案，按领域规则模块的口径不进那里。
+ *
+ * ⚠️ 不占状态词的位置：CONTEXT.md「工作台状态词」的上限仍是
+ * 「轮到你／我正在做／已完成」三个，「上下文已用 51%」是容量计量，
+ * 既不进 `chapterBadge()`，也不进任何返回状态词的函数。
+ * @param {unknown} percent 占用百分比（`contextOccupancyPercent` 的结果）
+ * @returns {string} 读不到时是**空串**（调用方直接拼上去，不留空位痕迹）
+ */
+export function contextOccupancySentence(percent) {
+	if (!Number.isFinite(percent)) return "";
+	return `上下文已用 ${percent}%`;
 }

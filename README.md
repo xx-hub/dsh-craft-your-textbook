@@ -35,10 +35,30 @@ npx dsh-craft-your-textbook
 脚本自动完成三步：
 
 1. 把插件装进 dsh 的 web profile（等价于 `dsh plugin --profile web add dsh-craft-your-textbook`）
-2. 把 `dsh-craft-your-textbook` 写进 profile 的 bundles 列表（没有它宿主不会挂载插件）
-3. 把「造书模式」preset 装到 `~/.dsh/.agent-presets/textbook/`
+2. 核对插件有没有被登记进 profile 的 bundles 列表（**这一步现在是自动的**：dsh 0.1.7 起，宿主
+   装完包会自己把声明了 `dsh.bundle` 的新依赖登记进去；没有它宿主不会挂载插件）
+3. **确认「造书模式」已注册**（它不是安装器装出来的——它由本包随 bundle 发出的补丁文件声明，
+   安装器只负责**如实核对**一次）
 
 装到别的 profile：`npx dsh-craft-your-textbook --profile tui`
+装到别的数据目录：`DSH_HOME=<目录> npx dsh-craft-your-textbook`
+
+> ⚠️ **需要 dsh ≥ 0.1.7**。0.1.7 换掉了整套 preset 机制：造书模式从「一个目录」变成「一条
+> Loader 声明行」，`~/.dsh/.agent-presets/` 那个目录**宿主已经不再读取**。装到更老的宿主上，
+> 插件能用，但**造书模式不会注册**（工作台页签不出现）——那不是安装失败，是机制不同。
+
+#### 怎么确认模式真的注册上了
+
+```bash
+dsh --profile web --dump-config   # 组合树里找 config.id: textbook
+```
+
+#### 想改成自己的模式
+
+在你自己 profile 的 `cordis.patch.yml` 里**复制一份声明行、改出新身份**（两个 id 都要改：行上的
+`id` 是编辑地址，`config.id` 才是模式身份）。⚠️ 不要直接改插件包发出的那一行——你 profile 层的
+覆盖**每次启动都在最后，会永远赢下去，升级冲不掉它**。之后开新会话时选你那个模式就行，
+造书模式本身保持发布的样子。
 
 ### 方式二：从 GitHub 直装（不经过 npm）
 
@@ -46,12 +66,11 @@ npx dsh-craft-your-textbook
 # 1) 安装插件（拉取 GitHub 仓库 main 分支；包已预构建，无需构建授权）
 dsh plugin --profile web add github:xx-hub/dsh-craft-your-textbook
 
-# 2) 安装「造书模式」preset（dsh 不会自动装插件的 preset，手动拷一次即可）
-mkdir -p ~/.dsh/.agent-presets/textbook
-cp ~/.dsh/profiles/web/node_modules/dsh-craft-your-textbook/preset/*.yml ~/.dsh/.agent-presets/textbook/
-
-# 3) 重启 dsh
+# 2) 重启 dsh，并新开一个会话（已经开着的会话不会换组合）
 ```
+
+模式声明补丁随包一起发出去（`package.json` 的 `dsh.bundle.patch` 登记了它），**不用另外拷任何
+文件、不用手改 `dsh.profile.bundles`**——宿主会自己登记。
 
 想固定版本（后续往 main 推送不会悄悄改内容）可以锁定 commit：
 
@@ -82,7 +101,7 @@ dsh plugin --profile web add github:xx-hub/dsh-craft-your-textbook#<commit>
    - 读到不顺眼的地方，鼠标停在那一行会浮出三个键：😕 这种写法不喜欢 / 🗑 这类内容不需要 / ✏️ 要改成……；😕/🗑 键在同一处点两下＝**撤销**刚才那条意见（✏️ 的撤销在意见单里）。
    - 定稿区按章节列出「每章多少字、为什么」的**字数清单**，AI 建议也分章给，不用再敲一个统一字数。
    - 满意点【✅ 就按这章的风格写全书】，不满意点【❌ 这版整个不要，重写】。
-5. **写完整本（可随时抽查）**：其余章节由小助手执笔、小助手独立审计、机器逐章验货（审计不通过/你的意见没处理完都不会放行）。工作台出现"章节清单"——每章可点【👀 看看这章】预览，点【✍️ 写意见】给 AI 提意见（比如"例子太难、多给几道练习"），AI 会照改并重新审计。
+5. **写完整本（可随时抽查）**：其余章节由小助手执笔、小助手独立审计、机器逐章验货（审计不通过/你的意见没处理完都不会放行）。工作台出现"章节清单"——每章可点【👀 看看这章】预览，点【✍️ 写意见】给 AI 提意见（比如"例子太难、多给几道练习"），AI 会照改并重新审计。**你写下的意见会转达给正在写那一章的小助手**（不必等整章写完再打回），每次转达都会在工作记录里留一行；某一章的小助手写完了但没交齐时，AI 会优先叫醒原来那个小助手接着补。
 6. **全章过目 + 合并前跨章审计**：全部章节写完，AI 不会直接交稿——先停在「全章过目」卡上等你逐章看：每章可【👀 看看这章】预览、【✍️ 写意见】给 AI 改，改了会再审计回来；全部满意点【✅ 都过了，交工】，主 AI 先做一次合并前跨章审计（核对事实一致性、术语统一、交叉引用、知识递进链，覆盖整个流水线遗漏的跨章问题），然后再合并成书。
 7. **最后检查 & 你的最终认可 & 下载**：AI 亲自读成品逐项检查、按需整体调整（机器兜底再验一遍：书里的内容都能追到材料出处、没有重复的标题、没有乱码、章节数和说好的一致、该有的板块都在、没有出现不该用的词）。最后检查全过后，交付前先停在「最后检查结果认可」卡上给你**对整本书的最后一次把关**：AI 自查报告 + 机器检查结果都给你看，满意点【✅ 认可，交付】；不满意写一句意见，AI 会改整本后重新检查。认可后交付卡出现——上面有一份「**你的风格线条条有着落**」清单（每条风格意见落在哪几章、为什么没用上），给你最后把关；然后点【⬇️ 下载《书名》.md】（文件名保留你一开始敲定的书名）。附"这本书怎么用"说明。
 
@@ -104,7 +123,20 @@ dsh plugin --profile web add github:xx-hub/dsh-craft-your-textbook#<commit>
 dsh plugin --profile web add dsh-craft-your-textbook
 ```
 
-然后编辑 `~/.dsh/profiles/web/package.json`，把 `dsh-craft-your-textbook` 加进 `dsh.profile.bundles` 列表：
+**不用再改 `dsh.profile.bundles`、也不用再拷 `preset/`。** dsh 0.1.7 起，宿主在装完包的时候会
+自动把「声明了 `dsh.bundle` 的新依赖」登记进 profile 的 bundles 列表；模式声明补丁由本包随
+bundle 发出（`package.json` 的 `dsh.bundle.patch` 登记了 `preset/textbook.patch.yml`），宿主启动
+时自己读。
+
+重启 dsh 就行。想确认它真的登记上了：
+
+```bash
+dsh --profile web --dump-config   # 在输出里找 config.id: textbook
+```
+
+找不到就是没登记上（插件没装进这个 profile，或装的是不带声明补丁的旧版本）。**万一那台机器上
+确实没自动登记**（profile 早就初始化过、或你手动改过它的 `package.json`），再自己往
+`~/.dsh/profiles/web/package.json` 里补一行：
 
 ```json
 "dsh": {
@@ -114,16 +146,20 @@ dsh plugin --profile web add dsh-craft-your-textbook
 }
 ```
 
-再把 `preset/` 文件夹（本包内）整个拷到 `~/.dsh/.agent-presets/textbook/`，重启 dsh。
+补完再重启一次 dsh。
 
 ## 卸载
 
 ```bash
 dsh plugin --profile web remove dsh-craft-your-textbook
-rm -rf ~/.dsh/.agent-presets/textbook
 ```
 
-重启 dsh 即恢复原样。你的书项目数据保留在 `~/.dsh/textbook/projects`（要彻底删除就删这个文件夹）。
+重启 dsh 即恢复原样。**模式声明行随插件包走**——把插件卸了，组合树里那一条就没了，不用另外删
+任何文件。1.2.x 时代装到 `~/.dsh/.agent-presets/textbook/` 的那两份文件，宿主早已不再读取；
+1.3.0 的安装器会把那个目录**改名**成同级的 `~/.dsh/.agent-presets/textbook.retired` 留在原处
+（**带备份**，不直接删——那份手写组合是那台机器上唯一的一份，删掉就再也回不去了）。
+
+你的书项目数据保留在 `~/.dsh/textbook/projects`（要彻底删除就删这个文件夹）。
 
 ## 你的数据
 
@@ -143,7 +179,7 @@ rm -rf ~/.dsh/.agent-presets/textbook
 | 某一步出错 | 卡片上点【🔁 重试】；还不行就在对话里问向导 |
 | 想反悔 | 在这一步的卡上点「⏪ 回退到上一个拍板点」，旧版本留档保留 |
 | 想中途加一章 | 告诉向导，AI 先判断能不能塞进现有章节；不能塞时它不会自己加（防螺旋），会提请你自己决定——若你确实要加，经「定点修改」重做下游，每步仍会请你拍板 |
-| 想改某一章 | 写完整本时点那章的「写意见」，AI 会照意见修订；已交付的书在对话里告诉 AI |
+| 想改某一章 | 写完整本时点那章的「写意见」——这条意见会转达给正在写那章的小助手，AI 会照意见修订；已交付的书在对话里告诉 AI |
 | 想先试试看再动手 | 新建书时点「先建一本演示书试试」，AI 走一遍给你看 |
 | 全书写完想逐章过目 | 会有「全章过目」卡：每章看看/写意见，全满意再点【✅ 都过了，交工】 |
 | 想改一个已拍板的历史决定 | 那段上点【✍️ 定点修改】，先看影响预告，10 分钟内可一键撤销 |

@@ -7,14 +7,21 @@
  *   - artifactName / artifactKind：产物路径 → **人读名字 / 类型词**（票 05：任何屏同一个名字）
  *   - workEntryForEvent / workPathForEvent：事件卡片 → 结果文件（"查看"入口；票 13：结构字段 →
  *     label 形状 → 存在性；票 08：把"本来没有候选"与"认得出候选但文件还不在产物清单里"分开）
- *   - stepsOf / stepCount：分段 → **步**（票 01：一章＝写/审/复核三步；总数 3N + 10）
+ *   - phaseOfSegment：分段的阶段号（服务端 `phase` 优先，缺了按 `SEGMENT_PHASE[kind]` 兜底）
+ *   - stepWord：工作台状态词（**共用**：`materialConversionActivityText` 与
+ *     `stage-step-model` 的阶段 / 步模型都取它这一份）
+ * ⚠️ 候选 06：分段 → **步** 的归一（`stepsOf` / `stepCount` / `phaseSteps` / `phaseSummary` 等）
+ * **已于 2026-09-25 整体迁入 `src/ui/stage-step-model.js`**——那才是这一步知识的唯一拥有者。
+ * 本文件与它的依赖方向是单向的：`stage-step-model → view-rules`。
+ *
  * 阶段片不再是"一份文件"的入口（2026-09-21 用户裁决）：它是导航面，落点是阶段页；
- * 阶段页要的派生（phaseSteps / phaseSummary / openableArtifacts / stepWord）也在本模块底部。
+ * 阶段页要的 `openableArtifacts` 留在本模块（候选 08 的地盘，模型只消费它的结果）。
  *
  * 双端共享领域件（goldChapterNo 等）以 src/domain-rules.js 为单一事实来源；
  * 本模块只做展示映射，不含业务状态。
  */
 import {
+	artifactKind,
 	goldChapterNo,
 	productOpenMode,
 	gateHuman,
@@ -24,12 +31,13 @@ import {
 	PHASE_UI_SOURCE,
 	SEGMENT_PHASE,
 } from "../domain-rules.js";
+import { formatTime, humanDuration } from "./rules.js";
 
 // 界面词的两侧共用部分（关卡主题表 / 「第 N 次拍板」模板 / 交办阶段标签翻译 / 六格阶段词）
 // 住在 src/domain-rules.js 的「界面词」区：服务端也要产出人话文本（《过程记录.md》、交办唤醒
 // 消息、提案正文标题都是给人读的），共用件只住 UI 层就得在服务端抄第二份（grill Q24）。
 // 这里只保留 UI 专属映射，并把共用件再导出——UI 组件照旧从本文件取词。
-export { gateHuman, stageLabelHuman };
+export { artifactKind, gateHuman, stageLabelHuman };
 export const GATE_UI = GATE_TOPIC;
 
 // ── 界面用词表（批 2，2026-09-20 用户逐行拍板）────────────────────────────────
@@ -65,8 +73,26 @@ export { segmentHuman };
 
 // 阶段（stage）→ 界面词。⚠️ 与后端 stageLabel 的「范例章」是故意分工：
 // 机器内部/账本/文件用简称，界面给用户看界面词（见 CONTEXT.md 与界面用词表）。
+//
+// ⚠️ 2026-09-27 补齐 `gate`（票 `audit-matrix-contract/05`）：这张表原来**独独缺 `gate`**，
+// `stageHuman('gate')` 返回空串——空串正是「谁想在界面上说方案关都拼不出来」的同一种病。
+// 机器阶段是**七个**（`docs/协作模型.md:220` 逐字列的就是这七个：explore / gate（带第几关）/
+// outline / gold / chapters / merge / final），今天一格不漏。
+//
+// `gate` 那一格取**既有措辞**「拍板定方案」，**不新创风格**：
+//   · `CONTEXT.md:192`（2026-09-20 用户逐行拍板）阶段片第 3 格＝「拍板定方案」；
+//   · 与本表其余几格同属 `PHASE_UI_SOURCE` 家族——`explore`/`gold`/`chapters`/`final`
+//     四格与 `PHASE_UI_SOURCE[2]/[4]/[5]/[6]` 逐字相同，`gate` ＝ `PHASE_UI_SOURCE[3]`；
+//     （本表另两格 `outline`/`merge` 不在 `PHASE_UI_SOURCE` 里，是阶段层面更细的说法。
+//     防漂由 `test-wording-invariants.mjs` 那条断言兜住，不靠这里改写法。）
+//   · `CONTEXT.md:237` 逐字：「『拍板定方案』含三次拍板 ＋ 章节安排」——所以**阶段层面**
+//     `gate` 叫「拍板定方案」、`outline` 叫「章节安排」，两格分工不同、各叫各的，
+//     **不要**因为阶段片第 3 格叫「拍板定方案」就把 `outline` 也改成那一句。
+//   · ⚠️ **不叫「第 N 关」**（`CONTEXT.md:192` 明写界面不叫那个；`ALT_GATE_NUMBER_RE` 会判红）。
+//     带关卡号的那一档是**另一份词**：`gateHuman(n)`→「第 N 次拍板 · <主题>」。
 export const STAGE_HUMAN = {
 	explore: "读材料挑重点",
+	gate: "拍板定方案",
 	outline: "章节安排",
 	gold: "最佳范例章",
 	chapters: "写完整本",
@@ -74,7 +100,30 @@ export const STAGE_HUMAN = {
 	final: "最后检查",
 };
 
-export const stageHuman = (stage) => STAGE_HUMAN[stage] ?? "";
+/**
+ * 阶段名 → 界面词。
+ *
+ * ⚠️ 2026-09-27（票 `audit-matrix-contract/05`）：原来是 `STAGE_HUMAN[stage] ?? ""`——
+ * **收到未知阶段就静默返回空串**。空串不是「兜底」，它和本票那格病因**是同一种病**：
+ * 调用点拿到的不是词、是「没有词」，而界面那一格**照旧渲染、只是悄悄少一截**
+ * （`src/ui/event-cards.js:1151` 判 `pendingStageLabel !== ""` 才出「我正在做 · <阶段名>」，
+ * 空串会让它整个不出现——**屏上看不出出过错**）。
+ *
+ * 兜底选「**原样返回那个机器阶段名**」而不是抛错，理由与仓库里**另外两处同一选择**逐字一致：
+ *   · `src/domain-rules.js` `segmentHuman`：「译不出来原样显示：**宁可露出机器词，也不猜错**」；
+ *   · `src/ui/event-cards.js:1160`：「译不出来（未登记的原样返回）才原样显示——
+ *     **宁可露出机器词，也不猜错**」。
+ * 不抛错是因为本函数**在渲染路径上**（`src/client-entry.js:1179`）：抛错会把一个
+ * 「显示缺口」升级成**整块工作台崩掉**，代价严格更大；而原样返回恰好把缺口**显出来**
+ * （屏上会出现一个 `gates` 之类），那正是「不静默」要的效果。
+ *
+ * ⚠️ `null` / `undefined` / `""` 仍然返回 `""`——那不是「译不出来」，是**本来就没有阶段**
+ * （调用点在没有待办时就是这么传的），空串在那里是正确答案，不是缺口。
+ */
+export const stageHuman = (stage) => {
+	const key = typeof stage === "string" ? stage : "";
+	return STAGE_HUMAN[key] ?? (key === "" ? "" : key);
+};
 
 // 交办阶段标签的翻译（stageLabelHuman）同样在 domain-rules.js「界面词」区，已在顶部再导出：
 // 服务端 wakeMainAI 的交办唤醒消息与《过程记录.md》要和 UI 用同一份译法，
@@ -336,9 +385,20 @@ export function phaseOfSegment(seg) {
 	return Number.isInteger(byKind) ? byKind : null;
 }
 
-/** 一个阶段有哪几个分段（界面上读成「步」；服务端打 `phase` 优先，缺了按 kind 兜底——见上）。 */
-export const phaseSegments = (segments, phase) =>
-	(segments ?? []).filter((seg) => phaseOfSegment(seg) === phase);
+/**
+ * 阶段 / 步 归一（章三步、材料准备第一步、`3N+10`、四态、焦点双 key、计数、阶段分组、四态行
+ * `rowText`）**已于候选 06 整体迁入 `src/ui/stage-step-model.js`**——那里是这一步知识的唯一
+ * 拥有者（`createStageStepProjector({meta,segments})` → `project({kind})`）。本文件不再导出
+ * `stepsOf` / `stepCount` / `phaseSteps` / `phaseSummary` / `stepLabel` / `stepSegment` /
+ * `phaseSegments` / `MATERIAL_STEP_KEY` / `chapterStepKey` / `stepDetailLines`，也不再有
+ * `chapters-map.stepIcon` / `stepRowText`：两屏都吃模型行上算好的 `rowText`。
+ *
+ * 本文件保留的是**不属于这一步模型**的展示派生：界面词、焦点主卡路由、产物 / 事件入口、
+ * 产物名与开预览判据、拍板结论、产物事实文本、转换活动行、`PHASE_INTRO`，以及 `stepWord`
+ * （`materialConversionActivityText` 与模型共用，模型单向 import 本文件）。
+ *
+ * 依赖方向：**stage-step-model → view-rules**（单向）。本文件不 import 新 module，避免成环。
+ */
 
 // ── 产物名（票 05：一份产物在任何屏上只用一个名字）────────────────────────────
 //
@@ -371,21 +431,8 @@ const CONVERTED_SOURCE_NAME_RE = /^sources-md\/(.+)$/;
 /** 旧版产物的稿次尾巴（`.3f2k9x` 这类 base36 时间戳）。 */
 const DRAFT_STAMP_RE = /\.[0-9a-z]+$/i;
 
-/** 产物的人读类型词（按路径形状判，不按扩展名猜）。
- *  ⚠️ 票 05 起它是**名字缺省时的兜底**——一行只显示一件名字，不再与名字并排显示。 */
-export function artifactKind(rel) {
-	const path = relPath(rel);
-	if (CHAPTER_NAME_RE.test(path)) return "正文";
-	// 旧版产物目录下的都是旧稿（章节、大纲、风格规范…归档后落在这里），名字那一层再加章号限定语。
-	if (/^work\/_旧版产物\//.test(path)) return "旧稿";
-	if (/^提案\//.test(path)) return "拍板方案";
-	if (/^sources-md\//.test(path)) return "材料转换稿";
-	if (path === "work/explore.md") return "挑重点的结果";
-	if (path === "work/outline.md") return "章节安排";
-	if (path === "work/style-spec.md") return "写作规范";
-	if (path === "work/book.md") return "成书";
-	return "文件";
-}
+// 产物的人读类型词（artifactKind）住在 domain-rules.js，由本模块再导出，
+// 这样 UI 与服务端事实分类共用同一份纯规则；名字层的路径正则仍留在下面。
 
 /** 旧稿文件名去掉稿次尾巴；尾巴一去就没了 `.md` 的名字说明它不是稿次（别把扩展名当稿次）。 */
 function draftBaseName(file) {
@@ -421,6 +468,9 @@ function nameForRel(path) {
 	if (path === "work/outline.md") return "章节安排";
 	if (path === "work/style-spec.md") return "写作规范";
 	if (path === "work/book.md") return "成书";
+	// 过程记录（ADR-0015）：全局产物、写给人读的流水账——名字走词表，不再退成类型词「文件」。
+	// 它**不属任何一步**，所以只出现在焦点区底部那条常驻小条上，不进任何一步的文件清单。
+	if (path === "过程记录.md") return "过程记录";
 	return "";
 }
 
@@ -440,6 +490,99 @@ export function artifactNameWith(name, qualifier) {
 	const base = String(name ?? "");
 	const extra = String(qualifier ?? "").trim();
 	return extra === "" ? base : `${base}·${extra}`;
+}
+
+/** 产物事实里的正文/检查记录分类（路径与既有产物判据同形，不另造一套）。 */
+const AUDIT_FACT_PATH_RE = /^work\/audit(?:-[^/]+)?\.md$/i;
+
+/** 事实里的时间是服务端给的；这里只做有效性检查与既有的可读时间格式化。 */
+function artifactFactTime(modifiedAt) {
+	if (modifiedAt === null || modifiedAt === undefined || modifiedAt === "") return "";
+	let date;
+	try {
+		date = modifiedAt instanceof Date ? modifiedAt : new Date(modifiedAt);
+	} catch {
+		return "";
+	}
+	if (!Number.isFinite(date.getTime())) return "";
+	return formatTime(date);
+}
+
+/** 一条产物事实的展示分类：只认服务端给的 kind，缺省时再按既有路径形状认。 */
+function artifactFactKind(fact, path) {
+	const serverKind = String(fact?.kind ?? "").trim();
+	if (serverKind === "检查记录" || AUDIT_FACT_PATH_RE.test(path)) return "检查记录";
+	if (serverKind === "正文" || artifactKind(path) === "正文") return "正文";
+	return "";
+}
+
+/**
+ * 服务端随分段下发的盘上事实 → 给人看的第二行。
+ *
+ * 这里**只读** `seg.artifactFacts`：产物存在与新鲜度都是服务端已经判定的事实，浏览器不拿
+ * 文件 mtime 互相比较，也不把 `current` 翻成「已完成」。章节仍用现有 `artifactName`/`正文`
+ * 分类，检查记录沿用界面词「检查记录」；其它事实只露 `artifactName`，绝不把机器路径带上屏。
+ */
+export function artifactFactText(seg) {
+	const facts = Array.isArray(seg?.artifactFacts) ? seg.artifactFacts : [];
+	const lines = [];
+	for (const fact of facts) {
+		if (fact === null || typeof fact !== "object") continue;
+		const path = relPath(fact.path);
+		const kind = artifactFactKind(fact, path);
+		const time = artifactFactTime(fact.modifiedAt);
+		if (kind === "检查记录") {
+			// stale 的结论只来自服务端；即便时间不可读，也要把「属于旧稿」说清楚。
+			lines.push(auditFactText(fact, time));
+			continue;
+		}
+		const name = artifactName(path);
+		if (kind === "正文")
+			lines.push(time === "" ? `正文 · ${name}` : `正文 · ${name}（${time}）`);
+		else lines.push(time === "" ? name : `${name}（${time}）`);
+	}
+	return lines.join(" · ");
+}
+
+/**
+ * 「检查记录」那一句（**同源出口**：`artifactFactText` 与章节卡共用它，措辞只有这一份）。
+ *
+ * 服务端已判定 `freshness === "stale"` 时，那份检查记录是**正文改完之后**写的旧稿——即便
+ * 时间读不出来，「比正文旧，属于旧稿」这句也照说（判据在 `src/workflow.js` 的
+ * `buildArtifactFacts`，浏览器不自己比文件时间）。
+ */
+function auditFactText(fact, time) {
+	const suffix =
+		fact.freshness === "stale"
+			? time === ""
+				? "比正文旧，属于旧稿"
+				: `${time}，比正文旧，属于旧稿`
+			: time;
+	return suffix === "" ? "检查记录" : `检查记录（${suffix}）`;
+}
+
+/**
+ * 章节卡那一行的检查记录新鲜度（票 10 · P47 落点②）。
+ *
+ * 与 `artifactFactText` **同源**：读的是同一份服务端事实（`seg.artifactFacts`），用的是同一个
+ * 出口 `auditFactText`，所以「比正文旧，属于旧稿」这句话在步清单与章卡上逐字相同。
+ * 取不到新鲜度的事实（没下发／没 stat 到／这一章还没写检查记录）→ 返回空串，**不编一句**。
+ *
+ * @param {{key?: string, artifactFacts?: unknown}[]} segments 服务端下发的分段（每章一段）
+ * @param {number} n 章号（1 基）
+ */
+export function chapterAuditFreshnessText(segments, n) {
+	const list = Array.isArray(segments) ? segments : [];
+	const seg = list.find((row) => row?.key === `chapter-${n}`);
+	if (seg === undefined) return "";
+	const facts = Array.isArray(seg.artifactFacts) ? seg.artifactFacts : [];
+	for (const fact of facts) {
+		if (fact === null || typeof fact !== "object") continue;
+		const path = relPath(fact.path);
+		if (artifactFactKind(fact, path) !== "检查记录") continue;
+		return auditFactText(fact, artifactFactTime(fact.modifiedAt));
+	}
+	return "";
 }
 
 /**
@@ -471,356 +614,88 @@ export function openableArtifacts(seg, workFiles) {
 export function decisionText(seg) {
 	const decision = seg?.decision;
 	if (decision == null) return null;
+	// 第 1 版不写版次、第 2 版起写「· 第 M 版」（CONTEXT「产物名」的 v1 规矩 + 老分隔符 `·`）。
+	// 分隔符取 `·` 而不是括号：括号已经被你的备注占着（`✅ 通过（备注）`）。
+	const versionSuffix = (raw) => {
+		const version = Number(raw);
+		return Number.isInteger(version) && version >= 2 ? ` · 第 ${version} 版` : "";
+	};
+	// 票 workbench-transitions/25：第三态「正在等拍板」自己说话。留白看着干净，但用户在阶段页上
+	// 找不到反馈，只当卡片坏了；更不能沿用「已驳回」那两个字。
+	// ⭐ 版次**只**从 `proposalVersion`（最新提案那一版＝用户此刻正要拍的那一版）取。
+	// 不许退回 `version`：那一列按票 23 的语义是**已定下来的那一版**，「v1 驳回、v2 在等」时是 1——
+	// 印出来就是一句假话，且比「显示成已驳回」更难被察觉。老 payload（服务端那半部还没重启）没有
+	// `proposalVersion` 时**宁可不印版次**：说不清是哪一版，就别点名。
+	if (decision.status === "awaiting") return `待拍板${versionSuffix(decision.proposalVersion)}`;
 	const verdict = decision.approved === true ? "✅ 通过" : "❌ 驳回";
-	return decision.note ? `${verdict}（${decision.note}）` : verdict;
+	return `${verdict}${versionSuffix(decision.version)}${decision.note ? `（${decision.note}）` : ""}`;
 }
 
 /**
- * 一个阶段的全部**分段**与可打开产物（段级粒度）。
- * ⚠️ 2026-09-23（票 05）：阶段页的行单位改成**步**了（见 `phaseSteps`），它只借本函数的
- * `name`/`intro`。本函数的契约与返回形状**不动**（段级派生的既有断言照旧；要段级清单的调用点
- * 也照旧吃它）。
- */
-export function phaseSummary(segments, phase, workFiles) {
-	const segs = phaseSegments(segments, phase).map((seg) => ({
-		key: seg.key,
-		title: segmentHuman(seg),
-		status: seg.status,
-		statusWord: stepWord(seg.status),
-		decision: decisionText(seg),
-		canDeepModify: seg.canDeepModify === true,
-		artifacts: openableArtifacts(seg, workFiles),
-	}));
-	const artifacts = segs.flatMap((row) =>
-		row.artifacts.map((item) => ({ ...item, step: row.title, stepKey: row.key })),
-	);
-	return {
-		phase,
-		name: PHASE_UI[phase] ?? String(phase),
-		intro: PHASE_INTRO[phase] ?? "",
-		segs,
-		artifacts,
-		doneCount: segs.filter((row) => row.status === "done").length,
-	};
-}
-
-/**
- * 一个阶段有哪几步、每步摆哪几行产物（阶段页的行单位＝**步**，票 01）。
+ * 每一步走到哪了 → 工作台状态词（CONTEXT.md：只允许这三个词 + 还没到）。
  *
- * ⚠️ 步一律走 `stepsOf`——四态词、步名、章内三步的拆分**只有那一处来源**（CONTEXT.md「全览条」：
- * 清单与阶段页取同一份四态行，不许各写一套）。本函数只加阶段页要的那一层：把这一步归属的那
- * 一段的可打开产物挂上（`openableArtifacts`：机器产物与走卡片内联的都不进清单）。
- *
- * **材料准备那一步没有段**（`segmentKey` 为 null）：它的产物行是**材料清单**（`meta.sources`），
- * 由阶段页自己摆（`MaterialsBody`），不从段上出——别为了凑齐在这里编一份假段。
- *
- * ⚠️ 章内三步（写 / 审 / 复核）共属同一段，于是三行挂的是**同一份段级产物**（`work/chapter-NN.md`）。
- * 这是有意的：定点修改的粒度仍是段（票 01 Q9），机器也分不出这份正文是三步里哪一步落下的
- * （不许为凑数手工编步）。要收窄到"审只有审计记录"，得先让机器长出那个状态位。
- *
- * 票 11 给每一行补上 `downstream`（影响预告的**人读名字**，见 `downstreamNames`）：确认框里
- * 「这一步改了，这些要一起重做」不再是空话——数据本来就在客户端（`seg.downstream`），
- * 只是先前没有出口译词、也没接到行上。
+ * 仍住在 `view-rules`：它被 `materialConversionActivityText`（转换活动行）与
+ * `stage-step-model`（阶段 / 步模型，两屏的行文）**共用**——工作台状态词只此一份
+ * （CONTEXT.md「工作台状态词」）。模型单向 import 本文件，不反向。
  */
-export function phaseSteps(payload, phase, workFiles) {
-	const { segments } = stepPayloadOf(payload);
-	return stepsOf(payload)
-		.filter((step) => step.phase === phase)
-		.map((step) => ({
-			key: step.key,
-			title: stepLabel(step),
-			status: step.status,
-			// 四态词取自步模型自己算好的那一份（它就是 stepWord 的结果，不在这里第二次数）。
-			statusWord: step.statusWord,
-			chapter: step.chapter,
-			// 定点修改的粒度是**段**：提交时把段 key 交出去，不是步 key（`chapter-1:write` 后端不认）。
-			segmentKey: step.segmentKey,
-			canDeepModify: step.canDeepModify === true,
-			decision: decisionText(step.segment),
-			artifacts: openableArtifacts(step.segment, workFiles),
-			// 影响预告（票 11）：这一步改了会连带重做哪些**下游**，出口已经是人读名字。
-			downstream: downstreamNames(step, segments),
-		}));
-}
-
-/**
- * 影响预告的清单：这一步改了，后面哪些步要一起重做（**人读名字**，票 11）。
- *
- * 数据源＝服务端打在段上的 `seg.downstream`（`workflow.js` 的 `deepAffected`，装的是**段 key**：
- * `explore` / `gate-1` / `chapter-1` / `merge`…）。三个坑，一个都不能踩：
- *   · 引擎给的那份**含被改的段自己**（`[segKey, ...下游]`）——自己不是"下游"，滤掉；重复项去重；
- *   · key 一律在出口经 `segmentHuman` 译成人话（CONTEXT.md「界面用词表」：机器身份词不上屏）；
- *     章段的名字（`第N章 <标题>`）只有段对象才译得出，所以先按 key 在 `segments` 里找那一段；
- *   · 译不出来（`segmentHuman` 原样返回 key）时**这一项不报**——宁可少报，也不把 `chapter-1`
- *     这种机器词端到人眼前（票 05 当初就是为这条才把影响预告留给票 11）。
- */
-function downstreamNames(step, segments) {
-	const keys = Array.isArray(step.segment?.downstream) ? step.segment.downstream : [];
-	const byKey = new Map();
-	for (const seg of segments)
-		if (seg?.key !== undefined && seg?.key !== null) byKey.set(String(seg.key), seg);
-	const names = [];
-	const seen = new Set();
-	for (const raw of keys) {
-		const key = String(raw ?? "");
-		if (key === "" || key === step.segmentKey) continue;
-		const seg = byKey.get(key);
-		const name = seg === undefined ? segmentHuman(key) : segmentHuman(seg);
-		if (name === "" || name === key) continue;
-		if (seen.has(name)) continue;
-		seen.add(name);
-		names.push(name);
-	}
-	return names;
-}
-
-// ── 步（票 01：人眼唯一的工作单位）────────────────────────────────────────────
-//
-// 裁决（.scratch/workbench-transitions/issues/01-一步是什么.md，Answer 1/2/4）：
-//   · **一步＝分段内部一道「在『我正在做』期间换了执行者或产物、且机器分辨得出」的工序**。
-//     今天只有**章内**有这种状态位（`meta.chapterPipeline[].stage` 五态，权威 src/workflow.js:105-110）
-//     → **一章＝写 / 审 / 复核三步**；**其余每段＝一步**；**材料准备（阶段 1）＝第一步**。
-//   · 总数 = **3N + 10**（N＝章数）。章未排定前只算**结构上已经存在**的步（今天＝10），
-//     不按默认章数猜（会跳的假数不如不给）——`stepCount` 把 `known`/`total`/`chaptersPlanned`
-//     交出去，那句话由 UI 拼（"已知 10 步 · 章节排定后补齐" / "全书 3N+10 步 · 还剩 M 步"）。
-//   · **分段仍是机器层的账本单位**（`segments[]`、`deepAffected` 的键、定点修改的粒度＝整段，
-//     票 01 Q9）：步只是它的展示细分，所以每一步都带 `segmentKey`/`segment`，UI 能从步反查段。
-//   · 界面用词：人眼只有**「阶段」**与**「步」**；「期」「小步」「分段」不进界面。
-//     步名不带阶段号（阶段号在 `step.phase` 上，由调用点按「第 N 阶段」的说法拼）。
-//
-// ⚠️ 不变量 1（客户端兜底，长期机制）：分段的阶段归属**优先服务端 `seg.phase`**，缺了按
-// `domain-rules.SEGMENT_PHASE` 从 `kind` 查表（`phaseOfSegment`）——**不许只依赖服务端 payload**。
-// 章内五态同理：优先服务端算好的 `seg.stage`，缺了读 `meta.chapterPipeline[n-1].stage`。
-
-/** 章内三步（票 01 §2 的逐格表）：名字与稳定 key 后缀。 */
-const CHAPTER_STEPS = Object.freeze([
-	{ key: "write", name: "写" },
-	{ key: "audit", name: "审" },
-	{ key: "finalize", name: "复核" },
-]);
-
-/** 步名与 `segmentHuman` 只差这一格（票 01 §2 的表里这一步叫「最后检查与交付」）。 */
-const SEGMENT_STEP_TITLE = Object.freeze({ final: "最后检查与交付" });
-
-/** 材料准备那一步的 key（阶段 1 没有分段，但票 01 Q2 裁决它算第一步）。 */
-export const MATERIAL_STEP_KEY = "material";
-
-/** 章内三步各自的稳定 key 后缀（React key 与"从步反查段"都靠它）：`chapter-3:write`。 */
-export const chapterStepKey = (segmentKey, stepKey) => `${segmentKey}:${stepKey}`;
-
-/**
- * 章内五态 → 写 / 审 / 复核 三步各走到哪（票 01 §2 的完成判据）。
- * `writing`→写在动；`auditing`→审定稿前审在动；`audited`→审完了等复核；`finalizing`→复核在动；
- * `done`→三步都完（该章交工，chapters.js 的唯一写入点）。
- * `stage` 为 null（demo / 旧账本 / 主 AI 没上报）时**只有段级状态可用**：段 done＝三步都完；
- * 段 active＝正在做这一章，机器分辨不出做到哪一步，就只认「写」在动——**不为凑数手工编步**。
- */
-function chapterStepStatuses(stage, segStatus) {
-	if (stage === "writing") return ["active", "pending", "pending"];
-	if (stage === "auditing") return ["done", "active", "pending"];
-	if (stage === "audited") return ["done", "done", "pending"];
-	if (stage === "finalizing") return ["done", "done", "active"];
-	if (stage === "done") return ["done", "done", "done"];
-	if (segStatus === "done") return ["done", "done", "done"];
-	// 章段今天不会出现 waiting-user（buildProcessMap 只给 done/active/pending）；真出现时
-	// 把「轮到你」落在第一步上，不猜后面两步。
-	if (segStatus === "waiting-user") return ["waiting-user", "pending", "pending"];
-	if (segStatus === "active") return ["active", "pending", "pending"];
-	return ["pending", "pending", "pending"];
-}
-
-/**
- * 材料准备这一步走到哪（票 01 §1）：完成判据＝**书已进阶段 2**（`meta.phase >= 2`，不引新数据）。
- * 四态：`phase >= 2` → 已完成；`phase === 1 && status === 'running'` → 我正在做（转换中）；
- * 否则（`active`＝还没上传材料）→ 轮到你。
- * 只喂了分段、没给 meta 时，用「读材料挑重点那一段动过没有」反推阶段 1 已经过去——阶段 2 的段
- * 只有当书进了阶段 2 才不是 pending，这是机器事实、不是猜。
- */
-function materialStepStatus(meta, segments) {
-	const phase = Number.isInteger(meta?.phase) ? meta.phase : null;
-	if (phase !== null) {
-		if (phase >= 2) return "done";
-		return phase === 1 && meta?.status === "running" ? "active" : "waiting-user";
-	}
-	const explore = segments.find((seg) => seg?.key === "explore");
-	return explore !== undefined && explore.status !== "pending" ? "done" : "pending";
-}
-
-/** `stepsOf`/`stepCount` 的入参归一：`{ segments, meta }`（裸数组＝只给了分段、没有 meta）。 */
-function stepPayloadOf(payload) {
-	if (Array.isArray(payload)) return { segments: payload, meta: undefined };
-	return {
-		segments: Array.isArray(payload?.segments) ? payload.segments : [],
-		meta: payload?.meta ?? undefined,
-	};
-}
-
-/**
- * 章数 N：票 01 §2 的口径取自 `meta.outline.chapters`（N 就是已排定的章数）；
- * 缺了（或比实际章段少）按章段数兜底，两头取大——只为了不让 3N+10 少算。
- */
-function chapterCountOf(segments, meta) {
-	const planned = Array.isArray(meta?.outline?.chapters)
-		? meta.outline.chapters.length
-		: 0;
-	const fromSegments = segments.filter((seg) => seg?.kind === "chapter").length;
-	return Math.max(planned, fromSegments);
-}
-
-/** 章段的章号：`seg.key`（`chapter-3`）是权威机器身份；认不出退回它在章段里的序号。 */
-function chapterNoOfSegment(seg, ordinal) {
-	const match = /^chapter-(\d+)$/.exec(String(seg?.key ?? ""));
-	return match === null ? ordinal : Number(match[1]);
-}
-
-/** 章内五态的客户端兜底：读 `meta.chapterPipeline[n-1].stage`（0 基，与 rules.js/chapters-map.js 同处）。 */
-function chapterPipelineStage(meta, chapterNo) {
-	const pipeline = Array.isArray(meta?.chapterPipeline) ? meta.chapterPipeline : [];
-	const entry = pipeline[chapterNo - 1];
-	return entry !== null && typeof entry === "object" ? (entry.stage ?? null) : null;
-}
-
-/** 章内三步的阶段号：段在就 `phaseOfSegment`（服务端优先、kind 兜底），段不在就是章段的阶段号。 */
-function chapterStepPhase(seg) {
-	const phase = seg === null || seg === undefined ? null : phaseOfSegment(seg);
-	return Number.isInteger(phase) ? phase : SEGMENT_PHASE.chapter;
-}
-
-/**
- * 全书每一步（按阶段 1→6 排好；一行一步、四态）。人眼的工作单位就是它。
- *
- * @param {{segments?: object[], meta?: object}|object[]} payload
- *   `segments` 取自 `/textbook/process`，`meta` 取自 `/textbook/events`（后者 payload 里**没有**
- *   meta，两件是分开来的，调用点自己并成 `{ segments, meta }`）。
- * @returns {Array<{key:string,no:number,title:string,phase:(number|null),status:string,
- *   statusWord:string,chapter:(number|null),segmentKey:(string|null),segment:(object|null),
- *   canDeepModify:boolean}>}
- *   · `key`：稳定且唯一（段步＝`seg.key`；章内三步＝`chapter-N:write|audit|finalize`；
- *     材料准备＝`MATERIAL_STEP_KEY`）；
- *   · `segmentKey`/`segment`：**这一步归属哪一段**——定点修改的粒度仍是段，UI 从步反查段靠它
- *     （材料准备那一步没有段，两者为 null；旧 payload 缺章段时补出来的章步也是 null）；
- *   · `status`：段状态四态（done / active / waiting-user / pending）——章内三步另按五态细分；
- *   · `canDeepModify`：段级能力（材料准备恒 false——票 01 Q7：它不可定点修改）。
- */
-export function stepsOf(payload) {
-	const { segments, meta } = stepPayloadOf(payload);
-	const steps = [];
-
-	const pushMaterialStep = () => {
-		const status = materialStepStatus(meta, segments);
-		steps.push({
-			key: MATERIAL_STEP_KEY,
-			title: PHASE_UI[1] ?? "",
-			phase: 1,
-			status,
-			statusWord: stepWord(status),
-			chapter: null,
-			segmentKey: null,
-			segment: null,
-			canDeepModify: false,
-		});
-	};
-
-	const pushChapterSteps = (n, seg) => {
-		const stage = seg?.stage ?? chapterPipelineStage(meta, n);
-		const statuses = chapterStepStatuses(stage, seg?.status);
-		const segmentKey = seg?.key ?? `chapter-${n}`;
-		for (let i = 0; i < CHAPTER_STEPS.length; i += 1) {
-			steps.push({
-				key: chapterStepKey(segmentKey, CHAPTER_STEPS[i].key),
-				title: `第 ${n} 章 · ${CHAPTER_STEPS[i].name}`,
-				phase: chapterStepPhase(seg),
-				status: statuses[i],
-				statusWord: stepWord(statuses[i]),
-				chapter: n,
-				segmentKey: seg?.key ?? null,
-				segment: seg ?? null,
-				canDeepModify: seg?.canDeepModify === true,
-			});
-		}
-	};
-
-	const pushSegmentStep = (seg) => {
-		steps.push({
-			key: String(seg?.key ?? ""),
-			title: SEGMENT_STEP_TITLE[seg?.key] ?? segmentHuman(seg),
-			phase: phaseOfSegment(seg),
-			status: seg?.status ?? "pending",
-			statusWord: stepWord(seg?.status),
-			chapter: null,
-			segmentKey: seg?.key ?? null,
-			segment: seg ?? null,
-			canDeepModify: seg?.canDeepModify === true,
-		});
-	};
-
-	pushMaterialStep();
-
-	const chapterSegs = segments
-		.filter((seg) => seg?.kind === "chapter")
-		.map((seg, index) => ({ seg, n: chapterNoOfSegment(seg, index + 1) }))
-		.sort((a, b) => a.n - b.n);
-	const byChapterNo = new Map(chapterSegs.map((row) => [row.n, row.seg]));
-	const chapterTotal = chapterCountOf(segments, meta);
-
-	for (let phase = 2; phase <= 6; phase += 1) {
-		const rows = segments.filter((seg) => phaseOfSegment(seg) === phase);
-		if (phase === 5) {
-			// 章内三步：段在就按段展开；段不在（旧 payload、或只给了 meta 的大纲）按章号补出来、
-			// 状态取 pending——「章排定了」这件事本身就在 meta 里，不让一条章步凭空消失。
-			for (let n = 1; n <= chapterTotal; n += 1)
-				pushChapterSteps(n, byChapterNo.get(n));
-			for (const seg of rows) if (seg?.kind !== "chapter") pushSegmentStep(seg);
-			continue;
-		}
-		for (const seg of rows) pushSegmentStep(seg);
-	}
-	// 阶段归属认不出的分段（旧 payload 连 kind 都没有）不静默丢：挂在末尾，phase 为 null。
-	for (const seg of segments) if (phaseOfSegment(seg) === null) pushSegmentStep(seg);
-
-	return steps.map((step, index) => ({ no: index + 1, ...step }));
-}
-
-/**
- * 全书步数口径（票 01 §2）：总数 = **3N + 10**；章未排定时**只报已知的步**、`total` 给 null。
- *
- * @returns {{chapters:number, chaptersPlanned:boolean, known:number,
- *   total:(number|null), remaining:number}}
- *   · `chapters`：N（取自 `meta.outline.chapters`，缺了按章段数兜底）；
- *   · `chaptersPlanned`：N>0——界面「全书 3N+10 步」还是「已知 10 步 · 章节排定后补齐」的分叉；
- *   · `known`：现在数得出来的步数（章未排定时＝10；排定后 === `total`）；
- *   · `total`：3N + 10；章未排定时 **null**（不按默认章数猜），那句话由 UI 拼；
- *   · `remaining`：还没完成的步数（「还剩 M 步」）。
- */
-export function stepCount(payload) {
-	const { segments, meta } = stepPayloadOf(payload);
-	const steps = stepsOf(payload);
-	const chapters = chapterCountOf(segments, meta);
-	return {
-		chapters,
-		chaptersPlanned: chapters > 0,
-		known: steps.length,
-		total: chapters > 0 ? 3 * chapters + 10 : null,
-		remaining: steps.filter((step) => step.status !== "done").length,
-	};
-}
-
-/** 一步的名字（人眼看到的字；组件取词只走这里，别在别处拼）。 */
-export function stepLabel(step) {
-	return String(step?.title ?? "");
-}
-
-/** 从一步反查它归属的那一段（定点修改的粒度仍是段；材料准备那一步没有段 → null）。 */
-export function stepSegment(step) {
-	return step?.segment ?? null;
-}
-
-/** 每一步走到哪了 → 工作台状态词（CONTEXT.md：只允许这三个词 + 还没到）。 */
 export function stepWord(status) {
 	if (status === "done") return "已完成";
 	if (status === "waiting-user") return "轮到你";
 	if (status === "active") return "我正在做";
 	return "还没到这一步";
+}
+
+
+// 这些事件只用来圈定「当前这一轮转换」；**不把 stage-start / agent-start 当计时起点**。
+// 转换期可靠的可见事实是本轮 mineru-progress：首条之后，后续每条都只是心跳，不能重置已用时长。
+const CONVERSION_RUN_BOUNDARIES = new Set([
+	"textbook/stage-start",
+	"textbook/agent-start",
+	"textbook/agent-end",
+	"textbook/error",
+	"textbook/rollback",
+	"textbook/source-added",
+]);
+
+function currentConversionProgress(events) {
+	const list = Array.isArray(events) ? events : [];
+	let runStart = 0;
+	for (let i = list.length - 1; i >= 0; i -= 1) {
+		if (CONVERSION_RUN_BOUNDARIES.has(list[i]?.type)) {
+			runStart = i + 1;
+			break;
+		}
+	}
+	const progress = [];
+	for (let i = runStart; i < list.length; i += 1) {
+		const event = list[i];
+		const stage = typeof event?.data?.stage === "string" ? event.data.stage.trim() : "";
+		if (event?.type === "textbook/mineru-progress" && stage !== "") progress.push(event);
+	}
+	return { first: progress[0] ?? null, last: progress[progress.length - 1] ?? null };
+}
+
+function eventTime(event) {
+	return Number.isFinite(event?.time) && event.time > 0 ? event.time : null;
+}
+
+/**
+ * 材料转换期的唯一一行活动明细；上传卡与阶段页材料清单共用这一份。
+ *
+ * 计时起点取**当前这一轮最早一条可见 mineru-progress**：本票不把 stage-start / agent-start
+ * 当作跨屏计时契约；即便某轮账本里碰巧有这类事件，后续 progress 每几秒刷新一次，
+ * 拿最新一条也会把总时长清零。首条进度尚未到达时，
+ * `meta.updatedAt` 是 `converting=true` 那次写入的时刻，只在这段窗口里兜底；已有进度后绝不再用它。
+ * 没有 stage 时只说「转换材料」，不猜 n/m。
+ */
+export function materialConversionActivityText(meta, events, now = Date.now()) {
+	if (meta?.converting !== true) return null;
+	const { first, last } = currentConversionProgress(events);
+	const stage = typeof last?.data?.stage === "string" ? last.data.stage.trim() : "";
+	const startedAt = eventTime(first) ?? eventTime({ time: meta?.updatedAt });
+	const parts = [stepWord("active"), stage === "" ? "转换材料" : stage];
+	if (startedAt !== null) parts.push(`已用 ${humanDuration(now - startedAt)}`);
+	return parts.join(" · ");
 }
 
 /** 每个阶段在干什么（阶段页顶部一句说明；界面词）。 */

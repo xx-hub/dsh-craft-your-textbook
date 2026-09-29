@@ -11,20 +11,19 @@ import { S } from "./styles.js";
 // 双端共享领域件：六阶段全称、素材角色、角色识别兜底、事件含义表、范例章号（单一事实来源）。
 import { PHASES, ROLES, guessRoleFromName, EVENT_META, MAX_UPLOAD_BYTES, uploadTooLargeMessage, goldChapterNo } from "../domain-rules.js";
 // 界面用词表（批 2）：阶段片不再各写一套短标签，取词只此一处。
-import { PHASE_UI, phaseUi, gateHuman, stageLabelHuman, segmentHuman, eventHuman, checkHuman } from "./view-rules.js";
+import { PHASE_UI, phaseUi, gateHuman, stageLabelHuman, segmentHuman, eventHuman, checkHuman, materialConversionActivityText } from "./view-rules.js";
 // 章完成度的唯一一份口径（票 14）：章级「交工通过」事件（含最佳范例章那一步）+ 该章无未处置意见。
 // 章节卡与状态卡的数字都取它，界面里不许有第二份推导。
-import { deriveDoneSet, hasPendingReview, humanDuration } from "./rules.js";
+import { deriveDoneSet, hasPendingReview, humanDuration, formatTime } from "./rules.js";
 
 // ── 机器检查清单（批 2，2026-09-20 用户拍板）─────────────────────────────────
 // 原来 12 条 ✅ 平铺在卡里，加上 AI 自查 6 条 = 18 行绿勾，把唯一的决策按钮挤出首屏。
 // 改成一行摘要 + 折叠细则；**有没过项时不折叠**——失败项不该藏起来。
 // 终检认可卡与交付卡共用（原来两处逐字节重复）。
 //
-// 票 20（2026-09-24 拍板）：终检认可卡对**没过的**检查项给一个「让 AI 按这条去改」入口——
-// 指令由机器按该项 `note` 起草（`draftFixInstruction`），用户只点一下，走既有终检修订回路。
-// 入口由调用方传 `onFix` 才渲染（交付卡不传：那时清单必然全过）。
-export function MachineChecks({ checks, onFix, fixDisabled }) {
+// 票 26（2026-09-25 拍板）：票 20 的机器修复入口按钮已收——有检查项没过时根本走不到终检
+// 认可卡（`chapters.js` 直接带 `issues` 打回主 AI），机器本来就把起草的指令自动送回；人只剩判断，不点。
+export function MachineChecks({ checks }) {
 	const list = checks ?? [];
 	if (list.length === 0) return null;
 	const failed = list.filter((check) => check.ok !== true).length;
@@ -62,19 +61,6 @@ export function MachineChecks({ checks, onFix, fixDisabled }) {
 				{ style: { opacity: 0.7, marginLeft: "6px", fontSize: "12px" } },
 				check.note ?? "",
 			),
-			// 票 20：没过的项各给一个「照这条让 AI 去改」的入口（人只点一下，不必自己想改什么）。
-			check.ok !== true && typeof onFix === "function"
-				? createElement(
-						"button",
-						{
-							style: { ...S.smallLink, marginLeft: "8px" },
-							disabled: fixDisabled === true,
-							title: "把机器起草的这句话交给 AI，它会照着改整本后重新做最后检查",
-							onClick: () => onFix(check),
-						},
-						"🔁 让 AI 按这条去改",
-					)
-				: null,
 		),
 	);
 	const summary =
@@ -103,23 +89,6 @@ export function MachineChecks({ checks, onFix, fixDisabled }) {
 		),
 		createElement("div", { style: { margin: "6px 0 0" } }, ...rows),
 	);
-}
-
-/**
- * 机器起草的修复指令（票 20，2026-09-24 用户拍板）。
- *
- * 判据来自**该项自己的 `note`**——机器写的那句人话（重复标题那项已把撞车的标题写进句子里），
- * 这里只加一句抬头点到是"哪一项没过"，不新造内容、不猜改法：用户点一下，这句话就作为
- * `final-approve(approved:false, note)` 的 note 提交，走既有终检修订回路（`finalRedoNote`
- * → `handoff('final')`），AI 照着改整本、机器重新做最后检查。
- *
- * 截到 500 字：服务端 `final-approve` 的 note 上限就是 500（`actions/gates.js`），
- * 别让机器起草的句子在门口被静默截断。
- */
-export function draftFixInstruction(check) {
-	const name = checkHuman(check?.name ?? "");
-	const note = String(check?.note ?? "").trim();
-	return `机器检查没过「${name}」：${note}`.slice(0, 500);
 }
 
 function cardText(event) {
@@ -196,6 +165,199 @@ function cardIcon(event) {
 	if (event.type === "textbook/gate-decision" || event.type === "textbook/outline-decision")
 		return event.data?.approved === true ? "✅" : "↩️";
 	return EVENT_META[event.type]?.emoji ?? "•";
+}
+
+// ── 「之前的过程」回放行：摘要 / 全文 / 重复聚合（票 07，P11·P23·P25·P28·P29·P57）──
+//
+// 病灶是**渲染缺口**不是采集缺口：账本 `data` 里早就写好了原因文案（`engine.js` 里的
+// 「交工被拒：<原因>」「出错：<message>」「驳回理由」），人话映射 `cardText()` 早就在，
+// 而回放行体只出 `EVENT_META.label` 兜底、**根本不渲染 `data`**。故这里**不新增任何采集**，
+// 只把已有的字段露出来。
+//
+// 🔴 硬天花板（团队踩过一次，`smoke-test.mjs` 的行首探针）：**行首不许换成 `cardText`**——
+// 行首只出客户端词表的事件类型词，摘要作为 `<strong>` **之后**的一个 span 追加。
+// 下面每条取词都遵守同一条取向：服务端 label 一律经 `stageLabelHuman` 译，**译不动就不出**
+// （宁可这一格不出词，也不把 `源探查`／某个没登记的机器串摆到人眼前——与行首同一口径）。
+
+/** 摘要的字数上限：同口径收窄（`smoke-test.mjs` 靠行文本长度唯一定位那两条样张行，
+ *  摘要不收窄会把它们顶出那个上限、让定位失败）。 */
+export const REPLAY_SUMMARY_MAX = 60;
+
+/** 压成一行、超长截断（截断号即 `engine.js` 那句 `.slice(0, 200)` 的同一口径）。 */
+const clipText = (raw, max = REPLAY_SUMMARY_MAX) => {
+	const oneLine = String(raw ?? "").replace(/\s+/g, " ").trim();
+	return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max)}…`;
+};
+
+/** 交办阶段标签 → 界面词；**译不动（未登记）就不出**——不猜、不露机器串。 */
+const stageNameFromLabel = (label) => {
+	const raw = String(label ?? "");
+	if (raw === "") return "";
+	const human = stageLabelHuman(raw);
+	// `stageLabelHuman` 对未登记的原样返回（那一句是它自己的既定取向：宁可露机器词也不猜错）；
+	// 但在**回放摘要**这一层我们反过来：出错了就整格不出，别让机器串混进行首那一行里。
+	return human === raw ? "" : human;
+};
+
+const goldOpinionVerbs = { dislike: "不喜欢", drop: "不需要", change: "要改成" };
+
+/**
+ * 连续同型的转换进度 → 一条（票 07 的 P23：16 条一模一样的「材料转换」占满前 20 行）。
+ * 只合并**相邻**的连续段（别的类型夹在中间就断开）；每条仍带 `events`，供摘要与展开用。
+ * 合成一行不是把中间那些进度丢掉——`event` 取首条、`events` 留全部，展开看得到每一条。
+ */
+export function collapseConversionRuns(events) {
+	const list = Array.isArray(events) ? events : [];
+	const rows = [];
+	let run = null;
+	for (const event of list) {
+		if (event?.type === "textbook/mineru-progress") {
+			if (run !== null) run.events.push(event);
+			else run = { event, events: [event] };
+			continue;
+		}
+		if (run !== null) {
+			rows.push(run);
+			run = null;
+		}
+		rows.push({ event, events: [event] });
+	}
+	if (run !== null) rows.push(run);
+	return rows.map((row, index) => ({ ...row, isLast: index === rows.length - 1 }));
+}
+
+/**
+ * 回放行的摘要（`<strong>` 行首**之后**的那一段）。
+ * 逐条对应走查 P29 的对照表：账本 `data` 里早有的字段，这里只负责露出来。
+ */
+export function replayRowSummary(row, ctx = {}) {
+	const event = row?.event ?? null;
+	if (event === null || typeof event !== "object") return "";
+	const data = event.data ?? {};
+	const run = Array.isArray(row.events) ? row.events : [event];
+	// 转换进度聚合成一条：给时间跨度 + 次数（不说"已完成"——那一段若是被打回后重来的，
+	// 说"已完成"就是句假话；只说机器自己的 `converting` 仍为真的那一次还在进行）。
+	if (event.type === "textbook/mineru-progress") {
+		if (run.length < 2) return clipText(String(data.stage ?? ""));
+		const from = formatTime(run[0].time);
+		const to = formatTime(run[run.length - 1].time);
+		const tail = ctx.converting === true && row.isLast === true ? "，进行中" : "";
+		return clipText(`（${from}–${to}，${run.length} 次进度${tail}）`);
+	}
+	switch (event.type) {
+		// 阶段名按**阶段号**取词表（`data.label` 是服务端 PHASE_LABELS，机器词）——
+		// 走查 P29 记的「连阶段名都丢了」就是这里。取不到号就整格不出，不回落机器 label。
+		case "textbook/phase-start":
+		case "textbook/phase-end":
+			return phaseUi(data.phase);
+		case "textbook/stage-start":
+		case "textbook/agent-start":
+		case "textbook/agent-end":
+			return stageNameFromLabel(data.label ?? data.stage);
+		// 进度叙述：这一行原来只有「⏳ 进度」三个字，叙述本身没人看得见。
+		case "textbook/progress":
+			return clipText(
+				`${data.label ?? ""}${data.detail ? `：${data.detail}` : ""}`,
+			);
+		// 拍板结果：通过的那一档行首已经说完了；驳回要把**理由与用户整段 note**露出来。
+		case "textbook/gate-decision":
+		case "textbook/outline-decision":
+			if (data.approved === true) return "";
+			return clipText(
+				[...(data.reasons ?? [])].join("、") + (data.note ? `：${data.note}` : ""),
+			);
+		// P11：交工被拒的原因（机器解析到的行键/样例/契约行形状都在这一句里）。
+		case "textbook/submit-rejected":
+			return clipText(data.reason);
+		// P57：机器兜底那一次的 `message` 本身就以「机器兜底发现 N 项没过：」开头
+		//（`workflow/actions/chapters.js` 落账时的原话），整句露出来＝这一行自己就说清了
+		// 是机器兜的底；不再另加一句前缀，免得同一行里把「机器兜底」说两遍。
+		case "textbook/error":
+			return clipText(data.message);
+		case "textbook/hint":
+			return clipText(data.text);
+		case "textbook/review":
+			return clipText(data.comment);
+		case "textbook/ai-report":
+			return clipText(data.report);
+		case "textbook/deep-modify":
+			return clipText(data.note);
+		case "textbook/quality": {
+			const checks = Array.isArray(data.checks) ? data.checks : [];
+			const failed = checks.filter((check) => check.ok !== true);
+			if (failed.length === 0) return "";
+			return clipText(
+				`${failed.length} 项没过：${failed
+					.map((check) => `${checkHuman(check.name)}（${check.note ?? "没写原因"}）`)
+					.join("；")}`,
+			);
+		}
+		// P25：意见的落点/类型/内容都在 `data.opinion` 里（原来的渲染读错了字段、印出 #undefined）。
+		case "textbook/gold-opinion": {
+			const opinion = data.opinion ?? {};
+			const verb = goldOpinionVerbs[opinion.kind] ?? opinion.kind ?? "";
+			return clipText(
+				`${opinion.target ?? "笼统"}·${verb}${opinion.wish ? `：${opinion.wish}` : ""}`,
+			);
+		}
+		case "textbook/style-note":
+			return clipText(data.styleNote?.text);
+		case "textbook/intervention":
+			return clipText(data.text);
+		default:
+			// 没登记取法的类型整格不出摘要——宁可少说一句，也不摆一句猜出来的话。
+			return "";
+	}
+}
+
+/**
+ * 回放行的**全文**（行内那颗纯展开控件展开后给的东西）。
+ * 「有超出摘要之外的全文才给展开控件」：没有全文的行（阶段开始、豁免放行……）一个控件都不长，
+ * 既不摆死按钮，也不撞「同一排可点性一致」。
+ */
+export function replayRowDetail(row) {
+	const event = row?.event ?? null;
+	if (event === null || typeof event !== "object") return "";
+	const data = event.data ?? {};
+	const run = Array.isArray(row.events) ? row.events : [event];
+	// 聚合行展开＝那 N 条进度逐条（票面：至少折叠成「展开 N 条进度」）。
+	if (event.type === "textbook/mineru-progress")
+		return run
+			.map(
+				(item) =>
+					`${formatTime(item.time)}　${String(item.data?.stage ?? "")}${
+						item.data?.file ? `（${item.data.file}）` : ""
+					}`,
+			)
+			.join("\n");
+	switch (event.type) {
+		case "textbook/submit-rejected":
+			return String(data.reason ?? "");
+		case "textbook/error":
+			return String(data.message ?? "");
+		case "textbook/hint":
+			return String(data.text ?? "");
+		case "textbook/review":
+			return String(data.comment ?? "");
+		case "textbook/ai-report":
+			return String(data.report ?? "");
+		case "textbook/deep-modify":
+			return String(data.note ?? "");
+		case "textbook/gold-opinion":
+			return String(data.opinion?.wish ?? "");
+		case "textbook/gate-decision":
+		case "textbook/outline-decision":
+			return [data.note ?? "", [...(data.reasons ?? [])].join("、")]
+				.filter((part) => String(part).trim() !== "")
+				.join("\n");
+		case "textbook/quality":
+			return (Array.isArray(data.checks) ? data.checks : [])
+				.filter((check) => check.ok !== true)
+				.map((check) => `${checkHuman(check.name)}：${check.note ?? "没写原因"}`)
+				.join("\n");
+		default:
+			return "";
+	}
 }
 
 export { cardText, cardIcon };
@@ -296,6 +458,16 @@ export function WizardCard(props) {
 	const [agree, setAgree] = useState(false);
 	const [hint, setHint] = useState("");
 	const [error, setError] = useState(null);
+
+	// 票 17（走查 P5）：`error` 记的是**上一次提交的结果**，不是**当前的校验状态**——
+	// 用户改正输入后那条红字就成了一句过期的话，还挂在控件下面，要再点一次提交才消失。
+	// 口径收在这里一处：「**阻塞已不存在 ⇒ 提示必须撤**」，三个被校验的字段共用它。
+	// ⚠️ 只撤提示，**不顺手加新的实时校验**（提交前就拦人，与「机器检查契约原则」相悖，
+	// 也不符合「建档」词条：必填项在提交那一刻拦）。
+	const edit = (setter) => (next) => {
+		setError(null);
+		setter(next);
+	};
 
 	// 书名/目标去前缀（前端兜底）：AI 建议偶尔带「开始：」「书名：」等口水前缀，填入前剥掉。
 	// 源头净化在 content-lib.js wizardSuggest（后端），这里防历史/其他来源漏网。
@@ -422,7 +594,7 @@ export function WizardCard(props) {
 			style: S.input,
 			placeholder: "比如：初中数学·有理数",
 			value: name,
-			onChange: (e) => setName(e.target.value),
+			onChange: (e) => edit(setName)(e.target.value),
 		}),
 		createElement("label", { style: S.label }, "这本书学完，要能做到什么？"),
 		createElement("textarea", {
@@ -430,7 +602,7 @@ export function WizardCard(props) {
 			placeholder:
 				"比如：能独立做对教材配套的基础题，并说出每个概念是什么、为什么、怎么用",
 			value: goal,
-			onChange: (e) => setGoal(e.target.value),
+			onChange: (e) => edit(setGoal)(e.target.value),
 		}),
 		createElement("label", { style: S.label }, "给谁用？"),
 		createElement(
@@ -471,7 +643,7 @@ export function WizardCard(props) {
 			createElement("input", {
 				type: "checkbox",
 				checked: agree,
-				onChange: (e) => setAgree(e.target.checked),
+				onChange: (e) => edit(setAgree)(e.target.checked),
 			}),
 			" 我确认：只上传我有权使用的材料；造出来的是教学参考，AI 可能讲错，使用前我会请老师/家长复核",
 		),
@@ -560,7 +732,16 @@ export function WizardCard(props) {
 // ── 上传区（Phase 1） ───────────────────────────────────────────────────────
 
 export function UploadArea(props) {
-	const { sources, converting, onUpload, onConvert, onIdentify, busy } = props;
+	const {
+		sources,
+		converting,
+		conversionStartedAt,
+		events,
+		onUpload,
+		onConvert,
+		onIdentify,
+		busy,
+	} = props;
 	const [pending, setPending] = useState([]); // [{ name, file, role }]
 	const [identifying, setIdentifying] = useState(false);
 	const [uploading, setUploading] = useState(false);
@@ -662,6 +843,11 @@ export function UploadArea(props) {
 		}
 		setUploading(false);
 	};
+
+	const conversionText = materialConversionActivityText(
+		{ converting: converting === true, updatedAt: conversionStartedAt },
+		events,
+	);
 
 	return createElement(
 		"div",
@@ -819,9 +1005,9 @@ export function UploadArea(props) {
 					),
 					converting
 						? createElement(
-								"span",
-								{ style: { marginLeft: "8px", fontSize: "12px" } },
-								"转换中……",
+								"p",
+								{ style: { margin: "8px 0 0", fontSize: "12px" } },
+								`🤖 ${conversionText}`,
 							)
 						: null,
 				)
@@ -1394,14 +1580,9 @@ export function FinalApprovalCard(props) {
 					),
 				)
 			: null,
-		// 票 20：没过的检查项各给一个「让 AI 按这条去改」入口——指令由机器按该项 note 起草，
-		// 点一下即走既有的「不满意，让 AI 改」同一条回路（final-approve approved:false + note），
-		// 不新开通道。交付卡不传 onFix：交付时清单必然全过，那里没有可改的项。
-		createElement(MachineChecks, {
-			checks,
-			onFix: (check) => onReject(draftFixInstruction(check)),
-			fixDisabled: busy,
-		}),
+		// 票 26：机器检查清单（失败项显示 ❌，票 20 成果）。原票 20 的修复按钮已收——
+		// 没过时不走这卡，指令由机器自动随 issues 送回主 AI；自由文本驳回（onReject）照旧。
+		createElement(MachineChecks, { checks }),
 		(styleNotes ?? []).length > 0
 			? createElement(
 					"div",

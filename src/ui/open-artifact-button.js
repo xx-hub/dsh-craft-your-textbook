@@ -7,7 +7,7 @@
  *
  * ⚠️ 它原住在 `src/ui/phase-page.js`（票 02 把内部件升成具名导出 `OpenArtifactButton`）。
  * 票 09 要章节卡（`chapters-map.js`）也用它，而 `phase-page.js` 已经 import 了 `chapters-map.js`
- * （`foldKnowledgeMap` / `stepRowText`）——反过来 import 就成环
+ * （`foldKnowledgeMap`）——反过来 import 就成环
  * （`chapters-map → phase-page → chapters-map`），且环上两个文件都是渲染路径上的域文件。
  * 故把这一件搬到**中性模块**：`phase-page.js` 原样再导出它（票 02 的导出表面不变），
  * `chapters-map.js` 从这里 import——两个域都不碰对方的实现，也不引入环。

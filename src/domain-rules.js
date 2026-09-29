@@ -14,6 +14,60 @@
  * （logEntryText / announceText / cardText 各自的措辞与冗长）仍是单侧展示，不进这里。
  */
 
+// ── 字数口径 ────────────────────────────────────────────────────────────────
+
+/**
+ * 全书唯一的汉字计数判据（CONTEXT.md「字数」词条）：只数 CJK 统一汉字，
+ * 数字、字母、标点、空白均不计。展示与派生都调用这里，禁止别处再写一份量法。
+ */
+const HANZI_RE = /[\u4e00-\u9fff]/g;
+
+/** 统计文本中的汉字数；非字符串按空文本处理。 */
+export function countHanzi(text) {
+	return String(text ?? "").match(HANZI_RE)?.length ?? 0;
+}
+
+// ── 主 AI 上下文占用（宿主会话投影）──────────────────────────────────────────────
+//
+// 折算口径为何在这里而不在 UI 侧（票 `walkthrough-fixes/28`）：**a 两侧都必须知道的规则**。
+// 界面那一半要把宿主的 `contextPressure` 投影值折成百分比，
+// 领任务说明那一半也要折同一份数（否则同一个数在两屏上说两个话）——
+// 所以口径只有这里一份。只有“界面那句话怎么写”（`contextOccupancySentence`）
+// 才算单侧展示文案，它留在 `src/ui/rules.js`。
+//
+// 数据源：宿主 `@deepseek-ai/dsh-token-meter` 的 `contextPressure` 会话投影
+// （与宿主输入区角标「上下文已用 51%」同一份数据）。快照与来源路径见
+// `docs/reference/dsh-context-occupancy-contracts.md`。
+
+/**
+ * 宿主 `contextPressure` 投影值 → 占用百分比（0-100 的整数）。
+ *
+ * 口径逐字照宿主 `@deepseek-ai/dsh-client-ui-conversation` 的 `contextOccupancy()`：
+ *   分子 = `projectedTokens ?? pressureTokens`（下一个请求真正要花多少，不是上一次报的）
+ *   分母 = `contextWindow`（最新一条路由容量）
+ *   结果 = `Math.min(100, Math.round(分子 / 分母 * 100))`
+ *   **任一缺失 → null**。
+ *
+ * ⚠️ 宿主自陈这三个字段各自 last-wins、**不是一次原子观测**：
+ * 换模型时可能配成「新容量 + 旧用量」直到下一次请求报用量。
+ * 它是**u7ed9人看的参考，不是计费或闸门输入**（上游逐字说法见快照）。
+ *
+ * **读不到就返回 null**：没报过用量、没适配器报容量、投影整个缺席，一律 null；
+ * 调用方必须照此**不渲染**（不显示 0%、不编一个百分比）。
+ * @param {unknown} pressure 宿主会话投影值 `ContextPressureProjection | undefined`
+ * @returns {number | null} 占用百分比，或 null（读不到）
+ */
+export function contextOccupancyPercent(pressure) {
+	if (pressure === null || typeof pressure !== "object") return null
+	const used = pressure.projectedTokens ?? pressure.pressureTokens
+	const capacity = pressure.contextWindow
+	if (!Number.isFinite(used) || !Number.isFinite(capacity) || capacity <= 0) {
+		return null
+	}
+	return Math.min(100, Math.round((used / capacity) * 100))
+}
+
+
 // ── 素材角色 ────────────────────────────────────────────────────────────────
 
 /** 素材角色五分类（canonical 集合；顺序即上传区下拉顺序）。 */
@@ -80,6 +134,33 @@ export const SEGMENT_PHASE = Object.freeze({
 	merge: 6,
 	final: 6,
 });
+
+// ── 章节流水线进度 ──────────────────────────────────────────────────────────
+
+/**
+ * Machine-valid-stage single source（机器合法 stage 的单一事实源）。
+ * ui/view-rules.js 与 ui/rules.js 的展示映射有意留在各自语义层，不在这里合并。
+ */
+export const CHAPTER_PROGRESS_STAGES = Object.freeze([
+	"writing",
+	"auditing",
+	"audited",
+	"finalizing",
+	"done",
+]);
+
+const CHAPTER_PROGRESS_LABELS = Object.freeze({
+	writing: "写",
+	auditing: "审",
+	audited: "审完待复核",
+	finalizing: "复核",
+	done: "交工",
+});
+
+export const CHAPTER_PROGRESS_REQUIREMENT =
+	`按章上报 progress：chapter=N；stage=${CHAPTER_PROGRESS_STAGES
+		.map((stage) => `${stage}（${CHAPTER_PROGRESS_LABELS[stage]}）`)
+		.join("|")}`;
 
 // ── 探查教学重点/难点（teachingFocus）────────────────────────────────────────
 
@@ -242,6 +323,12 @@ export function stageLabelHuman(label) {
 	// 「写第 3 章」已是人话；「自查第 3 章」的「自查」是机器视角（谁查谁？）→「检查」。
 	if (raw.startsWith("写第")) return raw;
 	if (raw.startsWith("自查第")) return raw.replace(/^自查/, "检查");
+	// 章级交工的真实形态（chapters.js stage-submit chapters 拼：「第N章《标题》完成（小助手执笔
+	// + 小助手审计 + 机器验货）」）——括号里的工序清单（谁执笔/谁检查/谁验货）是机器视角，人眼
+	// 不需要，整段吞掉；译法取「第 N 章《标题》完成」，章标题原样保留（与 segmentHuman 保留
+	// chapter- 前缀的口径同源，票 workbench-transitions/21 的裁决）。
+	const chapterDone = /^第\s*([0-9]+)\s*章《(.+?)》完成/.exec(raw);
+	if (chapterDone !== null) return `第 ${chapterDone[1]} 章《${chapterDone[2]}》完成`;
 	return raw;
 }
 
@@ -250,7 +337,10 @@ export function stageLabelHuman(label) {
 // 单一判据（ADR-0010 决策 2 与「有正文的产物」条；票 04/05 共用）：
 //   'preview' 有正文的产物 —— 「打开一份文件看看」交 DSH 右栏预览；
 //   'inline'  机器产物但有卡片内联人读形态 —— work/knowledge-map.json 折成清单（不进右栏）；
-//   'machine' 机器产物（project.json / timeline.jsonl / 源 PDF / 过程记录…）—— 不给人读。
+//   'machine' 机器产物（project.json / timeline.jsonl / 源 PDF / work/audit-NN.md…）—— 不给人读。
+//
+// ⚠️ **「过程记录」已从这一族挪走**（票 workbench-transitions/24 / ADR-0015 决策 1）：它是从建书到
+// 交付、写给人读的流水账，判为 'preview'。上面这行枚举是照 2026-08 的旧分类写的，别再把它并列回来。
 //
 // ⚠️ 判据是**显式清单**，不是扩展名、也不是「在项目目录里」：
 // 扩展名判据会把 knowledge-map.json 之外的机器产物一并放进来（票 04 收窄的正是这件事）。
@@ -288,16 +378,53 @@ export function productOpenMode(rel) {
 		path === "work/explore.md" || // 探查报告
 		path === "work/outline.md" || // 章节安排（设计关卡定下来的方案）
 		path === "work/style-spec.md" || // 写作规范（同为设计文档，步清单把它当产物列出）
-		path === "work/book.md" // 成品
+		path === "work/book.md" || // 成品
+		path === "过程记录.md" // 流水账（写给人读的全局产物；ADR-0015 决策 1：从「不给人读」那一族挪回这里）
 	) {
 		return "preview";
 	}
+	// 机器产物与源 PDF 不开预览（ADR-0010 决策 2/3）：project.json、timeline.jsonl、源 PDF、
+	// 机器审计 JSON（work/audit-NN.md，名字带 .md 也一样）、work/progress.md、work/style-line.md。
+	// ⚠️ 别把「过程记录」再并列回这里——它写给人读，ADR-0015 已把判据改回 `preview`。
 	return "machine";
 }
 
 /** 是否「打开一份文件看看」的产物（有正文 → 右栏预览）。 */
 export function isPreviewProduct(rel) {
 	return productOpenMode(rel) === "preview";
+}
+
+/** 产物路径归一化：反斜杠与 `./` 前缀不参与分类。 */
+function artifactPath(rel) {
+	return String(rel ?? "")
+		.replace(/\\/g, "/")
+		.replace(/^(?:\.\/)+/, "");
+}
+
+/**
+ * 产物的人读类型词（按路径形状判，不按扩展名猜）。
+ *
+ * ⚠️ 章节序号在名字层是宽松的（`\d+`），这与 productOpenMode 的严格两位白名单不同：
+ * 这里只负责给路径起一个类型词，不能因为旧书路径形状略有差异就退回「文件」。
+ * 双端共用的纯规则，不带 Node/React 依赖。
+ */
+const ARTIFACT_CHAPTER_NAME_RE = /^work\/chapter-(\d+)\.md$/;
+const ARTIFACT_ARCHIVED_RE = /^work\/_旧版产物\//;
+const ARTIFACT_GATE_PROPOSAL_RE = /^提案\//;
+const ARTIFACT_CONVERTED_SOURCE_RE = /^sources-md\//;
+
+/** 产物路径 → 人读类型词；认不出时返回「文件」。 */
+export function artifactKind(rel) {
+	const path = artifactPath(rel);
+	if (ARTIFACT_CHAPTER_NAME_RE.test(path)) return "正文";
+	if (ARTIFACT_ARCHIVED_RE.test(path)) return "旧稿";
+	if (ARTIFACT_GATE_PROPOSAL_RE.test(path)) return "拍板方案";
+	if (ARTIFACT_CONVERTED_SOURCE_RE.test(path)) return "材料转换稿";
+	if (path === "work/explore.md") return "挑重点的结果";
+	if (path === "work/outline.md") return "章节安排";
+	if (path === "work/style-spec.md") return "写作规范";
+	if (path === "work/book.md") return "成书";
+	return "文件";
 }
 
 // ── 账本事件类型 ────────────────────────────────────────────────────────────

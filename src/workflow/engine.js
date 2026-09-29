@@ -14,7 +14,7 @@
  * demo 与真实共用全部 6 个确认闸门（源探查/关卡/骨架/范例章/全章过目/终检认可）。
  */
 
-import { goldChapterNo, PHASES, EVENT_META, EVENT_TYPES, guessRoleFromName, gateHuman, stageLabelHuman, segmentHuman } from '../domain-rules.js'
+import { goldChapterNo, PHASES, EVENT_META, EVENT_TYPES, guessRoleFromName, gateHuman, stageLabelHuman, segmentHuman, CHAPTER_PROGRESS_REQUIREMENT } from '../domain-rules.js'
 import { homedir } from 'node:os'
 import { join, resolve, dirname, basename } from 'node:path'
 import { mkdirSync, readFileSync, existsSync, writeFileSync, statSync, appendFileSync, readdirSync, copyFileSync, rmSync, unlinkSync, rmdirSync, renameSync } from 'node:fs'
@@ -22,6 +22,7 @@ import { execFileSync } from 'node:child_process'
 import { isWithin } from '../path-guard.js'
 import { convertPdfBatch, readSettings, writeSettings } from '../mineru-lib.js'
 import { generateContent, resourceText } from '../content-lib.js'
+import { artifactDataForStage, artifactDataForLabel, artifactDataForChapter } from './artifact-fields.js'
 import { createHash } from 'node:crypto'
 
 
@@ -271,17 +272,28 @@ function logEntryText(event) {
     case 'textbook/intervention-done': return `📮 留言已处理：${data.text ?? ''}`
     case 'textbook/waiver': return `赦 ✅ 已获用户豁免「${WAIVER_ITEMS[data.item]?.label ?? data.item}」：${data.userNote ?? ''}`
     case 'textbook/waiver-revoke': return `赦 ↩️ 豁免已收回「${WAIVER_ITEMS[data.item]?.label ?? data.item}」，机器恢复拦截`
-    case 'textbook/pause': return `⏸ 已暂停（${data.reason ?? '用户在造书工作台点击强制中断'}）`
+    case 'textbook/pause': return `⏸ 已暂停（${data.reason ?? '用户在造书工作台点击暂停'}）`
     case 'textbook/resume': return `▶ 已继续`
     case 'textbook/outline-decision':
       return data.approved === true
         ? `✅ 章节安排已通过${data.note ? `\n\n用户备注：${data.note}` : ''}`
         : `↩️ 章节安排已驳回${data.note ? `\n\n用户意见：${data.note}` : ''}`
     case 'textbook/gold-opinion': {
+      // 票 09（走查 P26）：撤回那一支**先于**取 opinion 返回——`data.revoked === true` 的事件
+      // 没有 `opinion` 字段，硬往下走会渲染成「#undefined（笼统）undefined」那行乱码。
+      if (data.revoked === true) {
+        return `↩️ 已撤回${Number.isSafeInteger(data.chapter) ? `第 ${data.chapter} 章` : ''}的一条意见：AI 不再照它改，也不再拦这一章交工`
+      }
       const o = data.opinion ?? {}
       const verbs = { dislike: '不喜欢', drop: '不需要', change: '要改成' }
       const wish = typeof o.wish === 'string' && o.wish !== '' ? `：${o.wish}` : ''
-      return `✍️ 最佳范例章意见#${o.seq}（${o.target ?? '笼统'}）${verbs[o.kind] ?? o.kind}${wish}`
+      // 票 07（P25）：这一行原本读 `o.seq`（＝`data.opinion.seq`），而**意见的编号不在那里**——
+      // 落账时它在事件 `data` 的顶层（`workflow/actions/gold.js` 写的是 `{ seq, opinion:{ id, at, target, kind, wish, status } }`），
+      // 条目自身的 id 则嵌在 `data.opinion.id`。两处路径都取不到值，于是《过程记录.md》与右栏
+      // 那个「过程记录」面板**同一处**印出 `✍️ 最佳范例章意见#undefined`（一处字段写错、两个出口一起错
+      // ——它们共用本函数）。改成按「顶层编号 → 条目 id」的次序取，取不到就不印编号（不拿 undefined 上屏）。
+      const no = data.seq ?? o.id
+      return `✍️ 最佳范例章意见${no === undefined || no === null || no === '' ? '' : `#${no}`}（${o.target ?? '笼统'}）${verbs[o.kind] ?? o.kind}${wish}`
     }
     case 'textbook/gold-seal': return `🏆 最佳范例章已定稿（v${data.version ?? '?'}），意见沉淀入风格线（${data.count ?? 0} 条）`
     case 'textbook/gold-chapter':
@@ -469,7 +481,7 @@ function announceText(event) {
       return `🎨 风格线收回了一条意见（${String(data.styleNote?.text ?? '').slice(0, 40)}）`
     case 'textbook/intervention': return `📮 已留言：${String(data.text ?? '').slice(0, 60)}（不打断 AI 手里的活，下个停靠点处理）`
     case 'textbook/waiver': return `✅ 已按你的特殊要求放行：${WAIVER_ITEMS[data.item]?.label ?? data.item}`
-    case 'textbook/pause': return `⏸ 已暂停（${data.reason ?? '用户在造书工作台点击强制中断'}）`
+    case 'textbook/pause': return `⏸ 已暂停（${data.reason ?? '用户在造书工作台点击暂停'}）`
     case 'textbook/resume': return `▶ 已继续`
     case 'textbook/outline-decision':
       return data.approved === true
@@ -672,8 +684,13 @@ function copyTreeSync(src, target) {
  * Node **原生崩溃**（0xC0000409 STATUS_STACK_BUFFER_OVERRUN，直接崩掉整个宿主
  * 进程，JS try/catch 拦不住）。F27 走查只记录过它"静默失效"，没料到还会硬崩。
  * 因此**真实默认路径不再调用 fs.rmSync 递归删除**，改用手动逐文件删除
- * （readdirSync + unlinkSync/rmdirSync，实测安全）；删不干净时仍走
- * `cmd /c rmdir /s /q` 兜底，再失败则保留待下次清理。
+ * （readdirSync + unlinkSync/rmdirSync，实测安全）；删不干净时**按平台兜底**——
+ * Windows 走 `cmd /c rmdir /s /q`（这条路上 fs.rmSync 不能用，中文路径会原生崩溃），
+ * POSIX 走 fs.rmSync 递归（那条原生崩溃是 Windows 独有的，POSIX 上没有理由不用）——
+ * 再失败则保留待下次清理。
+ *
+ * 两个分支都得在：兜底被 `process.platform === 'win32'` 整段门住的话，非 Windows
+ * 上「删不干净」就等于「永远不删」（书夹留在原处），而这类差异只有换台机器才看得见。
  * `rm` 参数保留可注入（测试用：模拟 rmSync 静默失效的旧行为）。
  */
 function removeTree(src, rm) {
@@ -684,8 +701,12 @@ function removeTree(src, rm) {
     // 注入的 rm（测试模拟）：保留调用形态，删除结果由手动/兜底保证。
     try { rm(src, { recursive: true, force: true }) } catch { /* 已尽力 */ }
   }
-  if (existsSync(src) && process.platform === 'win32') {
-    try { execFileSync('cmd', ['/c', 'rmdir', '/s', '/q', src], { stdio: 'ignore' }) } catch { /* 保留待下次清理 */ }
+  if (existsSync(src)) {
+    if (process.platform === 'win32') {
+      try { execFileSync('cmd', ['/c', 'rmdir', '/s', '/q', src], { stdio: 'ignore' }) } catch { /* 保留待下次清理 */ }
+    } else {
+      try { rmSync(src, { recursive: true, force: true }) } catch { /* 保留待下次清理 */ }
+    }
   }
 }
 
@@ -817,6 +838,9 @@ function foldGate(projectId, wanted = null) {
   const events = readEvents(projectId)
   let proposal = null
   let decision = null
+  // 最近一次**决策事件**裁的是哪一版（票 workbench-transitions/23）。它与 `decision` 分家：
+  // 新提案会把 `decision` 重置为 null（"v3 还没拍板"），但"v2 已经拍过了"是历史事实、不能跟着清。
+  let decidedVersion = null
   for (const event of events) {
     // ⚠️ 2026-09-21 修：原来只看「最后一个提案」，于是按 gate 号折叠时全靠运气——
     // 第 1/2 次拍板返回的折叠结果挂着第 3 次拍板的 gate 号，调用方 `folded.gate === gate`
@@ -829,6 +853,7 @@ function foldGate(projectId, wanted = null) {
       decision = null
     } else if (event.type === 'textbook/gate-decision' && proposal !== null) {
       decision = event
+      if (typeof event.data.version === 'number') decidedVersion = event.data.version
     }
   }
   if (proposal === null) return null
@@ -847,6 +872,11 @@ function foldGate(projectId, wanted = null) {
     detail: proposal.data.detail ?? '',
     status,
     proposalSeq: proposal.seq,
+    // 票 workbench-transitions/23：`version` 是**最新提案**的版次（awaiting 时也照样是新提案），
+    // 「定下来的那一版」是最近一次决策事件当时裁决的那个——决策事件自带 `version`（gates.js 落账形状），
+    // 记在 `decidedVersion` 上、**不随新提案重置**（v2 已定、v3 在等，两件事都要说得出来）。
+    // 两者分家，阶段页的结论行才不会把「正在等拍板」渲染成「已驳回 · 第 M 版」。
+    decidedVersion,
     decision: decision === null ? null : {
       seq: decision.seq,
       approved: decision.data.approved === true,
@@ -1030,7 +1060,14 @@ function wakeMainAI(ctx, projectId) {
   const sessionId = meta.session
   if (typeof sessionId !== 'string' || sessionId === '') return false
   const agent = ctx.get('agents')?.get?.(sessionId)
-  if (agent === undefined) return false
+  // ⚠️ 票 walkthrough-fixes/01（走查 P41）：这条原来是**无声**的 return false。注册表里
+  // 根本没有这本书的会话时（宿主刚重启、agent 还没起来），调用方拿到的也只是「没叫醒」，
+  // 没有任何一条线索指向「为什么」。这里补一条 warn：现场日志里能直接看到是「注册表里没有
+  // 那个会话」，而不是再去猜是权限、是来源校验还是别的地方出的错。
+  if (agent === undefined) {
+    ctx.logger.warn(`textbook: 唤醒主 AI 失败：agents 注册表里没有会话 ${sessionId}（项目 ${projectId}）`)
+    return false
+  }
   // 交办唤醒消息是给人看的（CONTEXT.md：机器以 plugin+notice 注入对话流，不冒充用户），
   // 所以这里用界面词；账本里那条 stage-start 仍记机器 label（见 handoff，机器身份词不动）。
   const label = stageLabelHuman(stageLabel(meta.pendingStage, meta.pendingGate ?? null))
@@ -1069,8 +1106,13 @@ function wakeMainAI(ctx, projectId) {
 /**
  * 交办：记账 pendingStage → 记事件 → 快照 → 唤醒主 AI。
  * 幂等由调用方保证（runPhase 先查 pendingStage 是否已设）。
+ *
+ * `snapshotReason`（票 pipeline-wiring-gaps/08）：快照的 `reason` 是回退轴上唯一可读的字。例行交办一律写
+ * 「交办「X」之前」；**驳回触发的重做**要给一句能分得开的措辞（探查驳回的那次交办也是
+ * `stage='explore'`，不另给措辞就在回退轴上与第一次交办长得一模一样）。
+ * 不给就沿用例行措辞，所以既有 10 处调用一个字都不用改。
  */
-function handoff(ctx, projectId, stage, gate = null) {
+function handoff(ctx, projectId, stage, gate = null, snapshotReason = null) {
   updateMeta(projectId, (meta) => {
     meta.pendingStage = stage
     meta.pendingGate = gate
@@ -1078,9 +1120,14 @@ function handoff(ctx, projectId, stage, gate = null) {
     meta.status = 'running'
   })
   const label = stageLabel(stage, gate)
-  appendEvent(projectId, 'textbook/stage-start', { stage, gate, label })
+  const artifact = artifactDataForStage(stage, gate, goldN(readMeta(projectId)))
+  appendEvent(projectId, 'textbook/stage-start', {
+    stage, gate, label,
+    path: artifact.path,
+    chapter: artifact.chapter,
+  })
   try {
-    writeSnapshot(projectId, `交办「${stageLabelHuman(label)}」之前`)
+    writeSnapshot(projectId, snapshotReason ?? `交办「${stageLabelHuman(label)}」之前`)
   } catch { /* 快照失败不影响交办 */ }
   return wakeMainAI(ctx, projectId)
 }
@@ -1164,6 +1211,53 @@ let announceCtx = null
 
 function bindAnnounce(ctx) {
   announceCtx = ctx
+}
+
+
+
+/** 主 AI 上下文占用的读数口（票 28 / 走查 P46）：领任务说明要带上它，好让主笔 AI 知道自己该收尾了。
+ *
+ *  数据源是宿主自己算的那份 `contextPressure` **会话投影**——与宿主输入区角标
+ * 「上下文已用 51%」同一份数据。本模块**不 import 任何宿主包**，读数由宿主侧经
+ * `bindContextOccupancy` 注入（同 `bindAnnounce` 的显式契约：只有 apply 绑一次）。
+ *
+ *  绑定方给的 reader 形状：`(sessionId) => number | null`，返回**占用百分比**。
+ * 百分比算式只有一份，在 `src/domain-rules.js` 的 `contextOccupancyPercent`
+ * （`src/ui/rules.js` 只是再导出；逐字照宿主 `contextOccupancy()`）。
+ * 本模块 import 的**就是那同一个模块**（领域规则模块被 esbuild 打进前端、也被 node ESM
+ * 后端直接 import，这是它被选为这一份的理由），所以不重算不是「没法共享」，
+ * 抄第二份算式才是本仓在治的病（同一件事两份实现 → 改一处必漏两处）。
+ *
+ *  ⚠️ 未绑定 / reader 抛错 / 返回的不是有限数 → 一律 null，
+ * brief 里那一句**整句不出现**（绝不写 0%、绝不编一个百分比）。 */
+let contextOccupancyReader = null
+
+
+function bindContextOccupancy(reader) {
+  contextOccupancyReader = typeof reader === 'function' ? reader : null
+}
+
+
+/** 当前会话的主 AI 上下文占用百分比；读不到就是 null（界面/brief 都照此不显示）。 */
+function readContextOccupancy(sessionId) {
+  if (contextOccupancyReader === null) return null
+  if (typeof sessionId !== 'string' || sessionId === '') return null
+  let percent
+  try {
+    percent = contextOccupancyReader(sessionId)
+  } catch {
+    return null // 读数是辅助信息，读不到不许把领任务说明整个带崩
+  }
+  return Number.isFinite(percent) ? percent : null
+}
+
+
+/** 领任务说明里那一句（只在读得到数时出现）。
+ *  给主笔 AI 看的口径与界面上那一句同源：这是**计量**、不是状态词（CONTEXT.md 三词上限不动）。 */
+function contextOccupancyBriefLine(sessionId) {
+  const percent = readContextOccupancy(sessionId)
+  if (percent === null) return null
+  return `上下文已用 ${percent}%（主 AI 这一场的上下文用量，只增不减；上下文满了会压缩正在追的活、还没落账的结论，必要时请用户早点介入：暂停、砍章节、提前过目）。`
 }
 
 
@@ -1392,11 +1486,12 @@ function ensureStatus(projectId, status, hint) {
  *  demo 是内置回放适配器，只做内容编排，状态机步进与真实共用 ensureStatus/advance/recordAgentError。 */
 async function demoStep(ctx, projectId, meta, label, exec, after) {
   const runtime = projectRuntime(ctx, projectId, meta)
+  const artifact = artifactDataForLabel(label, goldN(meta))
   const startedAt = Date.now()
-  appendEvent(projectId, 'textbook/agent-start', { label })
+  appendEvent(projectId, 'textbook/agent-start', { label, path: artifact.path, chapter: artifact.chapter })
   try {
     await exec(runtime)
-    appendEvent(projectId, 'textbook/agent-end', { label, outcome: 'ok' }, Date.now() - startedAt)
+    appendEvent(projectId, 'textbook/agent-end', { label, outcome: 'ok', path: artifact.path, chapter: artifact.chapter }, Date.now() - startedAt)
     if (after !== undefined) return await after(runtime)
     return 'advanced'
   } catch (error) {
@@ -1501,8 +1596,9 @@ async function runGate(ctx, projectId, meta, gate) {
     }
     const runtime = projectRuntime(ctx, projectId, meta)
     const label = version === 1 ? `设计提案·关卡${gate}` : `设计提案·关卡${gate}·修订v${version}`
+    const artifact = artifactDataForLabel(label, goldN(meta))
     const startedAt = Date.now()
-    appendEvent(projectId, 'textbook/agent-start', { label })
+    appendEvent(projectId, 'textbook/agent-start', { label, path: artifact.path, chapter: artifact.chapter })
     try {
       const proposal = await generateContent(runtime, 'gate', {
         gate, version, prevSummary: current?.summary ?? null, decision: prevDecision,
@@ -1513,7 +1609,7 @@ async function runGate(ctx, projectId, meta, gate) {
         || typeof proposal?.detail !== 'string' || proposal.detail.trim() === '') {
         throw new Error('设计方案不完整（缺少标题/摘要/正文），已中止生成，请重试')
       }
-      appendEvent(projectId, 'textbook/agent-end', { label, outcome: 'ok' }, Date.now() - startedAt)
+      appendEvent(projectId, 'textbook/agent-end', { label, outcome: 'ok', path: artifact.path, chapter: artifact.chapter }, Date.now() - startedAt)
       if (version === 1) {
         proposeGate(projectId, gate, proposal.title, proposal.summary, proposal.detail)
       } else {
@@ -1625,14 +1721,16 @@ async function demoWriteChapters(ctx, projectId, meta) {
       // 处置：**在这里补写入点**（不重写产物、不动内容），落一条与下面新写章节同形状的「写第N章」事件。
       // 判据不给 demo 开口子（spec 第 6 条：若某条演示流程缺章级事件，就在那里补写入点）。
       if (!chapterHasSubmitEvent(projectId, n, meta)) {
-        appendEvent(projectId, 'textbook/agent-end', { label: `写第${n}章`, outcome: 'ok' })
+        const artifact = artifactDataForChapter(n)
+        appendEvent(projectId, 'textbook/agent-end', { label: `写第${n}章`, outcome: 'ok', path: artifact.path, chapter: artifact.chapter })
       }
       continue
     }
     const runtime = projectRuntime(ctx, projectId, meta)
     const title = chapters[index].title ?? `第${n}章`
+    const artifact = artifactDataForChapter(n)
     const writeStartedAt = Date.now()
-    appendEvent(projectId, 'textbook/agent-start', { label: `写第${n}章《${title}》` })
+    appendEvent(projectId, 'textbook/agent-start', { label: `写第${n}章《${title}》`, path: artifact.path, chapter: artifact.chapter })
     try {
       const written = await generateContent(runtime, 'chapter', {
         n, title, outline: chapters[index].outline ?? '', styleSpec,
@@ -1641,7 +1739,7 @@ async function demoWriteChapters(ctx, projectId, meta) {
       })
       // demo 通道的 chapter 产物是字符串（demoChapterWrite 直接返回正文），不是 {text} 对象。
       writeWork(projectId, file, written)
-      appendEvent(projectId, 'textbook/agent-end', { label: `写第${n}章`, outcome: 'ok' }, Date.now() - writeStartedAt)
+      appendEvent(projectId, 'textbook/agent-end', { label: `写第${n}章`, outcome: 'ok', path: artifact.path, chapter: artifact.chapter }, Date.now() - writeStartedAt)
     } catch (error) {
       return recordAgentError(projectId, `写第${n}章`, error)
     }
@@ -1670,8 +1768,9 @@ async function demoWriteChapters(ctx, projectId, meta) {
 async function demoMergeBook(ctx, projectId, meta) {
   if (existsSync(workFile(projectId, 'book.md'))) return
   const runtime = projectRuntime(ctx, projectId, meta)
+  const artifact = artifactDataForLabel('合并成书', goldN(meta))
   const startedAt = Date.now()
-  appendEvent(projectId, 'textbook/agent-start', { label: '合并成书' })
+  appendEvent(projectId, 'textbook/agent-start', { label: '合并成书', path: artifact.path })
   try {
     const merged = await generateContent(runtime, 'merge', {
       chapters: (meta.outline?.chapters ?? [{ title: '第1章' }]).map((chapter, index) => {
@@ -1687,7 +1786,7 @@ async function demoMergeBook(ctx, projectId, meta) {
     })
     // demo 通道的 merge 产物是字符串（demoMergeBook 直接返回正文），不是 {text} 对象。
     writeWork(projectId, 'book.md', merged)
-    appendEvent(projectId, 'textbook/agent-end', { label: '合并成书', outcome: 'ok' }, Date.now() - startedAt)
+    appendEvent(projectId, 'textbook/agent-end', { label: '合并成书', outcome: 'ok', path: artifact.path }, Date.now() - startedAt)
   } catch (error) {
     return recordAgentError(projectId, '合并成书', error)
   }
@@ -1784,7 +1883,7 @@ async function runPhase6(ctx, projectId, meta) {
     const checks = runQualityChecks(projectId)
     updateMeta(projectId, (state) => { state.finalChecks = checks })
     appendEvent(projectId, 'textbook/quality', { checks })
-    appendEvent(projectId, 'textbook/agent-end', { label: '最后检查（质量门）', outcome: 'ok' }, Date.now() - startedAt)
+    appendEvent(projectId, 'textbook/agent-end', { label: '最后检查（质量门）', outcome: 'ok', path: 'work/book.md' }, Date.now() - startedAt)
     ensureStatus(projectId, 'awaiting-final-approval', FINAL_CHECK_DONE_HINT)
     return 'waiting'
   }
@@ -2089,11 +2188,88 @@ function sendJson(res, status, value) {
 }
 
 
-/** 方法论文本过长时截断（交办说明里嵌，避免刷爆 AI 上下文）。 */
-function clipMethodology(text, cap = 9000) {
+/**
+ * 方法论文本过长时截断（交办说明里嵌，避免刷爆 AI 上下文）。
+ *
+ * 票 subagent-guidance/09：`audit-and-testing.md` 有四节（§八/§十/§十一/§十二）**整节落在
+ * cap 之外**——成因是「往文档末尾加节」这个做法本身在持续挤掉前面的节，不是一次性事故。
+ * 这里**不抬 cap**（省上下文这条约束已被 9000 证明有效），改为**按阶段定向注入**（见
+ * `METHODOLOGY_TAIL_BY_STAGE` 与 `withTailSections`）。
+ *
+ * 截断提示语**必须带可点路径**：原来只写「需要全文可再读插件 resources/ 目录」，
+ * AI 得先 glob 才知道文件在哪——那正是「靠指针自救」这个绕路成立的原因之一。
+ */
+function clipMethodology(text, cap = 9000, rel = null) {
   const clean = String(text ?? '').trim()
   if (clean.length <= cap) return clean
-  return `${clean.slice(0, cap)}\n…（方法论过长已截断，需要全文可再读插件 resources/ 目录）`
+  return `${clean.slice(0, cap)}\n…（方法论过长已截断${rel === null ? '，需要全文可再读插件 resources/ 目录' : `；全文 ${rel}`}）`
+}
+
+/**
+ * 票 subagent-guidance/09：从方法论文档里切出指定的 `##` 级小节。
+ *
+ * 一节 = 从它的 `## ` 行到**下一个同级或更高级标题**为止（`###` 归它所有）。
+ * 找不到标题就返回空串——**缺一节不该炸掉整个交办说明**，上层会断言它。
+ *
+ * @param {string} text 方法论全文
+ * @param {string[]} headings 要切出的 `## ` 标题逐字前缀（如 `'## 十一、'`）
+ * @returns {string} 按 headings 顺序拼接的小节正文
+ */
+export function pickSections(text, headings) {
+  const clean = String(text ?? '')
+  const starts = []
+  for (const match of clean.matchAll(/^## .+$/gm)) starts.push({ at: match.index, title: match[0] })
+  const picked = []
+  for (const heading of headings) {
+    const from = starts.findIndex((s) => s.title.startsWith(heading))
+    if (from < 0) continue
+    const at = starts[from].at
+    const end = from + 1 < starts.length ? starts[from + 1].at : clean.length
+    picked.push(clean.slice(at, end).trim())
+  }
+  return picked.join('\n\n')
+}
+
+/**
+ * 票 subagent-guidance/09：把按阶段选中的小节**追加**在截断件之后。
+ *
+ * **口径（追加 vs 替换）：选追加。** 理由有两条，缺一不可：
+ * ① 主文仍以「已截断」收尾、追加块自己交代来由——AI 的读法是「主文被截了，下面这几节是
+ *    按阶段补进来的」，两句同时成立；选替换会让截断提示语与追加块互相矛盾。
+ * ② 主文长度与「§九 工具纪律完整存活在截线以内」那条契约**一个字不用改**。
+ */
+function withTailSections(clipped, rel, headings) {
+  const sections = pickSections(resourceText(rel), headings)
+  if (sections === '') return clipped
+  return [
+    clipped,
+    '',
+    `↓ 以下 ${headings.length} 节按本阶段定向补进来（它们在 resources/${rel} 里排在 9000 字截断线之后，`,
+    `   主文被截断时整节都读不到，所以单独附在后面）：`,
+    '',
+    sections,
+  ].join('\n')
+}
+
+/**
+ * 票 subagent-guidance/09：**按阶段**定向注入 audit-and-testing.md 的四节尾节。
+ *
+ * 映射依据是每节各自治理的事，不是「哪个阶段就全给」：
+ * - `## 八、`  审计后回填约束文件（防复发）→ 审计**产出结论**的阶段才有意义
+ * - `## 十、`  三阶段递进审计：§十 自己写死了三轮的归属——第一轮章级审计＝gold·chapters、
+ *            第二轮全书结构与索引审计＝merge、第三轮修订复审＝**final**
+ * - `## 十一、` 小助手中途引导 → 派小助手干活的阶段
+ * - `## 十二、` 暂停时收回小助手 → 触发只有「暂停」一个，跟着会派小助手的阶段走
+ *
+ * ⚠️ `final` 今天**根本不读 audit-and-testing.md**（它只挂 delivery-checklist.md），
+ * 所以 §十 第三轮「终检 AI 自查 + 机器硬检查质量门」这条判据此前从未进过终检 brief——
+ * 定向注入顺带补上这一格。
+ */
+const METHODOLOGY_TAIL_BY_STAGE = {
+  gold: ['## 八、', '## 十、', '## 十一、', '## 十二、'],
+  chapters: ['## 八、', '## 十、', '## 十一、', '## 十二、'],
+  merge: ['## 八、', '## 十、', '## 十一、', '## 十二、'],
+  final: ['## 十、', '## 十二、'],
 }
 
 
@@ -2106,7 +2282,12 @@ function buildStageBrief(projectId) {
   const sources = (meta.sources ?? [])
     .filter((source) => source.converted === true)
     .map((source) => ({ file: source.file, role: source.role ?? '', md: `sources-md/${source.md}` }))
-  const mtl = (rel) => clipMethodology(resourceText(rel))
+  const mtl = (rel) => clipMethodology(resourceText(rel), 9000, rel)
+  /** 票 09：某个阶段该补哪几节尾节（没登记的阶段就是没有，不补）。 */
+  const mtlWithTail = (rel, stage) => {
+    const headings = METHODOLOGY_TAIL_BY_STAGE[stage] ?? []
+    return withTailSections(mtl(rel), rel, headings)
+  }
   const brief = {
     stage, gate, label: stageLabel(stage, gate), dir: projectDir(projectId),
     project: { name: meta.name ?? '', goal: meta.goal ?? '', route: meta.route ?? 'blueprint', science: meta.science === true },
@@ -2115,8 +2296,10 @@ function buildStageBrief(projectId) {
     case 'explore': {
       brief.task = '统筹通读全部转换后的教材（sources 里每本给出准确的 sources-md/ 子路径与 full.md）：可自己读，也可把每本分头派给小助手通读（干净上下文、要求详细摘录结构/角色/权威层级/教学线索），你逐份核对后亲自汇总整理出「源材料索引」与「结构化知识地图」。'
       brief.outputs = [
-        'work/explore.md —— 人读的源材料索引（纯 Markdown）：材料清单（文件名+角色）、结构观察（摸源结构、角色标签、权威层级）、教学线索（知识点密度、重点难点、可用素材）；≤1200 字，面向非技术家长。',
-        'work/knowledge-map.json —— 结构化知识地图（严格 JSON）：materials:[{num,sections:[{title,summary,keywords}]}]、knowledgePoints:[{id,title,source,summary,difficulty}]、teachingFocus:[string]（重点/难点各一句人话，纯字符串，如「重点：分数运算」「难点：应用题建模」）、chapterSuggestion:[{title,source,points}]（4-10 章）。',
+        // 票 brief-word-limits/01：主次分工写明——**细颗粒度进 knowledge-map.json，explore.md 只做给人读的索引**。
+        // 原式两句并列，AI 看不出主次，于是「用户要更多细节」与「≤1200 字」互相顶。
+        'work/explore.md —— **给人读的索引**（纯 Markdown，篇幅从简）：材料清单（文件名+角色）、结构观察（摸源结构、角色标签、权威层级）、教学线索（知识点密度、重点难点、可用素材）；约 1200 汉字（软目标，机器不验，超一点没关系）。**细颗粒度的东西（逐条摘录、知识点细目）一律进 work/knowledge-map.json，不要塞进这个索引**——它只做索引。',
+        'work/knowledge-map.json —— 结构化知识地图（严格 JSON，**细颗粒度内容的主落点**）：materials:[{num,sections:[{title,summary,keywords}]}]、knowledgePoints:[{id,title,source,summary,difficulty}]、teachingFocus:[string]（重点/难点各一句人话，纯字符串，如「重点：分数运算」「难点：应用题建模」）、chapterSuggestion:[{title,source,points}]（4-10 章）。',
       ]
       brief.materials = sources
       brief.methodology = `${mtl('SKILL.md')}\n\n${mtl('references/source-material.md')}`
@@ -2146,7 +2329,7 @@ function buildStageBrief(projectId) {
         version: current.version, status: current.status,
         reasons: current.decision?.reasons ?? [], note: current.decision?.note ?? '',
       }
-      brief.outputs = '方案三段通过 stage-submit（stage=gate）提交：title（一句话标题）/ summary（给用户看的人话摘要 300 字内）/ detail（完整方案 Markdown 正文，必须内联全文--禁止写「见文件/proposal-*.md」，用户只在页面上看方案，不会去文件夹翻）。'
+      brief.outputs = '方案三段通过 stage-submit（stage=gate）提交：title（一句话标题）/ summary（给用户看的人话摘要，约 300 汉字以内；软目标，机器不验）/ detail（完整方案 Markdown 正文，必须内联全文--禁止写「见文件/proposal-*.md」，用户只在页面上看方案，不会去文件夹翻）。'
       brief.materials = sources
       brief.methodology = mtl({
         '1': 'references/source-material.md', '2': 'references/patterns/README.md', '3': 'references/file-contracts.md',
@@ -2186,11 +2369,11 @@ function buildStageBrief(projectId) {
       brief.chapterSource = chapterSource
       brief.outputs = [
         'work/style-spec.md -- 写作规范（十问契约，节标题齐全）：模式选型（考虑过哪些/拒绝了哪些/为什么；每个模式对应本书哪个教学问题）、章内板块语法完整版、情境钩子写法、正文语言风格、量化参考密度、深度四维承诺表（四维各用什么板块兑现到什么程度）、最佳范例章写作惯例区（本稿回填）、防幻觉铁律、写作纪律（一个 agent 写几章/篇幅约束/排除项）、脚手架标题清单（交付前拆除用）。',
-        `work/chapter-${String(gn).padStart(2, '0')}.md —— 第 ${gn} 章全文（按 style-spec，含全部板块与答案；约 ${brief.targetWords} 字，宁可多写不可敷衍）`,
+        `work/chapter-${String(gn).padStart(2, '0')}.md —— 第 ${gn} 章全文（按 style-spec，含全部板块与答案；约 ${brief.targetWords} 汉字，是写作体量参考、**不是闸门**——机器不验字数，宁可多写不可敷衍）`,
         `work/audit-${String(gn).padStart(2, '0')}.md —— 审计记录（四层审计 + 试教[条件触发]，严格 JSON：{"passed":true,"issues":[{"level":"错误|警告|提示","text":"具体问题"}]}）`,
       ]
       brief.materials = sources
-      brief.methodology = `${mtl('references/file-contracts.md')}\n\n${mtl('references/audit-and-testing.md')}`
+      brief.methodology = `${mtl('references/file-contracts.md')}\n\n${mtlWithTail('references/audit-and-testing.md', 'gold')}`
       // 票 workbench-transitions/19③（2026-09-24 裁决补充）：范例章也是写作任务，风格线同样必读。
       // 这一段原先**没有** `references` 字段（`gold` 是新建，不是「加一行」）。
       brief.references = ['work/style-line.md（写每一章前必读、逐条落实）']
@@ -2243,26 +2426,51 @@ function buildStageBrief(projectId) {
         '范例章（见 brief）',
         'work/outline.md（章节骨架）',
       ]
-      // F39（2026-08-20 走查）：段落级抽查意见也透出给 AI（整章意见带 comment，段落意见合成人话；已撤销的跳过）。
+      // F39（2026-08-20 走查）：段落级抽查意见也透出给 AI（整章意见带 comment，段落意见合成人话；已撤回的跳过）。
       // 票 09：**必须带 id**——没有 id，主笔 AI 交工时无从点名（handledReviews 按 id 销号）。
       brief.pendingReviews = (meta.pendingReviews ?? []).filter((r) => r.status !== 'revoked').map((r) => ({ id: r.id, chapter: r.chapter, comment: paragraphReviewText(r) }))
-      brief.methodology = `${mtl('references/audit-and-testing.md')}\n${mtl('references/file-contracts.md')}\n${mtl('references/subagent-prompts/writing-agent-prompt.md')}\n${mtl('references/subagent-prompts/audit-agent-prompt.md')}`
+      brief.methodology = `${mtlWithTail('references/audit-and-testing.md', 'chapters')}\n${mtl('references/file-contracts.md')}\n${mtl('references/subagent-prompts/writing-agent-prompt.md')}\n${mtl('references/subagent-prompts/audit-agent-prompt.md')}`
       brief.hints = [
+        CHAPTER_PROGRESS_REQUIREMENT,
+        // 票 03 · P34：上面那条只说了 stage 有哪些取值，没说**什么时候**必须报——实测 9.4 小时里
+        // 「还剩 39 步」一字未变、▶ 指着 10 小时前就写完的第 1 章，因为 AI 一次都没带过
+        // chapter/stage（契约有、转发有、按章落账有、界面也接上了，只有上报这一格是空的）。
+        '逐章阶段上报：每章走「写 → 审 → 复核」时，**每次状态变化**都用 workbench_act(action=progress) 把 chapter=N 与 stage 一起报上（stage 的取值见上一条）——派出去写时报 writing、检查时报 auditing、检查完报 audited、你要复核报 finalizing、这一章交工完报 done。只有文字、没有 chapter 与 stage 的 progress 落在步清单上什么也看不出来。',
         '并行纪律：remaining 各章可并行派多个写作小助手，并发 2-4 章为宜（低内存/老机器从 2 起）；每章一个写作小助手、各章独立文件（chapter-NN.md / audit-NN.md），绝不共享工作区写同一文件；各章各自完成后逐个交工验货（ordered-commit：慢章压住快章属预期，不必等齐）。宿主不支持并行 spawn 时小助手自动排队，退化为逐章串行，行为与现状等价。',
         '派小助手/审计小助手时提醒：文件操作用文件工具（read/write/edit/glob/grep），别用 shell（工具纪律见 audit-and-testing.md §九，跨平台一致）。',
         '小助手与审计小助手用你的 subagent 工具派；提醒小助手材料小节与产出文件的准确路径（都在 dir 下）。',
         '每交一章前先 workbench_status 查有没有新抽查意见，有就先处理（修订 → 重新审计 → 机器验货）再继续；该章意见未处置机器会拒收。',
+        '写完整本途中的引导杠杆：来了用户意见/风格线变化 → 先 send_message 转达给正在写那一章的小助手（别等整章写完再打回），并落一行 progress；小助手跑完没交齐 → 优先用 send_message 唤醒原来那个小助手（忘了是谁就用 list_agents 按「章号 + 角色」的 label 召回），不用重派。细则见 audit-and-testing.md §十一。',
+        // 票 11 · P30＋P42：焦点区主卡逐字显示最近一条 progress（顶部横幅只出状态词那半截，
+        // 见 audit-and-testing.md §11.5②），所以「只在开工时发一条」等于对外宣称一件
+        // 已经结束的事；而要用户拍板的那类决定记进 progress，机器侧就无从知道有**一个问题悬着**。
+        '进度保鲜与拍板通道：每个小助手回来、每交工一章时，**必须补一条 progress**，写那段时间里真的在做的事（派了几路、在写哪几章、哪几章检查完了、下一路是谁）；上一次落账到这一次之间一个章的时长都没补，工作台上挂的就是旧闻。要用户拍板、选一条路、授权一次改动，走 intervene，不要记进 progress（它是留给用户回话的悬案通道，工作台据此把闸门按钮亮出来）。留痕不许因为加了保鲜就被稀释——该落的引导那一行一次都不能少，细则见 audit-and-testing.md §十一。',
         '处置过的抽查意见要在交工时报出：stage-submit（stage=chapters）带 handledReviews:[{id, how}]——id 取 pendingReviews 里那一条，how 是一句人话（这条我怎么改的）。机器**只给点名的**置为已处置，没点名的继续拦；一条都不点名就交工会被 400 打回。',
         '机器按章验货：每章都要有 work/chapter-NN.md 和 audit-NN.md，且 audit.passed 必须是 true（读审计 JSON，不是只看文件存在）。',
+        // 票 brief-word-limits/01：把「字」的口径与「这些数字不是闸门」**一次说清**（主笔 AI 自报进度
+        // 那行自由文本只能靠交办说明/persona 传口径，服务端改不了它的措辞）。
+        '体量口径：remaining[].targetWords 的「字」一律按**汉字**计（数字/字母/标点/空白都不计），它是写作体量参考、**不是交工闸门**——机器不验字数，超一点没关系。自报 progress 时也按这个口径说。',
+        // 票 02 · P19：要用户拍板的选择由宿主 `ask_user_question` 提问卡渲染（工作台零实现），
+        // 它逐字显示每个选项的说明——**预告只能写在选项说明里**，写成别的位置等于没写。
+        // 措辞沿用工作台「✍️ 定点修改这一步」那段既有的影响预告（`src/ui/phase-page.js`），不另起一份格式。
+        '要用户拍板时先把影响预告给出来：凡是你要在几个选项里请用户选、而选哪条会牵动已经写好或已经拍板的内容（例如全书体量、章节结构、范例章写法），**每个选项的说明都要各带一句影响预告**，照「影响预告：这一步改了，这些要一起重做：…」那个形状说人话——按现在已写 N 章、累计多少汉字说清：选它要重写哪几章、最终落在多少汉字。三条路各有各的代价（实测里最忠于用户当初拍板的那条恰好最贵），不许等用户点完再在正文里补一句「我倾向」。',
         '派写作小助手时必须带（按 writing-agent-prompt.md 模板填）：本章知识点清单（remaining[].points）、本章在知识链中的位置与跨章引用指向（前面哪章讲过什么、后面哪章会用到这里）、范例章路径与写作规范。',
         '跨章引用纪律：前向引用只到大纲承诺粒度（「第 N 章会展开」），禁止编造未写章节的具体数字/结论/例题；审计小助手按 audit-agent-prompt.md 派，要求其扫跨章引用存在性（含前向承诺失配）。',
       ]
+      // 票 28 / 走查 P46：每次领任务都把**主 AI 上下文占用**一并告诉主笔 AI，
+      // 好让它知道自己该收尾了。读不到（宿主投影缺席 / 未绑定读数口）就**整句不追加**——
+      // 绝不写 0%、绝不编一个百分比。落点在这一层（brief.hints），不改方法论文档、
+      // 不动 progress 事件语义、不新增 workbench_act 动作名与账本事件类型。
+      {
+        const occupancyLine = contextOccupancyBriefLine(meta.session)
+        if (occupancyLine !== null) brief.hints.push(occupancyLine)
+      }
       break
     }
     case 'merge': {
-      brief.task = '合并前先做跨章审计：通读全部章节 + outline + knowledge-map，逐项核对（①跨章事实一致性—数字/人名/结论不打架 ②术语统一—同一概念全书一个说法 ③交叉引用不悬空—「见第X章」的章真实存在 ④知识递进链—后章依赖的前置概念前章真的讲过），发现问题先修，再把审计结论落盘 work/audit-cross.md（机器验存在才放行合并）。然后写这本书的前言/使用说明（≤300 字，通俗），随 stage-submit（stage=merge, preface=...）交工；机器会 100% 保真拼装各章成书（不删节）。'
+      brief.task = '合并前先做跨章审计：通读全部章节 + outline + knowledge-map，逐项核对（①跨章事实一致性—数字/人名/结论不打架 ②术语统一—同一概念全书一个说法 ③交叉引用不悬空—「见第X章」的章真实存在 ④知识递进链—后章依赖的前置概念前章真的讲过），发现问题先修，再把审计结论落盘 work/audit-cross.md（机器验存在才放行合并）。然后写这本书的前言/使用说明（约 300 汉字，通俗；软目标，机器不验字数），随 stage-submit（stage=merge, preface=...）交工；机器会 100% 保真拼装各章成书（不删节）。'
       brief.references = ['交工后工作台会生成 work/book.md（机器拼装成品）']
-      brief.methodology = mtl('references/audit-and-testing.md')
+      brief.methodology = mtlWithTail('references/audit-and-testing.md', 'merge')
       brief.outputs = ['维护 work/progress.md（每章一行：写完/审计/验货）', 'work/audit-cross.md —— 合并前跨章审计结论（机器验存在才放行合并）']
       brief.hints = ['前言写给"拿到这本书的人"：这本书讲什么、怎么用（给 AI 老师上课还是人直接读）。', 'audit-cross.md 是硬门槛：没落盘机器会 400 拒收，别只交前言。']
       break
@@ -2270,7 +2478,7 @@ function buildStageBrief(projectId) {
     case 'final': {
       brief.task = `最后检查：亲自读 work/book.md，逐项自查（成品完整、每章有自查记录、无 AI 脚手架残留、练习与答案齐全、与已拍板设计一致、材料可追溯、无引用矛盾与事实矛盾），发现问题先修，再把你的自查报告（人话）随 stage-submit（stage=final, report=...）交工。${REPORT_WORDING_RULE}交工时若本书还有生效中的风格线（workbench_status 的 styleNotes 里 status 为 active 的那些），必须对**每一条**逐条交代去向，用 styleCheck:[{id, status, note?, chapter?}] 随交工一起交：adopted＝已落实（写清落实在哪章）、conflict＝与哪一章冲突（note 必写一句冲突理由）、superseded＝已不再适用；漏一条机器会拒收。机器硬检查会兜底（乱码/章节数/必含板块/禁用词，判据来自已拍板的 style-spec/outline）；全过后你在工作台等用户「认可」才算交付。`
       brief.counts = { chapters: (meta.outline?.chapters ?? []).length, sources: (meta.sources ?? []).length }
-      brief.methodology = mtl('references/delivery-checklist.md')
+      brief.methodology = `${mtl('references/delivery-checklist.md')}\n\n${mtlWithTail('references/audit-and-testing.md', 'final')}`
       brief.outputs = ['维护 work/progress.md（每章一行：写完/审计/验货）']
       // 终检被用户驳回后的修订意见（final-approve approved=false → 原地循环）。
       // 意见在 stage-submit final 通过时才销号（2026-08-27 grill 修订）：领任务改纯读、无副作用，
@@ -2496,12 +2704,16 @@ export {
   chapterGateMiss,
   announceCtx,
   bindAnnounce,
+  bindContextOccupancy,
+  readContextOccupancy,
+  contextOccupancyBriefLine,
   disposeParent,
   getParent,
   projectRuntime,
   writeProposalDoc,
   proposeGate,
   proposeRevision,
+  proposalFilesOnDisk,
   advance,
   waitForGateDecision,
   runPhase1,

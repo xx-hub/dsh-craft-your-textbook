@@ -7,7 +7,12 @@
 
 import { createElement, useEffect, useState } from "react";
 import { S } from "./styles.js";
-import { splitParagraphs, paragraphHint, diffParagraphs } from "./rules.js";
+import {
+	splitParagraphs,
+	paragraphHint,
+	diffParagraphs,
+	REVIEW_REVOKED_TEXT,
+} from "./rules.js";
 import { goldChapterNo } from "../domain-rules.js";
 import { READER_PARA_STYLE, renderInline } from "./md-render.js";
 
@@ -22,8 +27,31 @@ const OPINION_STATUS_TEXT = {
 	pending: "待处理",
 	sent: "AI 修订中",
 	applied: "AI 已改",
-	revoked: "已撤销",
+	// 票 09：`revoked` 一个状态在界面上**只此一种说法**（`CONTEXT.md`「撤回（意见）」的正名）。
+	// 取词走 `rules.js` 那一个出口，不在本文件另写一份（此前意见单与章节卡各写了一份同义说法）。
+	revoked: REVIEW_REVOKED_TEXT,
 };
+
+/**
+ * 意见单旁的**状态提示**（票 gold-revision-flow/01）：按真实状态说话。
+ *
+ * 原式只有一种话——`pendingCount === 0` 就说「先标记至少一条意见（段旁三键或笼统便签）」。
+ * 可屏上明明挂着意见：只是它们已经「AI 修订中」/「AI 已改」/「已撤回」，按钮该灰（服务端只把
+ * `pending` 交给 AI），提示却像在问用户「你还没标意见」。四态各说一句，**真空手时**才说「先标记」。
+ */
+export function opinionActionHint(list) {
+	const pending = list.filter((o) => o.status === "pending").length;
+	const sent = list.filter((o) => o.status === "sent").length;
+	const applied = list.filter((o) => o.status === "applied").length;
+	const revoked = list.filter((o) => o.status === "revoked").length;
+	if (pending > 0) return null; // 有待办：按钮自己写着几条，不必再补一句
+	if (sent > 0) return "这一轮已经交给 AI 了，等它改完";
+	if (applied > 0) return "这些意见这一稿都改过了";
+	// 票面 AC 点名的那一支：清单里只剩「已撤回」时**也不许**说「先标记」——屏上明明挂着意见
+	//（划线的那几条），那句话仍像在问用户"你还没标意见"。说清真实状态并指出下一步。
+	if (revoked > 0) return "这些意见都撤回了；要提新的，读到哪标到哪";
+	return "先标记至少一条意见（段旁三键或笼统便签）";
+}
 
 export function GoldOpinionList(props) {
 	const { opinions, busy, onRevoke, onRevise } = props;
@@ -35,7 +63,8 @@ export function GoldOpinionList(props) {
 			createElement(
 				"p",
 				{ style: { margin: "0" } },
-				"📋 本稿意见单还空着：读下面的稿子随手标记，或用最底下的「笼统提一条」。",
+				// 票 gold-revision-flow/01：空态也不许用「本稿」限定——这份清单是历次累积的。
+				"📋 意见单还空着：读下面的稿子随手标记，或用最底下的「笼统提一条」。",
 			),
 		);
 	}
@@ -53,7 +82,7 @@ export function GoldOpinionList(props) {
 						marginBottom: "6px",
 					},
 				},
-				`已撤销：${OPINION_KIND_TEXT[o.kind] ?? o.kind}${o.wish ? ` ${o.wish}` : ""}`,
+				`${REVIEW_REVOKED_TEXT}：${OPINION_KIND_TEXT[o.kind] ?? o.kind}${o.wish ? ` ${o.wish}` : ""}`,
 			);
 		}
 		seq += 1;
@@ -61,6 +90,47 @@ export function GoldOpinionList(props) {
 			o.target == null
 				? "笼统（不指哪段）"
 				: `第${o.target.para}段${o.target.hint ? `「${o.target.hint}」` : ""}`;
+		// 票 gold-revision-flow/01：已改过的条目**默认收成一行摘要**（可展开）——它不再是待办，
+		// 占着一整张卡只会让人以为还要再点一次「让 AI 照这些改」。
+		// 「撤销」在这条上改叫「撤回这条意见」并说清它不回滚正文（原词很容易被读成"撤销那次修改"）。
+		if (o.status === "applied") {
+			return createElement(
+				"details",
+				{ key: o.id, style: { ...S.card, marginBottom: "6px" } },
+				createElement(
+					"summary",
+					{ style: { cursor: "pointer", fontSize: "12px", opacity: 0.75 } },
+					`#${seq} ${OPINION_KIND_TEXT[o.kind] ?? o.kind}${o.wish ? ` · ${o.wish}` : ""} —— AI 已改`,
+				),
+				createElement(
+					"div",
+					{
+						style: {
+							marginTop: "6px",
+							display: "flex",
+							gap: "8px",
+							alignItems: "baseline",
+							flexWrap: "wrap",
+						},
+					},
+					createElement(
+						"span",
+						{ style: { opacity: 0.75, fontSize: "12px" } },
+						target,
+					),
+					createElement(
+						"button",
+						{ style: S.smallLink, onClick: () => onRevoke(o.id), disabled: busy },
+						"撤回这条意见",
+					),
+					createElement(
+						"span",
+						{ style: { fontSize: "12px", opacity: 0.7 } },
+						"撤回只作废这条意见（定稿时不生效），不回滚已经改好的正文",
+					),
+				),
+			);
+		}
 		return createElement(
 			"div",
 			{ key: o.id, style: { ...S.card, marginBottom: "6px" } },
@@ -107,13 +177,18 @@ export function GoldOpinionList(props) {
 		);
 	});
 	const pendingCount = list.filter((o) => o.status === "pending").length;
+	const hint = opinionActionHint(list);
+	const activeCount = list.filter((o) => o.status !== "revoked").length;
 	return createElement(
 		"div",
 		null,
 		createElement(
 			"p",
 			{ style: { margin: "0 0 6px", fontWeight: 600 } },
-			`📋 本稿意见单（${seq} 条）`,
+			// 票 gold-revision-flow/01：标题改成如实说法——`meta.goldOpinions` 是**全书累积**、
+			// 不分稿的（`gold-revise` 只追加、不记稿号），写「本稿」是名不副实，
+			// 也正是"最新版还带着上一轮意见单"的直接来源。
+			`📋 历次意见（${activeCount} 条${pendingCount > 0 ? ` · ${pendingCount} 条待处理` : ""}）`,
 		),
 		...rows,
 		onRevise !== undefined
@@ -131,13 +206,15 @@ export function GoldOpinionList(props) {
 							? `🔁 让 AI 照这些改（${pendingCount} 条）`
 							: "🔁 让 AI 照这些改",
 					),
-					pendingCount === 0
+					// 票 gold-revision-flow/01：提示按**真实状态**分四种说法（意见ActionHint），
+					// 只有真的空手（连一条都没有）才说「先标记至少一条意见」。
+					hint !== null
 						? createElement(
 								"span",
 								{
 									style: { marginLeft: "8px", fontSize: "12px", opacity: 0.7 },
 								},
-								"先标记至少一条意见（段旁三键或笼统便签）",
+								hint,
 							)
 						: null,
 					createElement(
@@ -174,6 +251,15 @@ export function GoldReader(props) {
 	const [generalKind, setGeneralKind] = useState("change");
 	const [generalText, setGeneralText] = useState("");
 	const [generalError, setGeneralError] = useState(null);
+	// 票 08：段落三键（😕/🗑）的**提交前确认层**。这两个键原先一击直发（handler 直接调
+	// `onOpinion`），而它们恰恰是这 13 章里唯一会被连点几十次的那一类动作——误点一次，
+	// AI 就已经收到并在处理这条意见了。
+	// ⚠️ 这里**另起一个 state**，不复用 `GoldFinalize` 那个 `confirming`：定稿/重写的渲染块
+	// 讲的是「会把意见变成全书风格线」，对一条段落意见完全不成立（段落意见不进风格线）。
+	// `markConfirm = { kind, para, hint } | null`；`markWish` 是那一句**可选**理由。
+	// ✏️ change 键**已经有**理由框（`formPara` + `submitWish`），本票不给它再加一层。
+	const [markConfirm, setMarkConfirm] = useState(null);
+	const [markWish, setMarkWish] = useState("");
 	// F36：进入标记态时首段三键闪两下，教用户「这三键可标意见」（本页会话一次）。
 	// pulsePhase: null=未闪 | 'on1' | 'off' | 'on2' | 'done'（done 后不再闪）。
 	const [pulsePhase, setPulsePhase] = useState(null);
@@ -231,6 +317,24 @@ export function GoldReader(props) {
 		setGeneralText("");
 		setGeneralError(null);
 	};
+	// 票 08：点键只**记下待提交的那一条**（不发动作），确认层里才真正发出去。
+	const openMarkConfirm = (kind, n, para) => {
+		setMarkConfirm({ kind, para: n, hint: paragraphHint(para) });
+		setMarkWish("");
+	};
+	const closeMarkConfirm = () => {
+		setMarkConfirm(null);
+		setMarkWish("");
+	};
+	const submitMark = () => {
+		const target = markConfirm;
+		if (target === null) return;
+		// 🔴 留空照样提交（＝今天一击直发那条路的逐字行为）：理由栏解决的是「用户想说更多」，
+		// 不是「用户必须交代」。服务端也只对 `change` 强制要 wish（gold.js 的校验原文
+		// 「不喜欢/不需要可以只点一下」就是这条硬约束的服务端一侧）。
+		onOpinion(target.kind, markWish.trim(), target.para, target.hint);
+		closeMarkConfirm();
+	};
 	// 左右留白：右 68px 给三键浮出腾地方，左 34px 给段号/已标标签的装订线腾地方。
 	return createElement(
 		"div",
@@ -242,6 +346,64 @@ export function GoldReader(props) {
 					// 票 10（判定四③）：原句 69 字本就在 90 字内，只删了「提完」前那个句号造成的断句
 					// （同一句连着读更省字），信息一条不丢。
 					"标记方法：鼠标停在哪一段，那段右侧就亮出三个键 😕🗑✏️；不指哪段就用最底下「笼统提一条」，提完点意见单里的【让 AI 照这些改】。",
+				)
+			: null,
+		// 票 08：确认层摆在正文**顶部**（不是贴着被点的那一段）——用户读的是一整章，
+		// 刚点的那段可能在第 188 段，贴着它弹等于弹到屏幕外。
+		markConfirm !== null
+			? createElement(
+					"div",
+					{
+						style: {
+							...S.card,
+							borderColor: "var(--dsw-accent, #4f6ef7)",
+							margin: "0 0 10px",
+						},
+					},
+					createElement(
+						"p",
+						{ style: { margin: "0 0 4px", fontWeight: 600 } },
+						`确认：把第 ${markConfirm.para} 段记成「${OPINION_KIND_TEXT[markConfirm.kind] ?? markConfirm.kind}」？`,
+					),
+					createElement(
+						"p",
+						{ style: { margin: "0 0 6px", fontSize: "12px", opacity: 0.85 } },
+						// 这两句是**兑现的**、不是承诺（`CONTEXT.md`「承诺过度」那条账）：
+						// AI 真的会照这条改这一章（这段意见随交办任务送给主笔 AI），
+						// 这一章交工前也真的必须先处置它（交工校验会直接拒收没处置的 pending 意见）。
+						"AI 会照这条改这一章；这一章交工前必须先处置它。",
+					),
+					createElement("textarea", {
+						style: { ...S.input, width: "100%", boxSizing: "border-box" },
+						rows: 2,
+						// 提示走 placeholder、**不预填进值里**：预填会让「留空也能提交」这条硬约束
+						// 变成「用户得先自己把它删掉才成立」，那就把快速标记这条路又堵回去了。
+						placeholder: "想说为什么就写一句（可以不填）",
+						value: markWish,
+						onChange: (e) => setMarkWish(e.target.value),
+					}),
+					createElement(
+						"div",
+						{
+							style: {
+								display: "flex",
+								gap: "8px",
+								alignItems: "center",
+								marginTop: "6px",
+							},
+						},
+						// 两个热区各干一件事：提交＝发动作；再想想＝纯收起（不发任何东西）。
+						createElement(
+							"button",
+							{ style: S.bigBtn(true), onClick: submitMark, disabled: busy },
+							"✅ 提交这条",
+						),
+						createElement(
+							"button",
+							{ style: S.smallLink, onClick: closeMarkConfirm, disabled: busy },
+							"再想想",
+						),
+					),
 				)
 			: null,
 		paras.map((para, idx) => {
@@ -411,11 +573,13 @@ export function GoldReader(props) {
 									);
 								};
 								return [
-									keyWith("😕", "dislike", "这种写法不喜欢", () =>
-										onOpinion("dislike", "", n, paragraphHint(para)),
+									// 票 08：这两个键**不再一击直发**——只打开确认层；确认层里点「提交这条」
+								// 才真正调 `onOpinion`（理由可留空，留空发空串＝今天的行为）。
+								keyWith("😕", "dislike", "这种写法不喜欢", () =>
+										openMarkConfirm("dislike", n, para),
 									),
 									keyWith("🗑", "drop", "这类内容不需要", () =>
-										onOpinion("drop", "", n, paragraphHint(para)),
+										openMarkConfirm("drop", n, para),
 									),
 									keyWith(
 										"✏️",
@@ -572,30 +736,123 @@ export function GoldCompare(props) {
 // ── 谈判桌·定稿沉淀（字数 + AI 建议 + 定稿/重写确认层） ─────────────────────
 
 export function GoldFinalize(props) {
-	const { meta, opinions, busy, onApprove, onSuggestWords } = props;
-	const [targetWords, setTargetWords] = useState(""); // 兜底单值：默认空（每章字数以清单为准，这个数只兜未填章）
+	const { meta, opinions, busy, onApprove, onSuggestWords, onWriteTargets } = props;
+	const [targetWords, setTargetWords] = useState(""); // 兼容旧单值：仅未填章兜底
+	const [targetDrafts, setTargetDrafts] = useState(() =>
+		Object.fromEntries(
+			(meta?.outline?.chapters ?? []).map((chapter, index) => [
+				index + 1,
+				Number.isFinite(chapter.targetWords) ? String(chapter.targetWords) : "",
+			]),
+		),
+	);
 	const [suggesting, setSuggesting] = useState(false);
+	const [writing, setWriting] = useState(false);
 	const [suggestion, setSuggestion] = useState(null);
 	const [error, setError] = useState(null);
 	const [confirming, setConfirming] = useState(null); // 'seal' | 'rewrite' | null
+	const chapters = meta?.outline?.chapters ?? [];
+	const goldNo = goldChapterNo(meta);
+	const canEditTargets = meta?.canEditTargetWords === true;
+	/**
+	 * 不能就地调逐章目标时，**为什么**不能（票 gold-revision-flow/03 的「承诺过度」修法）。
+	 *
+	 * 原式只有一句「写完整本已经开始，逐章目标请到「定点修改 · 章节安排」调整」，可它在
+	 * **最佳范例章生成/修订**（阶段 4、铺章根本没开始）与**已定稿**那一瞬也说这句——
+	 * 那是在替一个没发生的事实作证（CONTEXT「承诺过度」）。按真实状态分三句：
+	 *  - 铺章已开始（phase ≥ 5）：原句照旧，那才是真话；
+	 *  - 已定稿：定稿之后目标就归全书节奏管，走定点修改；
+	 *  - 还在改/写这一章：这一章还没定稿，逐章目标等定稿后再调（或走定点修改）。
+	 * 兜底给中性的一句，不把「不可编辑」一律说成「已经开始了」。
+	 */
+	const targetEditHint = (() => {
+		if (canEditTargets) return null;
+		const phase = Number(meta?.phase ?? 0);
+		if (phase >= 5) return "写完整本已经开始，逐章目标请到「定点修改 · 章节安排」调整。";
+		if (meta?.goldSealed != null) return "这一章已定稿；逐章目标请到「定点修改 · 章节安排」调整。";
+		return "正在写/改最佳范例章；逐章目标等这一章定稿后再调（或走「定点修改 · 章节安排」）。";
+	})();
+	const targetSignature = chapters
+		.map((chapter, index) => `${index + 1}:${chapter.targetWords ?? ""}`)
+		.join("|");
+	useEffect(() => {
+		setTargetDrafts(
+			Object.fromEntries(
+				chapters.map((chapter, index) => [
+					index + 1,
+					Number.isFinite(chapter.targetWords) ? String(chapter.targetWords) : "",
+				]),
+			),
+		);
+	}, [targetSignature]);
+
+	const editableRows = chapters
+		.map((chapter, index) => ({ chapter, n: index + 1 }))
+		.filter(({ n }) => n !== goldNo);
+	const targetRowsOk = editableRows.every(({ n }) => {
+		const raw = String(targetDrafts[n] ?? "").trim();
+		if (raw === "") return true;
+		const words = Number(raw);
+		return Number.isFinite(words) && words >= 500 && words <= 50000;
+	});
+	const targetsToWrite = editableRows.flatMap(({ n }) => {
+		const raw = String(targetDrafts[n] ?? "").trim();
+		if (raw === "") return [];
+		const words = Number(raw);
+		return Number.isFinite(words) && words >= 500 && words <= 50000
+			? [{ n, targetWords: Math.round(words) }]
+			: [];
+	});
+	const targetsDirty = editableRows.some(({ chapter, n }) => {
+		const raw = String(targetDrafts[n] ?? "").trim();
+		if (raw === "") return Number.isFinite(chapter.targetWords);
+		return Number.isFinite(chapter.targetWords)
+			? Math.round(Number(raw)) !== chapter.targetWords
+			: true;
+	});
 	const requestSuggestion = () => {
 		setSuggesting(true);
 		setError(null);
 		Promise.resolve(onSuggestWords())
 			.then((result) => {
-				if (result === null) return;
-				setSuggestion(result);
-				if (
-					Number.isFinite(Number(result.suggested)) &&
-					Number(result.suggested) >= 500
-				) {
-					setTargetWords(String(Math.round(Number(result.suggested))));
+				if (result === null || !Array.isArray(result.perChapter)) {
+					setError("AI 建议没有带回逐章建议，请再试一次");
+					return;
 				}
+				const perChapter = result.perChapter.filter((item) => Number(item?.n) !== goldNo);
+				setTargetDrafts((prev) => {
+					const next = { ...prev };
+					for (const item of perChapter) {
+						const n = Number(item?.n);
+						const words = Number(item?.words);
+						if (!Number.isSafeInteger(n) || n < 1 || n > chapters.length) continue;
+						if (Number.isFinite(words) && words >= 500 && words <= 50000) {
+							next[n] = String(Math.round(words));
+						}
+					}
+					return next;
+				});
+				setSuggestion({ ...result, perChapter });
 			})
 			.catch((err) =>
 				setError(String(err instanceof Error ? err.message : err)),
 			)
 			.finally(() => setSuggesting(false));
+	};
+	const writeTargets = () => {
+		if (!canEditTargets || !targetRowsOk || targetsToWrite.length === 0) return;
+		setWriting(true);
+		setError(null);
+		Promise.resolve(onWriteTargets(targetsToWrite))
+			.then((result) => {
+				if (result === null) {
+					setError("逐章目标没有写回，请检查提示后重试");
+					return;
+				}
+				setSuggestion(null);
+			})
+			.catch((err) => setError(String(err instanceof Error ? err.message : err)))
+			.finally(() => setWriting(false));
 	};
 	const wordsRaw = String(targetWords ?? "").trim();
 	const wordsEmpty = wordsRaw === "";
@@ -623,29 +880,65 @@ export function GoldFinalize(props) {
 			createElement(
 				"p",
 				{ style: { margin: "0 0 4px", fontSize: "12px", opacity: 0.8 } },
-				"每章字数（来自章节安排，可只调这一章）：",
+				"逐章目标（单位：汉字；来自章节安排，只在写完整本开始前可调）：",
 			),
-			(meta.outline?.chapters ?? []).map((chapter, index) =>
-				createElement(
+			chapters.map((chapter, index) => {
+				const n = index + 1;
+				const isGold = n === goldNo;
+				const original = Number.isFinite(chapter.targetWords)
+					? `原定 ${chapter.targetWords}`
+					: "原定未定";
+				const measured = Number.isFinite(meta?.goldMeasuredHanzi)
+					? `实测 ${meta.goldMeasuredHanzi} 汉字`
+					: "实测暂不可用";
+				return createElement(
 					"div",
 					{
-						key: index,
+						key: n,
 						style: {
 							fontSize: "12px",
 							margin: "2px 0",
 							display: "flex",
 							gap: "6px",
-							alignItems: "baseline",
+							alignItems: "center",
+							flexWrap: "wrap",
 						},
 					},
-					`${index + 1}. ${chapter.title ?? ""}`,
-					createElement(
-						"span",
-						{ style: { opacity: 0.6 } },
-						Number.isFinite(chapter.targetWords)
-							? `约 ${chapter.targetWords} 字`
-							: "未定，AI 写整本时自定",
-					),
+					createElement("span", null, `${n}. ${chapter.title ?? ""}`),
+					isGold
+						? createElement(
+								"strong",
+								{ style: { color: "var(--dsw-accent, #4f6ef7)" } },
+								`${original} · ${measured}`,
+							)
+						: canEditTargets
+							? createElement(
+									"input",
+									{
+										"aria-label": `第 ${n} 章目标汉字数`,
+										style: { ...S.input, width: "92px" },
+										type: "number",
+										min: 500,
+										max: 50000,
+										step: 100,
+										value: targetDrafts[n] ?? "",
+										disabled: busy || writing,
+										onChange: (e) => {
+											setTargetDrafts((prev) => ({ ...prev, [n]: e.target.value }));
+											setSuggestion(null);
+										},
+									},
+								)
+							: createElement(
+									"span",
+									{ style: { opacity: 0.6 } },
+									Number.isFinite(chapter.targetWords)
+										? `目标 ${chapter.targetWords} 汉字`
+										: "目标未定",
+								),
+					!isGold && canEditTargets
+						? createElement("span", { style: { opacity: 0.6 } }, "汉字")
+						: null,
 					chapter.volumeReason
 						? createElement(
 								"span",
@@ -653,13 +946,39 @@ export function GoldFinalize(props) {
 								`（${chapter.volumeReason}）`,
 							)
 						: null,
-				),
-			),
-			Number.isFinite(meta.targetWords)
+				);
+			}),
+			canEditTargets && onWriteTargets !== undefined
+				? createElement(
+						"div",
+						{ style: { display: "flex", gap: "8px", alignItems: "center", marginTop: "6px" } },
+						createElement(
+							"button",
+							{
+								style: { ...S.bigBtn(true), padding: "6px 12px" },
+								onClick: writeTargets,
+								disabled: busy || writing || !targetRowsOk || targetsToWrite.length === 0,
+							},
+							writing ? "正在写回…" : "💾 写回章节安排",
+						),
+						createElement(
+							"span",
+							{ style: { fontSize: "11px", opacity: 0.65 } },
+							"手动改动与 AI 建议都先预填；点「写回」才落盘。",
+						),
+					)
+				: createElement(
+						"p",
+						{ style: { ...S.hint, margin: "6px 0 0" } },
+						// 票 gold-revision-flow/03 复审：文案按**真实状态**说，别把「不可编辑」
+						// 一律说成「写完整本已经开始」——阶段 4 改稿、刚定稿那几态铺章都还没开始。
+						targetEditHint,
+					),
+			Number.isFinite(meta?.targetWords)
 				? createElement(
 						"p",
 						{ style: { margin: "4px 0 0", fontSize: "12px", opacity: 0.6 } },
-						`兜底统一值：${meta.targetWords} 字（仅未填章使用）`,
+						`兜底统一值：${meta.targetWords} 汉字（仅未填章使用）`,
 					)
 				: null,
 		),
@@ -676,7 +995,7 @@ export function GoldFinalize(props) {
 			createElement(
 				"label",
 				{ style: S.label },
-				"兜底统一字数（可选，仅未填章使用）",
+				"兜底统一目标（汉字，可选，仅未填章使用）",
 			),
 			createElement("input", {
 				style: { ...S.input, width: "110px" },
@@ -695,7 +1014,7 @@ export function GoldFinalize(props) {
 				{
 					style: { ...S.bigBtn(true), padding: "6px 14px" },
 					onClick: requestSuggestion,
-					disabled: suggesting || busy,
+					disabled: suggesting || writing || busy,
 				},
 				suggesting ? "AI 思考中…" : "✨ AI 建议",
 			),
@@ -707,7 +1026,7 @@ export function GoldFinalize(props) {
 					createElement(
 						"p",
 						{ style: { margin: "0 0 4px" } },
-						`🤖 AI 建议：每章 ${suggestion.suggested} 字（${suggestion.range ?? ""}）。${suggestion.reason ?? ""}`,
+						`🤖 AI 建议已预填，尚未写回：整体每章约 ${suggestion.suggested} 汉字（${suggestion.range ?? ""}）。${suggestion.reason ?? ""}`,
 					),
 					(suggestion.perChapter ?? []).length > 0
 						? createElement(
@@ -717,7 +1036,7 @@ export function GoldFinalize(props) {
 									createElement(
 										"div",
 										{ key: item.n, style: { margin: "1px 0" } },
-										`${item.n}. ${item.title ?? ""}：${Number.isFinite(item.words) ? `约 ${item.words} 字` : "未定，AI 写整本时自定"}${item.reason ? `（${item.reason}）` : ""}`,
+										`${item.n}. ${item.title ?? ""}：${Number.isFinite(item.words) ? `约 ${item.words} 汉字` : "未定，AI 写整本时自定"}${item.reason ? `（${item.reason}）` : ""}`,
 									),
 								),
 							)
@@ -728,7 +1047,21 @@ export function GoldFinalize(props) {
 			? createElement(
 					"p",
 					{ style: S.error },
-					"兜底字数请在 500-50000 之间，或留空只用每章清单",
+					"兜底目标请填 500-50000 汉字，或留空只用逐章目标",
+				)
+			: null,
+		!targetRowsOk
+			? createElement(
+					"p",
+					{ style: S.error },
+					"逐章目标请填 500-50000 汉字，或留空沿用未定。",
+				)
+			: null,
+		targetsDirty
+			? createElement(
+					"p",
+					{ style: { ...S.hint, margin: "4px 0" } },
+					"逐章目标有未写回改动；先点「写回章节安排」再定稿。",
 				)
 			: null,
 		error !== null
@@ -752,7 +1085,7 @@ export function GoldFinalize(props) {
 						if (live.length > 0) setConfirming("seal");
 						else onApprove(true, targetToSend);
 					},
-					disabled: busy || !wordsOk,
+					disabled: busy || writing || !wordsOk || !targetRowsOk || targetsDirty,
 				},
 				"✅ 就按这章的风格写全书",
 			),
@@ -766,7 +1099,7 @@ export function GoldFinalize(props) {
 						padding: "8px 10px",
 					},
 					onClick: () => setConfirming("rewrite"),
-					disabled: busy || !wordsOk,
+					disabled: busy || writing || !wordsOk || !targetRowsOk || targetsDirty,
 				},
 				"❌ 这版整个不要，重写",
 			),
@@ -796,21 +1129,49 @@ export function GoldFinalize(props) {
 						// 改成「会生效」＋把收回的路说给用户（收回入口在对话侧，界面没有）。
 						"定稿前确认：下面这些会生效（想收回，可以在对话里跟 AI 说）",
 					),
+					// 票 gold-revision-flow/01：定稿确认层**分两组**——原式把「本稿已照它改过的」与
+					// 「会变成全书风格线的」平铺成一条，一条早就改过的意见会再次以"会生效"的姿态出现。
+					// 取数口径**不变**（未撤回＝会生效），只改展示分组。
 					createElement(
 						"p",
 						{ style: { margin: "0 0 4px", fontSize: "12px", opacity: 0.85 } },
 						"① 你的意见转成「风格线」，后面每一章都照此执行：",
 					),
-					live.map((o, i) =>
-						createElement(
-							"p",
-							{
-								key: o.id,
-								style: { margin: "0 2px 2px 12px", fontSize: "12px" },
-							},
-							`#${i + 1} ${OPINION_KIND_TEXT[o.kind] ?? o.kind}${o.wish ? `：${o.wish}` : ""}`,
+					live
+						.filter((o) => o.status !== "applied")
+						.map((o, i) =>
+							createElement(
+								"p",
+								{
+									key: o.id,
+									style: { margin: "0 2px 2px 12px", fontSize: "12px" },
+								},
+								`#${i + 1} ${OPINION_KIND_TEXT[o.kind] ?? o.kind}${o.wish ? `：${o.wish}` : ""}${
+									o.status === "pending" || o.status === "sent"
+										? "（这一稿还没改到，AI 写全书时按它办）"
+										: ""
+								}`,
+							),
 						),
-					),
+					live.some((o) => o.status === "applied")
+						? createElement(
+								"p",
+								{ style: { margin: "6px 0 2px", fontSize: "12px", opacity: 0.85 } },
+								"（下面这些这一稿已经照它改过了，一并沉淀为风格线：）",
+							)
+						: null,
+					live
+						.filter((o) => o.status === "applied")
+						.map((o) =>
+							createElement(
+								"p",
+								{
+									key: o.id,
+									style: { margin: "0 2px 2px 12px", fontSize: "12px", opacity: 0.6 },
+								},
+								`${OPINION_KIND_TEXT[o.kind] ?? o.kind}${o.wish ? `：${o.wish}` : ""} —— 本稿已改`,
+							),
+						),
 					createElement(
 						"p",
 						{ style: { margin: "4px 0", fontSize: "12px", opacity: 0.85 } },
@@ -825,7 +1186,7 @@ export function GoldFinalize(props) {
 							{
 								style: S.bigBtn(true),
 								onClick: () => onApprove(true, targetToSend),
-								disabled: busy || !wordsOk,
+								disabled: busy || writing || !wordsOk || !targetRowsOk || targetsDirty,
 							},
 							"确认，定稿",
 						),
@@ -866,7 +1227,7 @@ export function GoldFinalize(props) {
 									color: "var(--dsw-danger, #cf222e)",
 								},
 								onClick: () => onApprove(false, targetToSend),
-								disabled: busy || !wordsOk,
+								disabled: busy || writing || !wordsOk || !targetRowsOk || targetsDirty,
 							},
 							"确认重写",
 						),
@@ -879,6 +1240,28 @@ export function GoldFinalize(props) {
 				)
 			: null,
 	);
+}
+
+// ── 谈判桌·检查徽章（票 gold-revision-flow/02：从 GoldTable 里抽出的纯函数） ─────
+// ⚠️ 票面勘误②：初值**不许**落在「已附检查记录」上。原式只在 `auditText != null` 时改写，于是三种
+// "其实没有"的情形全落在默认句上——① 还没读到（undefined 初值）② 读不到/没有（拉取失败 → null）
+// ③ 拿到但形状不对。三种都不许说「已附」。抽成纯函数是为了能直调断言（渲染级要 stub fetchText + 异步 effect）。
+// `auditText` 形状：**undefined = 还没读到**、null = 没有／读不到、string = 读到了（内容自己判）。
+export function auditBadgeText(auditText) {
+	// 票 10（判定三 #9）：界面一律说「检查」——「质检」（质量门系机器词）与「自查」（机器视角）
+	// 都不上人眼。文件仍是 `work/audit-NN.md`（机器身份词，不改）。
+	if (auditText === undefined) return "🧪 检查：正在读这一稿的检查记录";
+	if (auditText === null) return "🧪 检查：这一稿还没有检查记录";
+	try {
+		const audit = JSON.parse(auditText);
+		return typeof audit.passed === "boolean"
+			? audit.passed === true
+				? "🧪 检查：通过（没有待完善项）"
+				: "🧪 检查：有几处待完善（可以让 AI 改）"
+			: "🧪 检查：记录格式待完善";
+	} catch {
+		return "🧪 检查：记录格式待完善";
+	}
 }
 
 // ── 谈判桌·总装（稿页签 + 读/对比 + 意见单 + 定稿区） ────────────────────────
@@ -946,22 +1329,8 @@ export function GoldTable(props) {
 	}, [comparePath]);
 	const compareText =
 		comparePath === null ? null : (texts[comparePath] ?? null);
-	// 票 10（判定三 #9）：界面一律说「检查」——「质检」（质量门系机器词）与「自查」（机器视角）
-	// 都不上人眼。文件仍是 `work/audit-NN.md`（机器身份词，不改）。
-	let auditBadge = "🧪 检查：已附检查记录";
-	if (auditText != null) {
-		try {
-			const audit = JSON.parse(auditText);
-			auditBadge =
-				typeof audit.passed === "boolean"
-					? audit.passed === true
-						? "🧪 检查：通过（没有待完善项）"
-						: "🧪 检查：有几处待完善（可以让 AI 改）"
-					: "🧪 检查：记录格式待完善";
-		} catch {
-			auditBadge = "🧪 检查：记录格式待完善";
-		}
-	}
+	// 票 gold-revision-flow/02：徽章取词走那个纯函数（三态如实说，缺文件不说「已附」）。
+	const auditBadge = auditBadgeText(auditText);
 	const addOpinion = (kind, wish, para, hint) => {
 		void postAction({
 			action: "gold-opinion",
@@ -1111,6 +1480,8 @@ export function GoldTable(props) {
 				void postAction({ action: "gold-approve", approved, targetWords });
 			},
 			onSuggestWords,
+			onWriteTargets: (targets) =>
+				postAction({ action: "gold-target-words-set", targets }),
 		}),
 	);
 }

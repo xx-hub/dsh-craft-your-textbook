@@ -2,9 +2,10 @@
  * 造书工作台 · 后端流程插件（宿主侧）——Web 壳
  *
  * 本文件保留：插件元数据（name/inject）、HTTP handlers、启动恢复链、
- * apply（路由注册 + 时机）、动作族 dispatch 表（ACTION_FAMILY_OF）。
+ * apply（路由注册 + 时机）、动作族 dispatch 表（HANDLER_OF_FAMILY + 由目录构造的
+ * ACTION_FAMILY_OF，票 contract-actions/04）。
  * 领域引擎（六阶段状态机核心 + 共享工具）在 ./workflow/engine.js；
- * 9 个动作族在 ./workflow/actions/*.js。
+ * 9 个动作族在 ./workflow/actions/*.js；动作身份与动作族 metadata 在 ./contract-actions.js。
  */
 import {
   GATE_LABELS,
@@ -12,6 +13,7 @@ import {
   appendEvent,
   assertSessionOwned,
   bindAnnounce,
+  bindContextOccupancy,
   chapterArtifacts,
   chapterDone,
   deepAffected,
@@ -27,6 +29,7 @@ import {
   processLogPath,
   projectDir,
   projectsRoot,
+  proposalFilesOnDisk,
   readEvents,
   readMeta,
   readRegistry,
@@ -43,21 +46,25 @@ import { actBooks } from './workflow/actions/books.js'
 import { actWizard } from './workflow/actions/wizard.js'
 import { actConvert } from './workflow/actions/convert.js'
 import { actGates } from './workflow/actions/gates.js'
-import { actGold } from './workflow/actions/gold.js'
+import { actGold, canEditTargetWords } from './workflow/actions/gold.js'
 import { actDeepModify } from './workflow/actions/deep-modify.js'
 import { actCollabSignals } from './workflow/actions/collab-signals.js'
-import { actChapters } from './workflow/actions/chapters.js'
+import { actChapters, readChapterAuditSummary } from './workflow/actions/chapters.js'
 import { actPatternsOps } from './workflow/actions/patterns-ops.js'
+import { buildActionFamilyTable } from './workflow/registration.js'
 import { readFileSync, readdirSync, writeFileSync, existsSync, statSync, mkdirSync, renameSync, rmSync, realpathSync } from 'node:fs'
 import { join, resolve, basename } from 'node:path'
 import { isWithin } from './path-guard.js'
 import { readSettings } from './mineru-lib.js'
-import { MAX_UPLOAD_BYTES, uploadTooLargeMessage, productOpenMode, SEGMENT_PHASE } from './domain-rules.js'
+import { MAX_UPLOAD_BYTES, uploadTooLargeMessage, productOpenMode, artifactKind, SEGMENT_PHASE, countHanzi, contextOccupancyPercent, ROLES, guessRoleFromName } from './domain-rules.js'
 
 
 export const name = 'textbook-workflow'
 
-export const inject = ['webServer', 'agents', 'subagents', 'sessions']
+// 回答：`sessionProjections`（宿主 `contextPressure` 会话投影的读数口，票 walkthrough-fixes/28）。
+// 没有它，领任务说明里那一句「上下文已用 N%」就永远不出现（读数口未绑定 ⇒ null ⇒ 整句不追加，
+// 读不到就不显示，不显示 0%）——而不是写一个假数。
+export const inject = ['webServer', 'agents', 'subagents', 'sessions', 'sessionProjections']
 
 const SESSION_ID_RE = /^[A-Za-z0-9._-]{1,128}$/
 
@@ -186,13 +193,23 @@ async function handleUpload(req, res) {
   if (sessionId === null) return
   const project = url.searchParams.get('project')
   const name = url.searchParams.get('name')
-  const role = url.searchParams.get('role') ?? '学生用书'
+  // 缺参数不是越界：缺省走文件名规则的那个兜底角色（guessRoleFromName 对任何名字都回它，
+  // 必在 ROLES 内）。**不另写一个 '学生用书' 字面量**——接口处不维护第二份角色值。
+  const role = url.searchParams.get('role') ?? guessRoleFromName('')
   if (project === null || !PROJECT_ID_RE.test(project)) {
     sendJson(res, 400, { ok: false, error: '缺少或非法的 project 参数' })
     return
   }
   if (name === null || name.trim() === '' || !/\.pdf$/i.test(name)) {
     sendJson(res, 400, { ok: false, error: '请选择 PDF 文件（.pdf）' })
+    return
+  }
+  // 素材角色是**封闭五分类**（CONTEXT.md「素材角色」/ ADR-0023 决策 1）。原先这一格是裸取查询串：
+  // 同函数里 project 与 name 都有闸门，唯独角色没有——越界值原样落进材料清单，并原样流进阶段
+  // 任务说明里给 AI 的材料表，「分类法只有五个值」只由界面与一处事后过滤器保证，直连即可绕过。
+  // 白名单取 `ROLES`（唯一取值来源）而不写死五个字符串：规范集合日后变更，这道闸门自动跟随。
+  if (!ROLES.includes(role)) {
+    sendJson(res, 400, { ok: false, error: `非法的 role 参数（素材角色只认：${ROLES.join(' / ')}）` })
     return
   }
   try {
@@ -379,51 +396,114 @@ function handleDownload(req, res) {
 }
 
 
-/** action → 动作族 handler 映射表。 */
-const ACTION_FAMILY_OF = new Map([
-  ['book-create', actBooks],
-  ['book-rename', actBooks],
-  ['book-set-goal', actBooks],
-  ['book-delete', actBooks],
-  ['wizard-suggest', actWizard],
-  ['suggest-roles', actWizard],
-  ['convert-start', actConvert],
-  ['retry-convert', actConvert],
-  ['nudge', actConvert],
-  ['resume', actConvert],
-  ['gate-decide', actGates],
-  ['explore-confirm', actGates],
-  ['outline-confirm', actGates],
-  ['chapters-review-confirm', actGates],
-  ['final-approve', actGates],
-  ['rollback', actGates],
-  ['gold-opinion', actGold],
-  ['gold-opinion-revoke', actGold],
-  ['gold-revise', actGold],
-  ['gold-chapter-set', actGold],
-  ['gold-approve', actGold],
+/**
+ * 提问卡的一次作答 → 一条书账本事件（票 06 ②）。
+ *
+ * 真相（票面 §先说清楚）：提问卡是**宿主**的 UI——`dsh-client-ui-user-questions` 接管聊天编辑器，
+ * 渲染的是 `dsh-tool-ask-user`（工具名 `ask_user_question`）的 schema。答案**本来留痕了**，
+ * 只留在宿主会话档案里；书账本里查不到，那才是这一票要补的通路。
+ *
+ * **为什么是新端点而不是新动作**：契约面动作目录（`src/contract-actions.js`）的 43 个规范动作里
+ * 没有任何一个的语义是「记下用户答了什么」——硬套 `intervene`（留言）会让账本说「稍后处理」，
+ * 而用户答完那一刻 AI 正在等这个答案，说法就是假的。动作身份归目录，目录不归本票改。
+ *
+ * **为什么复用 `textbook/hint` 这个事件类型**：新增事件类型要同时动 `EVENT_TYPES`、
+ * `EVENT_META` 与 `logEntryText` 三处，后两处在 `src/domain-rules.js` 与 `src/workflow/engine.js`
+ * 上，不在本票可改面内；而 `hint` 正是仓里登记的「碎语」通道（docs/协作模型.md §2.8 表 B 多处复用），
+ * 语义就是「随手记一句、不产出文件」。结构化的 `question` / `answers` 一并写进 data，
+ * 机器产物 `timeline.jsonl` 里查得到——**不靠人读文本还原那次选择**。
+ *
+ * ⚠️ 发生时刻由 `appendEvent` 打在事件上（服务端时间）：浏览器不另带一个自己的时刻来，
+ * 与「新鲜度是服务端事实」同一条纪律。
+ *
+ * POST /textbook/question?session=&project= （body: { key, questions, answers }）
+ */
+async function handleQuestion(req, res) {
+  let body
+  try {
+    body = await readBody(req)
+  } catch (error) {
+    sendJson(res, 400, {
+      ok: false,
+      error: error?.code === BODY_TOO_LARGE ? '请求体超过 64MB 上限' : '请求体不是合法 JSON',
+    })
+    return
+  }
+  const sessionId = requireSession(body.session, res)
+  if (sessionId === null) return
+  const project = body.project
+  if (typeof project !== 'string' || !PROJECT_ID_RE.test(project)) {
+    sendJson(res, 400, { ok: false, error: '缺少或非法的 project 参数' })
+    return
+  }
+  const questions = Array.isArray(body.questions) ? body.questions : []
+  const answers = Array.isArray(body.answers) ? body.answers : []
+  if (questions.length === 0 && answers.length === 0) {
+    sendJson(res, 400, { ok: false, error: '没有可记的提问内容' })
+    return
+  }
+  try {
+    assertSessionOwned(project, sessionId)
+  } catch (error) {
+    // 归属不成立是**请求本身不成立**，与「机器出错」分开回（与 upload/file 同一口径）。
+    sendJson(res, 403, { ok: false, error: String(error instanceof Error ? error.message : error) })
+    return
+  }
+  try {
+    if (readMeta(project) === null) {
+      sendJson(res, 404, { ok: false, error: '项目不存在' })
+      return
+    }
+    const asked = questions
+      .map((item) => (typeof item?.header === 'string' && item.header.trim() !== '' ? item.header.trim() : item?.question))
+      .filter((text) => typeof text === 'string' && text.trim() !== '')
+    const picked = answers.flatMap((answer) => [
+      ...(Array.isArray(answer?.selected) ? answer.selected : []),
+      ...(typeof answer?.custom === 'string' && answer.custom.trim() !== '' ? [answer.custom] : []),
+    ])
+    const text = `用户在提问卡上答了「${clip(asked.join('；'), 60)}」：${clip(picked.join('、'), 120) || '（没有勾选）'}`
+    appendEvent(project, 'textbook/hint', { text, question: asked, answers, source: 'ask_user_question' })
+    sendJson(res, 200, { ok: true, project })
+  } catch (error) {
+    sendJson(res, 500, { ok: false, error: String(error instanceof Error ? error.message : error) })
+  }
+}
+
+
+/** 提问/答案都是模型或用户写的字：截断后再落账，一条事件不许无限长。 */
+function clip(value, max) {
+  return value.length > max ? `${value.slice(0, max)}…` : value
+}
+
+
+/**
+ * 动作族 → handler 的真实注册（Node implementation 只留在这里，票 contract-actions/04）。
+ * 一族一实现，族 id 与 module 文件名同源：`./workflow/actions/<族>.js`。
+ */
+const HANDLER_OF_FAMILY = new Map([
+  ['books', actBooks],
+  ['wizard', actWizard],
+  ['convert', actConvert],
+  ['gates', actGates],
+  ['gold', actGold],
   ['deep-modify', actDeepModify],
-  ['deep-undo', actDeepModify],
-  ['style-note', actCollabSignals],
-  ['style-note-revoke', actCollabSignals],
-  ['intervene', actCollabSignals],
-  ['intervene-done', actCollabSignals],
-  ['waive', actCollabSignals],
-  ['waive-revoke', actCollabSignals],
-  ['pause', actCollabSignals],
-  ['review', actChapters],
-  ['review-revoke', actChapters],
-  ['audit-submit', actChapters],
-  ['stage-submit', actChapters],
-  ['stage-brief', actChapters],
-  ['progress', actChapters],
-  ['suggest-words', actPatternsOps],
-  ['pattern-analyze', actPatternsOps],
-  ['pattern-list', actPatternsOps],
-  ['settings', actPatternsOps],
-  ['demo-run', actPatternsOps],
-  ['debug-spawn', actPatternsOps],
+  ['collab-signals', actCollabSignals],
+  ['chapters', actChapters],
+  ['patterns-ops', actPatternsOps],
 ])
+
+
+/**
+ * 动作 → 动作族 handler 的分发表：**规范动作名与动作族 metadata 只从契约面动作目录来**
+ * （`./contract-actions.js`，ADR-0017 决策 6/9）。本文件不再手写第二份动作清单——
+ * 新增动作就是往目录里加一行，它自动落进本表。
+ *
+ * 目录是零依赖 metadata module、不认识本文件的 handler；本文件也不把 payload、授权、
+ * 用户确认、账本或错误语义搬进目录：那些仍归各自动作族实现与 engine。
+ *
+ * 装配与两边的闭包在 `./workflow/registration.js`（纯函数，好数据坏数据都由测试直接验）。
+ */
+const ACTION_FAMILY_OF = buildActionFamilyTable(HANDLER_OF_FAMILY)
 
 
 /** POST /textbook/action 动作分发 */
@@ -483,6 +563,20 @@ function handleEvents(req, res) {
       return
     }
     const events = readEvents(project, after)
+    // 定稿区展示用的实测值是**响应派生**，不落 project.json：服务端当场读盘上当前范例章，
+    // 用 domain-rules 的唯一汉字计数口径算好后随 meta 视图下发，浏览器不另读正文。
+    const goldMeasuredChapter = goldN(meta)
+    let goldMeasuredHanzi = null
+    try {
+      const goldPath = workFile(project, `chapter-${String(goldMeasuredChapter).padStart(2, '0')}.md`)
+      if (existsSync(goldPath)) goldMeasuredHanzi = countHanzi(readFileSync(goldPath, 'utf8'))
+    } catch { /* 还没产出正文时留 null，不编数字 */ }
+    const metaView = {
+      ...meta,
+      goldMeasuredChapter,
+      goldMeasuredHanzi,
+      canEditTargetWords: canEditTargetWords(meta),
+    }
     // 章节状态：每章写好/自查好的徽章（UI 与 AI 都用）。
     // 票 14（界面数字同源）：`done` 直接问**闸门那一份判据**（engine 的 chapterDone：两份产物在
     // ＋ 机器记下的交工通过 ＋ 没有未处置的抽查意见）——界面的「已完成 X/Y 章」与过目闸门从此同源，
@@ -531,7 +625,7 @@ function handleEvents(req, res) {
       }
     } catch { goldDrafts = [] }
     sendJson(res, 200, {
-      ok: true, project, after, events, meta,
+      ok: true, project, after, events, meta: metaView,
       dir: projectDir(project),
       gate: foldGate(project),
       snapshots: listSnapshots(project),
@@ -550,6 +644,44 @@ function handleEvents(req, res) {
   } catch (error) {
     sendJson(res, 500, { ok: false, error: String(error instanceof Error ? error.message : error) })
   }
+}
+
+
+/**
+ * 盘上产物事实：与 artifacts 并行下发，stat 失败只省掉这一份事实。
+ * kind 统一复用 domain-rules.artifactKind 的共享领域规则映射。
+ */
+function buildArtifactFacts(projectId, artifacts) {
+  const root = projectDir(projectId)
+  const facts = []
+  const chapters = new Map()
+  const audits = new Map()
+  for (const rel of artifacts) {
+    if (typeof rel !== 'string' || rel === '') continue
+    try {
+      const stat = statSync(join(root, rel))
+      if (!stat.isFile()) continue
+      const path = rel.replace(/\\/g, '/')
+      const chapter = /^work\/chapter-(\d{2})\.md$/.exec(path)
+      const audit = /^work\/audit-(\d{2})\.md$/.exec(path)
+      const fact = {
+        path: rel,
+        kind: artifactKind(path),
+        modifiedAt: stat.mtimeMs,
+      }
+      facts.push(fact)
+      if (chapter !== null) chapters.set(chapter[1], fact)
+      if (audit !== null) audits.set(audit[1], fact)
+    } catch { /* 读不到 stat 就省略这份事实，不让过程图谱整体失败 */ }
+  }
+  // 新鲜度是服务端事实；浏览器不再拿自己的时间或另一份数据重算。
+  for (const [n, chapter] of chapters) {
+    const audit = audits.get(n)
+    if (audit === undefined) continue
+    chapter.freshness = 'current'
+    audit.freshness = audit.modifiedAt < chapter.modifiedAt ? 'stale' : 'current'
+  }
+  return facts
 }
 
 
@@ -592,8 +724,21 @@ function buildProcessMap(projectId) {
         : (mine !== null && mine.status === 'awaiting'
           ? 'waiting-user'
           : (pending === 'gate' && meta?.pendingGate === gate ? 'active' : 'pending')),
-      artifacts: [`提案/关卡${gate}-v1.md`].filter(existsRel),
-      decision: mine === null ? undefined : { version: mine.version, approved: mine.status === 'approved', note: mine.decision?.note ?? '' },
+      artifacts: proposalFilesOnDisk(projectId, gate).filter(existsRel),
+      // 票 workbench-transitions/23：`version` 取**已决的那条提案**的版次（`decidedVersion`），
+      // 不取 `mine.version`（那是最新提案的版次，awaiting 时也照样是新提案）；另把 `status` 带出来，
+      // 让界面分得清「还没拍板」与「拍过了但没通过」——两者今天都落在 `approved:false` 上。
+      // 票 workbench-transitions/25：`proposalVersion` 补上**最新提案**那一版——用户此刻正要拍的是它，
+      // 与「已定下来的那一版」分家（v1 驳回、v2 在等时 `version` 是 1、它才是 2）。
+      // ⚠️ 这两个字段名与 `foldGate` 返回值里**同名的那两个意思相反**（那边 `version` 是最新提案、
+      // `decidedVersion` 是已定下来的那版），别看着"顺手"对调。
+      decision: mine === null ? undefined : {
+        status: mine.status,
+        version: mine.decidedVersion ?? mine.version,
+        proposalVersion: mine.version,
+        approved: mine.status === 'approved',
+        note: mine.decision?.note ?? '',
+      },
     })
   }
   // 「章节安排」是第 3 次拍板定下来的东西——定过了才算做完。原式写 `phase >= 4 ? 'done' : 'active'`，
@@ -621,9 +766,16 @@ function buildProcessMap(projectId) {
     decision: meta.goldSealed == null ? undefined : { version: meta.goldSealed.version, approved: true, note: '已定稿为最佳范例章' },
     redoNote: meta.goldRedoNote ?? null,
   })
-  // 一章一章写：phase>=5 不等于每一章都在写。只有「已经在动的那章」（有流水线阶段上报）
-  // 或「第一个还没写完的章」才是「▶ 我正在做」，其余未开始的章是 ○。
-  const firstUndone = chapters.findIndex((_, index) => !chapterDone(projectId, index + 1))
+  // 一章一章写：phase>=5 不等于每一章都在写。**「我正在做」只认机器真知道的那一条**——
+  // 主笔 AI 上报了这一章的流水线阶段（`meta.chapterPipeline[n-1].stage`）。
+  // ⚠️ 票 24 / P17（2026-09-27）：原来这里还兜底「index === firstUndone」（第一个还没交工的章），
+  // 于是那个 `▶` 的真实含义是「第一个还没交工的章」而不是「正在干的活」——从第 1 章正文写完那一刻起
+  // 就钉在「第 1 章 · 写」上，直到第 1 章交工为止（交工还要等它的独立检查过，不过就一直钉着）。
+  // 同一时刻章节卡说的是另一回事（第 5 章「我正在做 · 检查」），同屏两处对「这一章到哪了」打架。
+  // ⇒ AI 没上报（`stageN === null`）就是**机器不知道**，不许拿「第一个还没交工的章」冒充知道。
+  // 🚫 不许换成「第一张有产物的章」之类的新猜法：那只是换一个猜法，仍不是「AI 在干这一章」的事实。
+  // 这一档落回 pending 之后，界面那句「还没到这一步」混着的两件事由 stage-step-model 拆开说
+  // （产物已在盘上、这一章还没走完 → 「还没完成」；真没开始 → 仍说「还没到这一步」）。
   chapters.forEach((chapter, index) => {
     const n = index + 1
     const stageN = pipelineStage(meta, index)
@@ -632,9 +784,11 @@ function buildProcessMap(projectId) {
       phase: SEGMENT_PHASE['chapter'],
       status: chapterDone(projectId, n)
         ? 'done'
-        : (phase >= 5 && (stageN !== null || index === firstUndone) ? 'active' : 'pending'),
+        : (phase >= 5 && stageN !== null ? 'active' : 'pending'),
       // F35（2026-08-20 走查）：每章流水线阶段（writing/auditing/audited/finalizing/done，未上报为 null）。
       stage: stageN,
+      // 票 nav-vs-preview/01：只随过程图谱给人读摘要；原始机器 JSON 仍不开右栏。
+      auditSummary: readChapterAuditSummary(projectId, n),
       artifacts: [`work/chapter-${String(n).padStart(2, '0')}.md`, `work/audit-${String(n).padStart(2, '0')}.md`].filter(existsRel),
     })
   })
@@ -661,6 +815,7 @@ function buildProcessMap(projectId) {
   // 影响预告数据：每段的深改影响范围（下游段 keys / 会被归档的现存产物 / 是否可深改）。
   // demo 书不开放定点修改（canDeepModify=false，走旧全自动通道）。
   for (const seg of segments) {
+    seg.artifactFacts = buildArtifactFacts(projectId, seg.artifacts)
     const affected = deepAffected(projectId, meta, seg.key)
     seg.downstream = affected === null ? [] : affected.downstream
     seg.redoFiles = affected === null ? [] : affected.files.filter((rel) => existsSync(join(projectDir(projectId), rel)))
@@ -759,7 +914,16 @@ function resumeRunning(ctx) {
         ctx.logger.info(`[textbook-workflow] 续跑项目 ${id}`)
         if (meta.pendingStage !== null && meta.pendingStage !== undefined) {
           // 恢复此前交办：重新记账 + 再唤醒主 AI（本方法幂等）。
-          handoff(ctx, id, meta.pendingStage, meta.pendingGate ?? null)
+          // ⚠️ 票 walkthrough-fixes/01（走查 P41）：原来这里**不接返回值**，于是唤醒静默失败
+          // 也是一个「三层都在报成功」的结局（交办照记 → 用户看到「新一章开工了」→ AI 其实一动没动，
+          // 10:07–10:12 对话页无「停止生成」按钮、账本零变化，10:13 用户手打一句「继续」才活过来）。
+          // 现在接住它：`false` 时往账本里落一条 hint，用户 10 分钟内就知道要自己说一句话。
+          const woke = handoff(ctx, id, meta.pendingStage, meta.pendingGate ?? null)
+          if (woke === false) {
+            appendEvent(id, 'textbook/hint', {
+              text: '⚠️ 重启后没能把 AI 叫醒，请发一句话让它继续',
+            })
+          }
         } else {
           void kick(ctx, id)
         }
@@ -852,6 +1016,23 @@ function processRedoMarks() {
 
 export function apply(ctx) {
   bindAnnounce(ctx)
+
+  // 票 walkthrough-fixes/28：主 AI 上下文占用的读数口（同 `bindAnnounce` 的显式契约：只在 apply 绑一次）。
+  // 数据源：宿主 `ctx.sessionProjections` 的 `contextPressure` 会话投影——与宿主输入区角标
+  // 「上下文已用 51%」同一份数据；折算口径是 `domain-rules.contextOccupancyPercent`（双端共用的那一份）。
+  // 快照与来源路径：`docs/reference/dsh-context-occupancy-contracts.md`。
+  // ⚠️ 会话不在存里 / 投影未注册 / 投影值不完整 → null（读不到），
+  // 领任务说明那一句就整句不出现。
+  bindContextOccupancy((sessionId) => {
+    const session = ctx.sessions.get(sessionId)
+    if (session === undefined || session === null) return null
+    // ⚠️ 一定读 `snapshot()`（wire 视图），**不读 `stateOf()`**：后者给的是投影
+    // 单位的**内部折叠态**（`surfaceTokens` / `sampledSurfaceTokens`），而 `projectedTokens` 是在 `wire.view`
+    // 里现算的。读内部态会静默回退到 `pressureTokens`，给出一个与宿主输入区角标
+    // **不同口径**的数字（角标走 `projectedTokens`）——那正是本仓在治的病：同一件事两套数。
+    const cut = ctx.sessionProjections.snapshot(session, ['contextPressure'])
+    return contextOccupancyPercent(cut.values.contextPressure)
+  })
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/textbook/projects', handler: handleProjects }), 'textbook: projects route')
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/textbook/events', handler: handleEvents }), 'textbook: events route')
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/textbook/process', handler: (req, res) => handleProcess(ctx, req, res) }), 'textbook: process route')
@@ -861,6 +1042,7 @@ export function apply(ctx) {
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/textbook/file', handler: handleFile }), 'textbook: file route')
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/textbook/download', handler: handleDownload }), 'textbook: download route')
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/textbook/settings', handler: handleSettings }), 'textbook: settings route')
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/textbook/question', handler: handleQuestion }), 'textbook: question route')
   ctx.logger.info('[textbook-workflow] 造书工作台后端已加载（步骤5：六阶段状态机）')
   // 宿主重启后延迟 3 秒走启动恢复链（三步顺序见 startupRecovery；这里只定时机）。
   setTimeout(() => {

@@ -19,6 +19,7 @@ import {
   handoff,
   chapterArtifacts,
   chapterDone,
+  writeSnapshot,
   proposeGate,
   proposeRevision,
   advance,
@@ -36,12 +37,61 @@ import {
 } from '../engine.js'
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { normalizeTeachingFocus } from '../../domain-rules.js'
+import { CHAPTER_PROGRESS_STAGES, normalizeTeachingFocus } from '../../domain-rules.js'
+import { artifactDataForChapter } from '../artifact-fields.js'
 
 
 /** 范例章审计文件名（NN 两位补零；机器身份词，勿改）。 */
 function goldAuditName(n) {
   return `audit-${String(n).padStart(2, '0')}.md`
+}
+
+
+/** 章审计 JSON 的唯一解析点；读取侧、交工验货与过程图谱摘要都从这里走。 */
+function parseAuditJson(raw) {
+  try {
+    return { audit: JSON.parse(raw), error: null }
+  } catch (error) {
+    return { audit: null, error }
+  }
+}
+
+
+/**
+ * 读取一章的审计记录。文件不存在、读不到或 JSON 不合法时一律 null——
+ * 调用方据真实形状决定拒收或「还没有检查结论」，不在这里猜。
+ */
+export function readChapterAudit(project, n) {
+  try {
+    const raw = readFileSync(chapterArtifacts(project, n).auditPath, 'utf8')
+    return parseAuditJson(raw).audit
+  } catch {
+    return null
+  }
+}
+
+
+/**
+ * `/textbook/process` 下发的人读结论摘要，不把机器审计 JSON（含 matrix）整份搬出去。
+ *
+ * `issues[].text` 的产出契约已经要求用大白话写清「哪里、什么问题、为什么、怎么改」
+ * （见 audit-agent/gold-audit prompt），而具体问题与改法是开放文本，无法用有限词表无损翻译；
+ * 这里保留这句话本身，只裁成 `{ level, text }`，避免词典化后丢掉真正让用户判断的细节。
+ * 老记录没有文件、形状不足、JSON 损坏，或用户已用 `audit-skip` 豁免本章检查时，一律 null。
+ */
+export function readChapterAuditSummary(project, n) {
+  if (waived(project, 'audit-skip')) return null
+  const audit = readChapterAudit(project, n)
+  if (audit === null || typeof audit !== 'object' || Array.isArray(audit)
+      || typeof audit.passed !== 'boolean' || !Array.isArray(audit.issues)) return null
+  const issues = []
+  for (const issue of audit.issues) {
+    if (issue === null || typeof issue !== 'object' || Array.isArray(issue)
+        || typeof issue.level !== 'string' || issue.level.trim() === ''
+        || typeof issue.text !== 'string' || issue.text.trim() === '') return null
+    issues.push({ level: issue.level, text: issue.text })
+  }
+  return { passed: audit.passed, issueCount: issues.length, issues }
 }
 
 
@@ -88,16 +138,15 @@ function goldAuditError(n, detail, matrix) {
  *  `passed !== true` 与普通章那支同口径：`audit-skip` 豁免可跳过；`gold-skip` 跳过的是「等用户拍板」
  *  那一步，不是验货豁免（三方一致的口径写在 `CONTEXT.md`「验货」）。 */
 function checkGoldAudit(project, n, raw) {
-  let audit = null
-  try {
-    audit = JSON.parse(raw)
-  } catch (error) {
+  const parsed = parseAuditJson(raw)
+  if (parsed.error !== null) {
     return {
       passed: false,
       rows: 0,
-      error: goldAuditError(n, `work/${goldAuditName(n)} 不是合法 JSON（${String(error instanceof Error ? error.message : error)}）`, null),
+      error: goldAuditError(n, `work/${goldAuditName(n)} 不是合法 JSON（${String(parsed.error instanceof Error ? parsed.error.message : parsed.error)}）`, null),
     }
   }
+  const audit = parsed.audit
   const matrix = Array.isArray(audit?.matrix) ? audit.matrix : []
   if (matrix.length === 0) {
     return { passed: false, rows: 0, error: goldAuditError(n, '缺文档矩阵（matrix 缺失、为空或不是数组）', matrix) }
@@ -125,8 +174,12 @@ function checkGoldAudit(project, n, raw) {
 
 /** 动作族 · 章节执行与审阅：'audit-submit' / 'review' / 'stage-submit' / 'stage-brief' / 'progress'。 */
 export async function actChapters(ctx, _req, res, action, sessionId, project, body) {
-  /** 拒收入账（票 01 (d)）：交工／提审被拒时一律落一条账本事件（含 stage 与原因）——
-   *  账本与工作台读得到「交工被拒：<原因>」，不再只活在对话轨迹里。 */
+  /** 拒收入账（票 01 (d)，票 02 铺满交工类）：**交工被机器拒收**时一律落一条账本事件（含 stage 与原因）——
+   *  账本与工作台读得到「交工被拒：<原因>」，不再只活在对话轨迹里。
+   *  票 02 的范围：这一族（A 类 · 业务事实）＝ `stage-submit` 各阶段分支里判「这一阶段该交出来的东西」
+   *  的那 20 处 + 票 01 落下的 gold 5 处，一律走这个助手（`stage` 实参取 canonical 阶段词）。
+   *  参数校验那一族（B 类 · 调用方自己把请求写错：章节号/意见正文/`body.chapter` 范围/未知阶段）照旧裸
+   *  `sendJson(res, 400, …)`——把它们记成「交工被拒」会让工作台事件行说假话。 */
   const rejectSubmit = (stage, reason) => {
     appendEvent(project, 'textbook/submit-rejected', { stage, reason })
     sendJson(res, 400, { ok: false, error: reason })
@@ -272,14 +325,14 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
         case 'explore': {
           const explorePath = workFile(project, 'explore.md')
           if (!existsSync(explorePath) || readFileSync(explorePath, 'utf8').trim() === '') {
-            sendJson(res, 400, { ok: false, error: 'work/explore.md 不存在或为空，请先写好探查报告再交工' })
+            rejectSubmit('explore', 'work/explore.md 不存在或为空，请先写好探查报告再交工')
             return
           }
           let km = null
           try { km = JSON.parse(readFileSync(workFile(project, 'knowledge-map.json'), 'utf8')) } catch { km = null }
           if (km === null || typeof km !== 'object' || !Array.isArray(km.knowledgePoints) || km.knowledgePoints.length === 0
             || !Array.isArray(km.chapterSuggestion) || km.chapterSuggestion.length === 0) {
-            sendJson(res, 400, { ok: false, error: 'work/knowledge-map.json 缺失或格式不对（需要非空的 knowledgePoints 与 chapterSuggestion）' })
+            rejectSubmit('explore', 'work/knowledge-map.json 缺失或格式不对（需要非空的 knowledgePoints 与 chapterSuggestion）')
             return
           }
           // teachingFocus 契约是 [string]，AI 偶发写对象数组——机器验货时归一化回写，
@@ -294,7 +347,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
             state.status = 'awaiting-explore'
             delete state.exploreRedoNote // 重做意见只对本轮探查生效
           })
-          appendEvent(project, 'textbook/agent-end', { label: '源探查', outcome: 'ok' })
+          appendEvent(project, 'textbook/agent-end', { label: '源探查', outcome: 'ok', path: 'work/explore.md' })
           appendEvent(project, 'textbook/hint', {
             text: EXPLORE_DONE_HINT,
           })
@@ -307,7 +360,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
           const summary = typeof body.summary === 'string' ? body.summary.trim() : ''
           let detail = typeof body.detail === 'string' ? body.detail.trim() : ''
           if (title === '' || summary === '' || detail === '') {
-            sendJson(res, 400, { ok: false, error: '方案不完整（需要 title 标题 / summary 人话摘要 / detail 完整方案）' })
+            rejectSubmit('gate', '方案不完整（需要 title 标题 / summary 人话摘要 / detail 完整方案）')
             return
           }
           // 指针内联：AI 偶尔会把完整方案写进自选文件、detail 只留一句「见文件」。
@@ -328,6 +381,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
           })
           appendEvent(project, 'textbook/agent-end', {
             label: `设计提案·第${gate}关${version > 1 ? `·修订v${version}` : ''}`, outcome: 'ok',
+           path: `提案/关卡${gate}-v${version}.md`,
           })
           if (version === 1) proposeGate(project, gate, title, summary, detail)
           else proposeRevision(project, gate, version, title, summary, detail)
@@ -340,13 +394,13 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
             try { chapters = JSON.parse(body.chaptersJson) } catch { chapters = null }
           }
           if (chapters === null || !Array.isArray(chapters) || chapters.length === 0) {
-            sendJson(res, 400, { ok: false, error: '章节骨架不能为空（需要 chapters 数组或 chaptersJson JSON 字符串）' })
+            rejectSubmit('outline', '章节骨架不能为空（需要 chapters 数组或 chaptersJson JSON 字符串）')
             return
           }
           const cleaned = []
           for (const chapter of chapters) {
             const title = String(chapter?.title ?? '').trim()
-            if (title === '') { sendJson(res, 400, { ok: false, error: '章节缺少 title' }); return }
+            if (title === '') { rejectSubmit('outline', '章节缺少 title'); return }
             cleaned.push({
               title,
               outline: String(chapter?.outline ?? ''),
@@ -374,7 +428,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
             state.pendingGate = null
           })
           writeWork(project, 'outline.md', JSON.stringify({ chapters: cleaned }, null, 2))
-          appendEvent(project, 'textbook/agent-end', { label: '整理章节骨架', outcome: 'ok' })
+          appendEvent(project, 'textbook/agent-end', { label: '整理章节骨架', outcome: 'ok', path: 'work/outline.md' })
           if (waived(project, 'outline-skip')) {
             advance(project, 3, 4)
             void kick(ctx, project)
@@ -419,6 +473,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
               return
             }
           }
+          let handledThisRound = 0
           updateMeta(project, (state) => {
             state.pendingStage = null
             state.pendingGate = null
@@ -429,8 +484,13 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
             if (Array.isArray(state.goldOpinions)) {
               for (const o of state.goldOpinions) if (o.status === 'sent') o.status = 'applied'
             }
+            // 票 gold-revision-flow/01：交工提示带上**本轮处置**——第一稿与第 N 次修订落同一句，
+            // 用户拿不到"你这轮提的意见已经落到新版里了"的任何信号。数的是**本轮真被交办出去的**
+            // 那些（sent → applied 这一批），与状态迁移同源、不另记一份账。
+            handledThisRound = (subMeta.goldOpinions ?? []).filter((o) => o.status === 'sent').length
           })
-          appendEvent(project, 'textbook/agent-end', { label: '最佳范例章', outcome: 'ok' })
+          const goldArtifact = artifactDataForChapter(gN)
+          appendEvent(project, 'textbook/agent-end', { label: '最佳范例章', outcome: 'ok', path: goldArtifact.path, chapter: goldArtifact.chapter })
           // 票 15④（票 06 的 Answer 第 4 条）：补 `gold-skip` 的读取点——与既有 gate-skip/outline-skip/
           // audit-skip 同构，语义就是「跳过一道已存在的用户确认闸门」（「最佳范例章确认」），
           // 不是新能力、也没有放松任何判据。豁免须由主笔 AI 先得到用户明确同意才调（waive 动作自身的约束）。
@@ -445,7 +505,9 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
             return
           }
           appendEvent(project, 'textbook/hint', {
-            text: '📖 最佳范例章写好了，请在工作台查看：满意点「✅ 满意，继续写全书」，不满意点「❌ 重写」。',
+            text: handledThisRound > 0
+              ? `📖 最佳范例章改好了（本轮照着改了 ${handledThisRound} 条意见），请在工作台查看：满意点「✅ 满意，继续写全书」，不满意点「❌ 重写」。`
+              : '📖 最佳范例章写好了，请在工作台查看：满意点「✅ 满意，继续写全书」，不满意点「❌ 重写」。',
           })
           sendJson(res, 200, { ok: true, project, stage: 'gold' })
           return
@@ -459,20 +521,19 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
           }
           const { chapterPath, auditPath } = chapterArtifacts(project, n)
           if (!existsSync(chapterPath) || readFileSync(chapterPath, 'utf8').trim() === '') {
-            sendJson(res, 400, { ok: false, error: `第${n}章正文缺失或为空：work/chapter-${String(n).padStart(2, '0')}.md` })
+            rejectSubmit('chapters', `第${n}章正文缺失或为空：work/chapter-${String(n).padStart(2, '0')}.md`)
             return
           }
           if (!existsSync(auditPath)) {
-            sendJson(res, 400, { ok: false, error: `第${n}章缺少自查记录：work/audit-${String(n).padStart(2, '0')}.md` })
+            rejectSubmit('chapters', `第${n}章缺少自查记录：work/audit-${String(n).padStart(2, '0')}.md`)
             return
           }
           // 章审计机器验货（2026-08-27 用户拍板 Q4'）：每章交工读 audit JSON，passed === true 才放行。
           // 对齐金标准章 matrix 校验同口径；「审计未过但交工」直接拒（audit-skip 豁免可跳过）。
           if (subMeta.demo !== true && !waived(project, 'audit-skip')) {
-            let audit = null
-            try { audit = JSON.parse(readFileSync(auditPath, 'utf8')) } catch { /* 非合法 JSON = 未过 */ }
+            const audit = readChapterAudit(project, n)
             if (audit?.passed !== true) {
-              sendJson(res, 400, { ok: false, error: `第${n}章审计未通过（work/audit-${String(n).padStart(2, '0')}.md 的 passed 不是 true）：先按审计意见修订并重新审计，或豁免「不要求每章都有独立审查」再交工` })
+              rejectSubmit('chapters', `第${n}章审计未通过（work/audit-${String(n).padStart(2, '0')}.md 的 passed 不是 true）：先按审计意见修订并重新审计，或豁免「不要求每章都有独立审查」再交工`)
               return
             }
           }
@@ -483,13 +544,13 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
             if (!waived(project, 'scaffold-keep')) {
               const residue = scanScaffolding(stripLoaderRegion(chapterText))
               if (residue.length > 0) {
-                sendJson(res, 400, { ok: false, error: `第${n}章正文残留 AI 笔记/脚手架：${residue.slice(0, 3).join('；')}。先拆干净再交工（豁免「保留 AI 的笔记不删」可跳过）。` })
+                rejectSubmit('chapters', `第${n}章正文残留 AI 笔记/脚手架：${residue.slice(0, 3).join('；')}。先拆干净再交工（豁免「保留 AI 的笔记不删」可跳过）。`)
                 return
               }
             }
             // 契约原则（Q9）：style-spec 声明「本书不设练习」→ 练习/答案检查自动跳过；否则仍要齐全。
             if (!waived(project, 'other') && !styleSpecDeclaresNoExercises(project) && !/练习|答案|习题/.test(chapterText)) {
-              sendJson(res, 400, { ok: false, error: `第${n}章正文没有练习或答案（成品要求练习与答案齐全；若本书设计为不设练习，请在 style-spec 写明「不设练习」）：work/chapter-${String(n).padStart(2, '0')}.md` })
+              rejectSubmit('chapters', `第${n}章正文没有练习或答案（成品要求练习与答案齐全；若本书设计为不设练习，请在 style-spec 写明「不设练习」）：work/chapter-${String(n).padStart(2, '0')}.md`)
               return
             }
             // 用户抽查意见（Q5'，票 09）：先按 handledReviews **点名销号**——机器只给点名的置 applied，
@@ -503,10 +564,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
               .map((entry) => (typeof entry?.id === 'string' ? entry.id : ''))
               .filter((id) => id === '' || !reviews.some((r) => r.id === id && r.chapter === n))
             if (unknownIds.length > 0) {
-              sendJson(res, 400, {
-                ok: false,
-                error: `不认识的抽查意见 id：${unknownIds.join('、')}。只能点名第${n}章还没处置的意见（id 见 workbench_status 的 pendingReviews）。`,
-              })
+              rejectSubmit('chapters', `不认识的抽查意见 id：${unknownIds.join('、')}。只能点名第${n}章还没处置的意见（id 见 workbench_status 的 pendingReviews）。`)
               return
             }
             // 这份 `reviews` 只用来判断：未知 id 已在上方整体验明（防半写半退）；「点名后还有没有没处置的」
@@ -516,10 +574,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
               .map((entry) => entry.id))
             const pendingForChapter = reviews.filter((r) => r.chapter === n && r.status === 'pending' && !handledIds.has(r.id))
             if (pendingForChapter.length > 0) {
-              sendJson(res, 400, {
-                ok: false,
-                error: `第${n}章还有 ${pendingForChapter.length} 条未处置的抽查意见：先按意见修订、重新审计（audit passed），交工时用 handledReviews 逐条点名（每条 id + 一句怎么处置的）后再交工。`,
-              })
+              rejectSubmit('chapters', `第${n}章还有 ${pendingForChapter.length} 条未处置的抽查意见：先按意见修订、重新审计（audit passed），交工时用 handledReviews 逐条点名（每条 id + 一句怎么处置的）后再交工。`)
               return
             }
             // 销号落账走单一入口（当场新读）。
@@ -534,7 +589,16 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
             })
           }
           const title = chapters[n - 1]?.title ?? `第${n}章`
-          appendEvent(project, 'textbook/agent-end', { label: `第${n}章《${title}》完成（小助手执笔 + 小助手审计 + 机器验货）`, outcome: 'ok' })
+          appendEvent(project, 'textbook/agent-end', {
+             label: `第${n}章《${title}》完成（小助手执笔 + 小助手审计 + 机器验货）`, outcome: 'ok',
+             path: `work/chapter-${String(n).padStart(2, '0')}.md`, chapter: n,
+           })
+          // 票 05 / P36（2026-09-27 用户拍板「逐章交工各存一次」）：铺章是**一个阶段**
+          // （`stage-start {"stage":"chapters"}` 只发生一次），所以整段 40 万字的写作原先只配发一个存档
+          // （交办「写完整本」之前那一个）——界面那句「随时能回到最近一次存档」字面为真，回的却是「一章未写」。
+          // 这里在**交工成功之后**落一份，于是「最近一次存档」＝**上一章交完的地方**。
+          // 排在 agent-end 之后：存档要含这一章的完成事件，回退到它才真的回到「这一章已交工」那一刻。
+          writeSnapshot(project, `交工「第 ${n} 章《${title}》」之后`)
           // 原先这里 appendEvent 之后又拿请求开头那份旧状态整份写回（还自己写了一次 `updatedAt`）：
           // 账高被拉回交工前那份（票 02 的形状）。「最后动静时刻」只归「记一笔」所有，改法里不再碰它。
           const allDone = chapters.every((_chapter, index) => chapterDone(project, index + 1))
@@ -561,13 +625,13 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
           if (subMeta.demo !== true) {
             const crossPath = workFile(project, 'audit-cross.md')
             if (!existsSync(crossPath) || readFileSync(crossPath, 'utf8').trim() === '') {
-              sendJson(res, 400, { ok: false, error: '合并前缺跨章审计记录 work/audit-cross.md：请先通读全部章节，核对事实一致性、术语统一、交叉引用悬空、知识递进链，发现问题先修，再把审计结论落盘 audit-cross.md 后交工合并。' })
+              rejectSubmit('merge', '合并前缺跨章审计记录 work/audit-cross.md：请先通读全部章节，核对事实一致性、术语统一、交叉引用悬空、知识递进链，发现问题先修，再把审计结论落盘 audit-cross.md 后交工合并。')
               return
             }
           }
           const preface = typeof body.preface === 'string' ? body.preface.trim() : ''
           if (preface === '') {
-            sendJson(res, 400, { ok: false, error: '需要 preface（书的引言/使用说明文本）' })
+            rejectSubmit('merge', '需要 preface（书的引言/使用说明文本）')
             return
           }
           writeWork(project, 'preface.md', preface)
@@ -590,7 +654,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
             state.pendingStage = null
             state.pendingGate = null
           })
-          appendEvent(project, 'textbook/agent-end', { label: '合并成书（机器拼装 + AI 前言）', outcome: 'ok' })
+          appendEvent(project, 'textbook/agent-end', { label: '合并成书（机器拼装 + AI 前言）', outcome: 'ok', path: 'work/book.md' })
           advance(project, 5, 6)
           void kick(ctx, project)
           sendJson(res, 200, { ok: true, project, stage: 'merge' })
@@ -599,7 +663,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
         case 'final': {
           const report = typeof body.report === 'string' ? body.report.trim() : ''
           if (report === '') {
-            sendJson(res, 400, { ok: false, error: '需要 report（你的最后检查报告）' })
+            rejectSubmit('final', '需要 report（你的最后检查报告）')
             return
           }
           // 终检门槛（真实模式）：留言必须先销号。
@@ -615,10 +679,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
           }
           // 进度账本硬验（真实模式）：交工前 work/progress.md 必须在（progress-skip 可豁免）。
           if (subMeta.demo !== true && !waived(project, 'progress-skip') && !existsSync(workFile(project, 'progress.md'))) {
-            sendJson(res, 400, {
-              ok: false,
-              error: '缺 work/progress.md（进度账本）：每章一行（写完/审计/验货），是中途换人/重做的参照。不需要可先豁免「跳过进度账本检查」再交工。',
-            })
+            rejectSubmit('final', '缺 work/progress.md（进度账本）：每章一行（写完/审计/验货），是中途换人/重做的参照。不需要可先豁免「跳过进度账本检查」再交工。')
             return
           }
           // styleCheck 处置契约（真实模式 + 存在 active 风格线时必交）。
@@ -629,16 +690,16 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
               const byId = new Map(disposals.map((d) => [d.id, d]))
               const missing = active.filter((n) => !byId.has(n.id)).map((n) => n.text)
               if (missing.length > 0) {
-                sendJson(res, 400, { ok: false, error: `这些风格意见没有处置：${missing.join('；')}。每条都要给出去向（落实在哪章 / 冲突理由 / 已收回）。` })
+                rejectSubmit('final', `这些风格意见没有处置：${missing.join('；')}。每条都要给出去向（落实在哪章 / 冲突理由 / 已收回）。`)
                 return
               }
               for (const d of disposals) {
                 if (!['adopted', 'conflict', 'superseded'].includes(d.status)) {
-                  sendJson(res, 400, { ok: false, error: 'styleCheck 的 status 只能是 adopted / conflict / superseded' })
+                  rejectSubmit('final', 'styleCheck 的 status 只能是 adopted / conflict / superseded')
                   return
                 }
                 if (d.status === 'conflict' && (typeof d.note !== 'string' || d.note.trim() === '')) {
-                  sendJson(res, 400, { ok: false, error: 'conflict（冲突）必须写一句理由，说明向用户确认过' })
+                  rejectSubmit('final', 'conflict（冲突）必须写一句理由，说明向用户确认过')
                   return
                 }
               }
@@ -661,10 +722,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
           try { specNow = specFingerprint(project) } catch { /* spec 被删/不可读：视为已变更（堵「删 spec 逃检查」的逃逸口） */ }
           if (subMeta.styleSpecHash != null && specNow !== subMeta.styleSpecHash
             && !report.includes('style-spec 变更')) {
-            sendJson(res, 400, {
-              ok: false,
-              error: 'style-spec 在范例章定稿后有改动（机器对账发现）：若改动经用户确认，请在 report 末尾写明「style-spec 变更：<改了哪条>」再交工；未经用户确认的改动请改回原样。',
-            })
+            rejectSubmit('final', 'style-spec 在范例章定稿后有改动（机器对账发现）：若改动经用户确认，请在 report 末尾写明「style-spec 变更：<改了哪条>」再交工；未经用户确认的改动请改回原样。')
             return
           }
           updateMeta(project, (state) => { state.finalReport = report })
@@ -684,7 +742,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
               delete state.finalRedoNote // 终检修订意见销号：本轮交工已通过，意见已落实（2026-08-27 grill 修订）
             })
             appendEvent(project, 'textbook/quality', { checks: machineChecks })
-            appendEvent(project, 'textbook/agent-end', { label: '最后检查（AI 自查 + 机器兜底）', outcome: 'ok' })
+            appendEvent(project, 'textbook/agent-end', { label: '最后检查（AI 自查 + 机器兜底）', outcome: 'ok', path: 'work/book.md' })
             appendEvent(project, 'textbook/hint', {
               text: FINAL_CHECK_DONE_HINT,
             })
@@ -734,7 +792,7 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
       // 走单一入口（当场新读）：原先这里还自己写了一次 `updatedAt`（票 02 的形状）；
       // 「最后动静时刻」只归上面那记「记一笔」所有。
       const chapterN = Number.isSafeInteger(body.chapter) && body.chapter >= 1 ? Number(body.chapter) : null
-      const stage = ['writing', 'auditing', 'audited', 'finalizing', 'done'].includes(String(body.stage))
+      const stage = CHAPTER_PROGRESS_STAGES.includes(String(body.stage))
         ? String(body.stage)
         : null
       if (chapterN !== null && stage !== null) {

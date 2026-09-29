@@ -13,6 +13,19 @@ import { phaseUi, gateHuman } from "./view-rules.js";
 
 // ── 协作状态条：现在轮到谁 ───────────────────────────────────────────────────
 
+/**
+ * 「这本书被暂停了吗」的唯一判据（票 walkthrough-fixes/22 · P6）。
+ *
+ * 为什么要单独一份：暂停这件事**三处各判各的**——顶栏判 `meta.pause` 出「⏸ 已暂停 / ▶ 继续」，
+ * 状态条与活性行原先**全程不读** `meta.pause`，于是点完暂停同一屏既说「已暂停」又说
+ * 「🤖 我正在做」（走查实测，且刷新后照旧）。判据同源，矛盾就没有第二处生长的地方。
+ *
+ * 判定归属（本票只落这一条）：**暂停优先**——`meta.pause` 一置上，正文这两处就不再说
+ * 「我正在做」。⚠️ 「同一屏允许几个状态词」那个上限的裁决属于另一张票
+ * （`16-状态词同屏打架.md`），这里不抢、也不新造第四个说法：暂停期间正文让位给顶栏那句。
+ */
+const pausedNow = (meta) => meta?.pause != null;
+
 /** 「轮到你」时你到底该做什么——一句大白话，按书的 status 给。
  *  批 1（2026-09-20）：状态词收敛成「轮到你 / 我正在做 / 已完成」，见 CONTEXT.md「工作台状态词」。 */
 function humanTurnAction(status, gate, phase) {
@@ -29,9 +42,10 @@ function humanTurnAction(status, gate, phase) {
 }
 
 export function StatusStrip(props) {
-	const { meta, gate, pendingStage, progressDetail, metaLabel, humanTurn } = props;
+	const { meta, gate, pendingStage, metaLabel, humanTurn } = props;
 	const status = meta?.status ?? "active";
 	const phase = meta?.phase ?? 1;
+	const paused = pausedNow(meta);
 	let text = null;
 	let tone = "normal";
 	if (status === "delivered") {
@@ -50,13 +64,32 @@ export function StatusStrip(props) {
 	} else if (humanTurn === true || (gate !== null && gate.status === "awaiting")) {
 		text = `⚡ 轮到你 · ${humanTurnAction(status, gate, phase)}`;
 		tone = "you";
+	} else if (paused) {
+		// 票 22：暂停优先于「我正在做」。顶栏那一句「⏸ 已暂停」＋「▶ 继续」已经把状态说全了，
+		// 这一条不补第二套说法（也不新造第四个状态词）——整条不出声，而不是留一个只剩边框的空条。
+		// ⚠️ 「轮到你 / 出错 / 书做好了」那几支不受影响：它们说的不是「AI 还在跑」这件事。
+		text = null;
+		tone = "normal";
 	} else if (pendingStage !== null && pendingStage !== undefined) {
-		text = `🤖 我正在做 · ${metaLabel ?? ""}${progressDetail ? `　⏳ ${progressDetail}` : ""}`;
+		// 票 25（走查 P20）：这条横幅**只出状态词那半截**，不再把同一段进度叙述整段搬上来。
+		// 那一段（100 多字）本来与焦点区主卡里的 `ChaptersCard` / `StatusCard` 各出一次，
+		// 于是同一屏里同一段话渲染两三遍：白占一屏，还让人以为「它卡在同一个地方又说了一遍」
+		// ＝进度停滞（恰好加重 P11 那个「看起来卡住了」的错觉）。
+		//
+		// 选**主卡**当主出口的理由：主卡是用户当下正在看的那一块，叙述放在那里才「就近可读」；
+		// 横幅的身份是一行状态词，把一百多字塞进去既挤又吵，而且它会随滚动出屏——真需要时
+		// 反而看不见。两张主卡互斥（`focusCardKey` 一次只出一张），所以一屏里必然恰好一次。
+		//
+		// ⚠️ 取数口径一个字没动：`stageScopedProgressDetail` 仍然只算一次、仍然喂给这三处
+		// （票面明写不许为了去重去改它的取数口径）。
+		text = `🤖 我正在做 · ${metaLabel ?? ""}`;
 		tone = "ai";
 	} else {
 		text = "🤖 我正在做 · 准备下一步";
 		tone = "ai";
 	}
+	// 暂停期间这一条整条不出声（上面那一支的唯一出口）。
+	if (text === null) return null;
 	const bg = {
 		ok: "var(--dsw-success-soft, #dafbe1)",
 		you: "var(--dsw-warn-soft, #fff8e1)",
@@ -119,8 +152,11 @@ export function ActivityLine(props) {
 	// 轮到用户时，状态条已经在说「⚡ 轮到你 · <要你做什么>」，这一行再喊一遍就是两行同话：
 	// 只留子代理聚合；连聚合都没有就整行不出现。
 	const stalled = (stall ?? {}).stalled === true;
+	const paused = pausedNow(meta);
+	// 票 22：暂停同理，且必须与状态条同改——只让状态条闭嘴，这一行仍会留着「🤖 我正在做 · 第 N 次拍板」那半句。
+	// 暂停**不**掐掉子助手聚合：那一句说的是小助手（它们确实在跑），与「已暂停」（说的是主笔 AI）不是同一件事。
 	const content =
-		humanTurn === true
+		humanTurn === true || paused
 			? null
 			: // 已交付＝全书完成：此时既不是「轮到你」也不是「我正在做」（真 GUI 判读实测：
 				// 已交付的《工业大数据分析》活性行还写着「⚡ 轮到你」，同一屏却在大喊「🎉 书做好了」）。
@@ -177,6 +213,23 @@ export function ActivityLine(props) {
 
 // ── 不打断提示条（F17）：铺章中提交风格线/留言/意见成功后，焦点区顶部滑入、6 秒自清 ──
 
+/**
+ * 提示条的两档措辞（票 30②）——**它们不是同一句话的两种说法**。
+ *
+ * 「不打断正在写的这一章」这句在铺章途中成立：提交一条意见，机器没停，那一章还在写。
+ * 但全章过目态下提交一条意见，服务端会把这本书从「请你过目」翻回「我正在做」并交办修订
+ * （闸门消失、这一章被收起来）——**恰恰就是打断了**。原样复用那一档就是说反话，
+ * 而用户读到一句与屏幕上发生的事相反的话，下一步就是「我是不是点坏了」。
+ */
+export const INTERRUPT_NOTE_TEXT =
+	"💡 已记下；不打断正在写的这一章，AI 到下个停靠点会照办";
+export const INTERRUPT_NOTE_TEXT_BREAKS_CHAPTER =
+	"💡 已记下；这一章交给 AI 去改了，过目先收起来了——AI 改完会把这一章重新摊开给你过目。";
+
+/**
+ * 不打断提示条。`text` 缺省就是「不打断」那一档（**铺章途中的行为一个字不变**）；
+ * 过目态那一条由调用方显式传另一句进来。
+ */
 export function InterruptNote(props) {
 	return createElement(
 		"div",
@@ -201,7 +254,7 @@ export function InterruptNote(props) {
 		createElement(
 			"span",
 			{ style: { flex: 1 } },
-			"💡 已记下；不打断正在写的这一章，AI 到下个停靠点会照办",
+			props.text ?? INTERRUPT_NOTE_TEXT,
 		),
 		createElement(
 			"button",
@@ -365,7 +418,7 @@ export function TopBar(props) {
 					{
 						style: S.smallLink,
 						onClick: pause,
-						title: "暂停：这次先停下手里的活，听我的（包括小助手）",
+						title: "暂停：这次先停下手里的活，听我的",
 					},
 					"⏸ 暂停",
 				),

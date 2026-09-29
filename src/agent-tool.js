@@ -16,6 +16,8 @@
  */
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { CHAPTER_PROGRESS_STAGES } from './domain-rules.js'
+import { resolveAgentAction } from './contract-actions.js'
 
 export const name = 'textbook-agent-tool'
 export const inject = ['tools']
@@ -237,8 +239,10 @@ function apply(ctx, config) {
         lastEvent: last === null ? null : { type: last.type, text: last.data?.text ?? last.data?.label ?? last.data?.title ?? '' },
         paused: detail.meta?.pause != null ? { ...detail.meta.pause } : null,
         // 票 dsh-contract-drift/01 的载体：**按下暂停时还有几个小助手在跑**这个事实（暂停那一刻记下的）。
-        // 只有那个数，不含名字/编号——要看是哪几个，你自己有 list_agents；没有小助手时是 0。
-        // 没暂停、或当时数不出来（宿主没挂投影注册表）时是 null（「不知道」，不是 0）。
+        // 只有那个数，不含名字/编号——要看是哪几个，你自己有 list_agents。
+        // 取值只有两种：**0**＝数出来了、确实一个都没在跑；**null**＝没暂停过，或**当时数不出来**
+        // （宿主小助手服务缺席 / 调用抛错，见 `workflow/actions/collab-signals.js` 的 `countRunningSubagents`）。
+        // 拿不准就查一遍 `list_agents`，别把「没显示」当「没有」。
         pausedSubagentsRunning: detail.meta?.pause?.subagentsRunning ?? null,
         styleNotes: (detail.meta?.styleNotes ?? []).map((n) => ({ id: n.id, text: n.text, status: n.status, note: n.note ?? null })),
         waivers: detail.meta?.waivers ?? [],
@@ -260,17 +264,17 @@ function apply(ctx, config) {
 
   ctx.tools.register(defineToolLocal({
     name: 'workbench_act',
-    description: '与造书工作台交互。两类用法：① 流水线内务（机器派给你的活）：stage-brief 领任务说明、progress 上报进度、audit-submit 把范例章审计结论交给机器即时验形状、stage-submit 交工——这几类直接调用，不需要征求用户同意；② 代用户操作（改书名/改目标/建书/拍板/回退/重试/删除/最后检查认可）——仅在用户明确同意后调用。action 取值：stage-brief、stage-submit、progress、audit-submit（真实模式下，范例章审计结论落盘后先交这里：机器当场验 5 个必读文件各一行 {file, quote} 与 quote 逐字、passed 判定，不合格当场把机器看到的行键/样例/缺口说清；可带 auditJson 正文由机器落盘，不带就验书里那份 work/audit-NN.md）、create（建书，需 name/goal，可选 route/science）、rename（改书名，需 name）、set_goal（改学习目标，需 goal）、gate（拍板，需 gate/version/approved，可选 note）、rollback（回退，需 snapshot 序号）、resume（重试/继续）、delete（删除这本书）。协作动作：style-note（记风格线）、intervene（留言）、pause（强制中断）、nudge（催办：把用户一句话以 notice 唤醒主 AI，不中断不 cancel）为内务可直接调用；waive（豁免，必须先引导用户在界面手输原因）、outline-confirm、chapters-review-confirm（全章过目确认：全章写完后替用户点「都过了」时用，需 approved=true）、final-approve（最后检查结果认可：最后检查全过后用户在最后检查结果卡点「认可/不满意」时用，需 approved=true/false；approved=false 必须带 note 改进意见）、gold-opinion/gold-revise/gold-chapter-set/gold 定稿类必须用户明确同意后调用。定点修改（改历史）：deep-modify（用户在界面上点定点修改时走这条，需 segment/note）、deep-undo（撤销最近一次深改）；对话里用户说改历史也必须引导走工作台的定点修改流程，不要自己改账本或产物。',
+    description: '与造书工作台交互。两类用法：① 流水线内务（机器派给你的活）：stage-brief 领任务说明、progress 上报进度、audit-submit 把范例章审计结论交给机器即时验形状、stage-submit 交工——这几类直接调用，不需要征求用户同意；② 代用户操作（改书名/改目标/建书/拍板/回退/重试/删除/最后检查认可）——仅在用户明确同意后调用。action 取值：stage-brief、stage-submit、progress、audit-submit（真实模式下，范例章审计结论落盘后先交这里：机器当场验 5 个必读文件各一行 {file, quote} 与 quote 逐字、passed 判定，不合格当场把机器看到的行键/样例/缺口说清；可带 auditJson 正文由机器落盘，不带就验书里那份 work/audit-NN.md）、create（建书，需 name/goal，可选 route/science）、rename（改书名，需 name）、set_goal（改学习目标，需 goal）、gate（拍板，需 gate/version/approved，可选 note）、rollback（回退，需 snapshot 序号）、resume（重试/继续）、delete（删除这本书）。协作动作：style-note（记风格线）、intervene（留言）、pause（暂停）、nudge（催办：把用户一句话以 notice 唤醒主 AI，不中断不 cancel）为内务可直接调用；waive（豁免，必须先引导用户在界面手输原因）、outline-confirm、chapters-review-confirm（全章过目确认：全章写完后替用户点「都过了」时用，需 approved=true）、final-approve（最后检查结果认可：最后检查全过后用户在最后检查结果卡点「认可/不满意」时用，需 approved=true/false；approved=false 必须带 note 改进意见）、gold-opinion/gold-revise/gold-chapter-set/gold 定稿类必须用户明确同意后调用。定点修改（改历史）：deep-modify（用户在界面上点定点修改时走这条，需 segment/note）、deep-undo（撤销最近一次深改）；对话里用户说改历史也必须引导走工作台的定点修改流程，不要自己改账本或产物。',
     parameters: {
       action: {
         type: 'string', required: true,
         description: 'stage-brief | stage-submit | progress | audit-submit | create | rename | set_goal | gate | rollback | resume | nudge | delete | chapters-review-confirm | final-approve | deep-modify | deep-undo',
       },
-      stage: { type: 'string', description: 'stage-brief/stage-submit 用的阶段名：explore|gate|outline|gold|chapters|merge|final；progress 时（写完整本阶段可选）：本章流水线阶段 writing|auditing|audited|finalizing|done' },
+      stage: { type: 'string', description: `stage-brief/stage-submit 用的阶段名：explore|gate|outline|gold|chapters|merge|final；progress 时（写完整本阶段可选）：本章流水线阶段 ${CHAPTER_PROGRESS_STAGES.join('|')}` },
       segment: { type: 'string', description: 'deep-modify 时：要定点修改的历史段 key（explore|gate-1|gate-2|gate-3|outline|gold|chapter-N|merge|final）' },
       // —— stage-submit 各阶段的交付内容 ——
       title: { type: 'string', description: '交工 gate 时：一句话标题' },
-      summary: { type: 'string', description: '交工 gate 时：给用户看的人话摘要（300 字内）' },
+      summary: { type: 'string', description: '交工 gate 时：给用户看的人话摘要（约 300 汉字以内；软目标，机器不验字数）' },
       detail: { type: 'string', description: '按动作取义：交工 gate（stage-submit）时必填——完整方案 Markdown（detail 内联全文，禁止写「见文件/proposal-*.md」指针，用户只在页面上看方案）；progress 时可选——更细的一句话说明' },
       chaptersJson: { type: 'string', description: '交工 outline 时：JSON 数组字符串 [{"title":"…","outline":"…","source":"资料N：…","targetWords":6000,"points":["知识点…"],"volumeReason":"体量依据"}]' },
       goldChapter: { type: 'number', description: '交工 outline 时：建议的样例章章号（1 基，默认 1）；outline-confirm 时：用户改选的样例章章号' },
@@ -286,7 +290,7 @@ function apply(ctx, config) {
         },
         description: '交工 chapters 时：本回合处置过的本章抽查意见，逐条点名 [{id: 意见 id（见 workbench_status 的 pendingReviews / brief.pendingReviews）, how: 一句人话说明这条你怎么处置的}]。机器只给点名的置为已处置，没点名的继续拦；该章意见未处置机器会拒收这章交工。',
       },
-      preface: { type: 'string', description: '交工 merge 时：书的前言/使用说明（≤300 字）。注意：交工 merge 前必须先做合并前跨章审计（读全部章核对事实一致性/术语统一/交叉引用悬空/知识递进链），把审计结论落盘 work/audit-cross.md——机器验该文件存在才放行合并，没落盘会 400 拒收' },
+      preface: { type: 'string', description: '交工 merge 时：书的前言/使用说明（约 300 汉字，通俗；软目标，机器不验字数）。注意：交工 merge 前必须先做合并前跨章审计（读全部章核对事实一致性/术语统一/交叉引用悬空/知识递进链），把审计结论落盘 work/audit-cross.md——机器验该文件存在才放行合并，没落盘会 400 拒收' },
       auditJson: { type: 'string', description: 'audit-submit 时：范例章审计 JSON 的正文（可省——省了就验书里已有的 work/audit-NN.md）。带了必须是一整份严格 JSON，机器验形状合格后由机器落盘；不合格当场 400，报错里带机器解析到的行键与样例、契约行形状与 5 个必读文件、以及差在哪一项' },
       report: { type: 'string', description: '交工 final 时：你的最后检查报告（人话）' },
       styleCheck: {
@@ -335,16 +339,24 @@ function apply(ctx, config) {
     },
     async execute(args, exec) {
       const sessionId = sessionIdOf(exec)
-      const action = String(args.action ?? '')
-      preValidate(action, args)
+      const inputName = String(args.action ?? '')
+      // 契约面动作目录（票 contract-actions/02）：主笔 AI 认哪 28 个输入名、哪 5 个是
+      // 别名，全部由目录说了算，这里只做一次单向解析。别名只在主笔 AI 这一侧解析——
+      // 目录里存在 canonical name 不会让工具多收一个输入名，HTTP 也不因此接受别名。
+      const action = resolveAgentAction(inputName)
+      if (action !== null) preValidate(action.name, args)
       const projects = await fetchJson(`${base}/textbook/projects?session=${encodeURIComponent(sessionId)}`)
       const meta = (projects.projects ?? [])[0]
-      if (action !== 'create' && meta === undefined) {
+      // 建书是主笔 AI 能调的动作里唯一不需要已有书的那一个（目录的 projectScope 事实）。
+      const createsBook = action?.projectScope === 'no-book'
+      if (!createsBook && meta === undefined) {
         throw new Error('这个会话还没有书：要么先让用户在工作台建书，要么用 create 直接建')
       }
-      const project = action === 'create' ? undefined : meta.id
+      const project = createsBook ? undefined : meta.id
       let body
-      switch (action) {
+      // 分支标签一律是规范动作名：主笔 AI 写下的输入名（create / rename / set_goal / gate /
+      // delete 等 5 个别名）在上面已经单向解析过来，解析不出这个动作就进不了任何分支。
+      switch (action?.name) {
         // ── 流水线内务（不需要征求用户同意） ─────────────────────────────
         case 'stage-brief':
           body = {
@@ -362,7 +374,7 @@ function apply(ctx, config) {
             ...(Number.isSafeInteger(Number(args.chapter)) && Number(args.chapter) >= 1
               ? { chapter: Number(args.chapter) }
               : {}),
-            ...(['writing', 'auditing', 'audited', 'finalizing', 'done'].includes(args.stage)
+            ...(CHAPTER_PROGRESS_STAGES.includes(args.stage)
               ? { stage: args.stage }
               : {}),
           }
@@ -424,7 +436,9 @@ function apply(ctx, config) {
           break
         }
         // ── 代用户操作（必须先得到用户明确同意） ────────────────────────
-        case 'create':
+        // 分支标签是规范动作名：主笔 AI 那边写的输入名（create / rename / set_goal / gate /
+        // delete）由目录单向解析过来，解析不出这个动作就进不了这里。
+        case 'book-create':
           if (typeof args.name !== 'string' || args.name.trim() === '') throw new Error('建书需要书名 name')
           if (typeof args.goal !== 'string' || args.goal.trim() === '') throw new Error('建书需要学习目标 goal')
           body = {
@@ -435,15 +449,15 @@ function apply(ctx, config) {
             science: args.science === true,
           }
           break
-        case 'rename':
+        case 'book-rename':
           if (typeof args.name !== 'string' || args.name.trim() === '') throw new Error('改名需要新书名 name')
           body = { action: 'book-rename', name: args.name.trim() }
           break
-        case 'set_goal':
+        case 'book-set-goal':
           if (typeof args.goal !== 'string' || args.goal.trim() === '') throw new Error('改目标需要 goal')
           body = { action: 'book-set-goal', goal: args.goal.trim() }
           break
-        case 'gate':
+        case 'gate-decide':
           if (args.gate === undefined || args.gate === null || args.gate === '') throw new Error('拍板需要 gate 拍板序号')
           if (typeof args.version !== 'number') throw new Error('拍板需要 version 版本号')
           if (typeof args.approved !== 'boolean') throw new Error('拍板需要 approved（true=通过/false=驳回）')
@@ -530,11 +544,13 @@ function apply(ctx, config) {
           // 催办：把用户的一句话以 notice 唤醒主 AI（不中断、不 cancel）；留空则用默认催办语。
           body = { action: 'nudge', ...(typeof args.text === 'string' && args.text.trim() !== '' ? { text: args.text.trim().slice(0, 200) } : {}) }
           break
-        case 'delete':
+        case 'book-delete':
           body = { action: 'book-delete', confirm: true }
           break
         default:
-          throw new Error(`未知操作: ${action}`)
+          // 解析不出来的输入名（拼错的、AI 没暴露的动作名、canonical name 本身）
+          // 都在这里被拒——报错说的是主笔 AI 写下的那个输入名。
+          throw new Error(`未知操作: ${inputName}`)
       }
       const json = await fetchJson(`${base}/textbook/action`, {
         method: 'POST',

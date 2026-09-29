@@ -384,6 +384,53 @@ ${contextBlock}
 	throw new Error("建议格式不对");
 }
 
+/**
+ * 每个素材角色给识别 AI 的一句判据提示（**注记，不是值集**）。
+ *
+ * 键是角色名、值是提示语；键**对不上**的角色照样出得来（只是没那句提示），值也永远进不了
+ * prompt——因为 prompt 的枚举是按 `ROLES` 逐个渲染的（见 buildRolePrompt）。
+ * 换句话说：这张表可以过时（角色改名后旧键变死键），但它**不能**制造一个角色出来。
+ */
+const ROLE_HINTS = {
+	学生用书: "课本正文",
+	教师用书: "教师版、教参、教学指导",
+	考纲: "考试大纲、课程标准",
+	讲义: "补充讲义、教案、课件、笔记",
+	真题: "历年试卷、真题集、练习题集",
+};
+
+/**
+ * 素材角色识别的 prompt（票 pipeline-wiring-gaps/04）。
+ *
+ * **枚举与「几类」的计数都从 `roles` 派生**（生产调用点传 `ROLES`，见 suggestRoles）。
+ * 原先是逐字写死「只能从这 5 类里选 1 个」＋五行角色字面量，而 `ROLES` 只在事后过滤用到——
+ * 改 `ROLES` 会让这份 prompt **静默分叉**，没有任何测试会红。
+ *
+ * 导出是为了让测试能拿**合成的角色集合**跑一遍（证明枚举是入参的函数、不是常量）；
+ * 生产代码自己只走 `buildRolePrompt(listText, ROLES)` 那一处。
+ *
+ * @param {string} listText 已编号的文件名清单
+ * @param {readonly string[]} roles 候选角色（值集的唯一来源）
+ * @returns {string} 交给识别子代理的 prompt 全文
+ */
+export function buildRolePrompt(listText, roles) {
+	const choices = roles
+		.map((role) => {
+			const hint = ROLE_HINTS[role];
+			return hint === undefined ? `- ${role}` : `- ${role}：${hint}`;
+		})
+		.join("\n");
+	return `你是教材分类助手。用户一次性上传了几本 PDF 教材，请根据"文件名"判断每本属于哪一类，只能从这 ${roles.length} 类里选 1 个：
+${choices}
+
+文件名列表：
+${listText}
+
+输出严格 JSON（不要解释、不要代码块）：
+{"roles":[{"file":"文件名（原样照抄）","role":"类别"}]}
+每个文件都要有；拿不准的按文件名猜一个最像的。字符串内部严禁使用英文双引号。`;
+}
+
 async function suggestRoles(runtime, params) {
 	const files = Array.isArray(params.files) ? params.files.slice(0, 20) : [];
 	if (files.length === 0) return { roles: [] };
@@ -395,19 +442,7 @@ async function suggestRoles(runtime, params) {
 	const listText = files
 		.map((file, index) => `${index + 1}. ${file}`)
 		.join("\n");
-	const prompt = `你是教材分类助手。用户一次性上传了几本 PDF 教材，请根据"文件名"判断每本属于哪一类，只能从这 5 类里选 1 个：
-- 学生用书：课本正文
-- 教师用书：教师版、教参、教学指导
-- 考纲：考试大纲、课程标准
-- 讲义：补充讲义、教案、课件、笔记
-- 真题：历年试卷、真题集、练习题集
-
-文件名列表：
-${listText}
-
-输出严格 JSON（不要解释、不要代码块）：
-{"roles":[{"file":"文件名（原样照抄）","role":"类别"}]}
-每个文件都要有；拿不准的按文件名猜一个最像的。字符串内部严禁使用英文双引号。`;
+	const prompt = buildRolePrompt(listText, ROLES);
 	const raw = await runSubagent(runtime, "识别角色", prompt);
 	const parsed = parseJsonLoose(raw);
 	if (!Array.isArray(parsed.roles) || parsed.roles.length === 0)
@@ -435,38 +470,84 @@ async function suggestWords(runtime, params) {
 		Number(params.chapterCount) > 0
 			? Number(params.chapterCount)
 			: 7;
+	const currentTargets = Array.isArray(params.currentTargets) ? params.currentTargets : [];
+	const goldChapter = Number.isSafeInteger(params.goldChapter) ? params.goldChapter : 1;
+	const goldMeasuredHanzi = Number.isFinite(params.goldMeasuredHanzi)
+		? Math.round(params.goldMeasuredHanzi)
+		: null;
+	const fallbackPerChapter = currentTargets.map((chapter) => ({
+		n: chapter.n,
+		targetWords: Number.isFinite(chapter.targetWords) ? chapter.targetWords : 6000,
+		reason: chapter.reason ?? "",
+	}));
 	if (runtime.demo) {
 		return {
 			suggested: 6000,
 			range: "5000-7000",
-			reason: "（演示建议）每章 6000 字左右，保证内容充实。",
+			reason: "（演示建议）按内容密度给每章约 6000 汉字。",
+			perChapter: fallbackPerChapter,
 		};
 	}
-	const prompt = `你是"造书工作台"的编辑顾问，为一位家长/老师建议"每章目标字数"。
+	const measuredLine = goldMeasuredHanzi === null
+		? `第 ${goldChapter} 章范例章实测：正文尚未生成`
+		: `第 ${goldChapter} 章范例章实测：${goldMeasuredHanzi} 汉字`;
+	const targetLines = currentTargets.length === 0
+		? "（尚无逐章目标）"
+		: currentTargets
+			.map((chapter) => {
+				const current = Number.isFinite(chapter.targetWords)
+					? `${chapter.targetWords} 汉字`
+					: "未定";
+				return `- 第 ${chapter.n} 章「${chapter.title || "未命名"}」现有目标：${current}${chapter.reason ? `；依据：${chapter.reason}` : ""}`;
+			})
+			.join("\n");
+	const prompt = `你是"造书工作台"的编辑顾问，为一位家长/老师建议每章目标汉字数。
 
 学习目标：${goal || "（未填写）"}
 使用方式：${route}
 理科内容：${science ? "是" : "否"}
 全书章节数：${chapterCount} 章
+${measuredLine}
+现有逐章目标：
+${targetLines}
 
-请给出合理的"每章正文目标字数"建议（考虑：成人实用教材、篇幅充实但不啰嗦、总字数可控）。输出严格 JSON（不要解释、不要代码块）：
-{"suggested":6000,"range":"5000-7000","reason":"一句话理由（家长能看懂）"}`;
+请结合最佳范例章的实测体量、各章现有目标、标题、内容密度与例题量，给出**每一章**的目标汉字数建议。这是供用户预填和拍板的建议，不是必须命中的指标，也不要给篇幅压力。
+
+输出严格 JSON（不要解释、不要代码块），perChapter 必须逐章齐全，形状为 {n:1-based章号,targetWords:正整数,reason:一句话}：
+{"suggested":6000,"range":"5000-7000","reason":"一句话总理由（家长能看懂）","perChapter":[{"n":1,"targetWords":5400,"reason":"这一章概念少"},{"n":2,"targetWords":6800,"reason":"这一章例题多"}]}`;
 	try {
-		const raw = await runSubagent(runtime, "字数建议", prompt, 120 * 1000);
+		const raw = await runSubagent(runtime, "逐章字数建议", prompt, 120 * 1000);
 		const parsed = parseJsonLoose(raw);
 		const suggested = Number(parsed.suggested);
 		if (!Number.isFinite(suggested) || suggested < 500)
 			throw new Error("建议字数不合法");
+		if (!Array.isArray(parsed.perChapter) || parsed.perChapter.length !== chapterCount)
+			throw new Error("逐章建议不完整");
+		const perChapter = parsed.perChapter.map((chapter) => {
+			const n = Number(chapter?.n);
+			const targetWords = Number(chapter?.targetWords);
+			if (!Number.isSafeInteger(n) || n < 1 || n > chapterCount || !Number.isFinite(targetWords) || targetWords < 500 || targetWords > 50000)
+				throw new Error("逐章建议格式不对");
+			return {
+				n,
+				targetWords: Math.round(targetWords),
+				reason: typeof chapter?.reason === "string" ? chapter.reason : "",
+			};
+		});
+		if (new Set(perChapter.map((chapter) => chapter.n)).size !== chapterCount)
+			throw new Error("逐章建议章号重复");
 		return {
 			suggested: Math.round(suggested),
 			range: typeof parsed.range === "string" ? parsed.range : "",
 			reason: typeof parsed.reason === "string" ? parsed.reason : "",
+			perChapter,
 		};
 	} catch {
 		return {
 			suggested: 6000,
 			range: "5000-7000",
-			reason: "（AI 建议暂不可用，使用默认值）",
+			reason: "（AI 建议暂不可用，保留现有逐章目标）",
+			perChapter: fallbackPerChapter,
 		};
 	}
 }

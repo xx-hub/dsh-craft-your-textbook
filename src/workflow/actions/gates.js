@@ -20,8 +20,8 @@ import {
   kick,
   sendJson,
 } from '../engine.js'
-import { mkdirSync, existsSync, renameSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, existsSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 
 /**
@@ -37,6 +37,68 @@ export function gateMismatchError(current) {
 /** 该次拍板已经拍过了（不能重复拍板）。 */
 export function gateAlreadyDecidedError(current) {
   return `第 ${current.gate} 次拍板已${current.status === 'approved' ? '通过' : '驳回'}，不能重复拍板`
+}
+
+
+/**
+ * 探查重做要归档的两件产物（归档与清点都只认这一份清单，不在别处再抄一遍文件名）。
+ * `knowledge-map.json` 可能压根没生成（那一版探查没写知识地图），循环里按存在性跳过。
+ */
+const EXPLORE_REDO_ARTIFACTS = Object.freeze(['explore.md', 'knowledge-map.json'])
+
+/**
+ * 归档保留份数：每种产物只留**最近这么多份**归档，更早的在下一次归档时清掉
+ * （票 pipeline-wiring-gaps/08 的「归档件不再只进不出」）。取 10 是「够回看、又不至于让 work/ 无界长胖」的折中：
+ * 一次驳回只多两件，用户真要回看十份之前的报告，回退（快照）那条路才是正经去处。
+ */
+const ARCHIVE_KEEP = 10
+
+
+/**
+ * 归档清理的越界守卫（也是删除点唯一的放行判据）：只认 `work/_旧版产物/` **直接**底下、
+ * 形如 `<产物名>.<base36 毫秒时间戳>` 的**文件**。定点修改写下的 `深改-<id>/` 目录、
+ * 别的族（最佳范例章/章节安排/重置重做）写下的归档，以及 `work/` 原位的产物都不在射程内。
+ */
+function assertArchiveEntry(name, entry, archive) {
+  if (entry === '.' || entry === '..') return false
+  if (entry.includes('/') || entry.includes('\\') || entry.includes('..')) return false
+  if (!entry.startsWith(`${name}.`)) return false
+  if (!/^[0-9a-z]+$/.test(entry.slice(name.length + 1))) return false
+  const target = join(archive, entry)
+  try {
+    return dirname(target) === archive && statSync(target).isFile()
+  } catch {
+    return false
+  }
+}
+
+
+/**
+ * 归档保留策略：每种产物只留最近 `keep` 份，更早的在**下一次**归档时清掉。
+ * 返回 `{ removed, failed }`（清掉几件 / 没清掉几件）——清理失败要能报出来，不能无声吞掉。
+ * 导出是为了让测试**直调**这份策略（与 `gateMismatchError` 同一做法：不复制第二份判据）。
+ */
+export function trimExploreArchive(archive, names, keep) {
+  let entries = []
+  try { entries = readdirSync(archive) } catch { return { removed: 0, failed: 0 } }
+  let removed = 0
+  let failed = 0
+  for (const name of names) {
+    const copies = entries
+      .filter((entry) => assertArchiveEntry(name, entry, archive))
+      // 时间戳是 base36 的毫秒数：按**数值**排才是时间先后（按字符串排在位数变化时会错）。
+      .map((entry) => ({ entry, at: Number.parseInt(entry.slice(name.length + 1), 36) }))
+      .sort((a, b) => b.at - a.at)
+    for (const copy of copies.slice(keep)) {
+      try {
+        unlinkSync(join(archive, copy.entry))
+        removed += 1
+      } catch {
+        failed += 1
+      }
+    }
+  }
+  return { removed, failed }
 }
 
 
@@ -95,6 +157,8 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
           meta.pendingStage = null
           meta.pendingGate = null
           delete meta.exploreRedoNote
+          // 票 pipeline-wiring-gaps/08：这一轮「来回 N 次」到此为止——用户认了这份报告，下一轮再计数。
+          delete meta.exploreRedoCount
         })
         appendEvent(project, 'textbook/hint', { text: '✅ 探查结果已确认，开始做教学设计。' })
         advance(project, 2, 3)
@@ -110,22 +174,68 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
         const archive = join(workDir(project), '_旧版产物')
         mkdirSync(archive, { recursive: true })
         const stamp = Date.now().toString(36)
-        for (const name of ['explore.md', 'knowledge-map.json']) {
+        // 票 pipeline-wiring-gaps/08：归档不再「尽力」——逐件记成败，**任一件没搬走就当场回错误**。
+        // 旧件留在原位时，下一轮 `runPhase2`（engine.js:1518「产物已存在 → 等人确认」）见到
+        // `explore.md` 还在就直接短路返回，于是用户点完「让 AI 重做」看到的还是上一轮那份
+        // 一模一样的报告，他写的意见又会在点「满意」时被删掉——那一次重做从来没发生过，
+        // 而整条路径全程静默。`mkdirSync` 在 try 之外（它抛就是 500，本来就响）。
+        const archiveMisses = []
+        for (const name of EXPLORE_REDO_ARTIFACTS) {
           const target = workFile(project, name)
-          if (existsSync(target)) { try { renameSync(target, join(archive, `${name}.${stamp}`)) } catch { /* 尽力归档 */ } }
+          if (!existsSync(target)) continue
+          try {
+            renameSync(target, join(archive, `${name}.${stamp}`))
+          } catch (error) {
+            archiveMisses.push(`${name}（${String(error instanceof Error ? error.message : error)}）`)
+          }
         }
+        if (archiveMisses.length > 0) {
+          // 一件都没交办：既不改状态，也不写 meta.exploreRedoNote——用户点「满意」时
+          // 旧报告原样还在，意见没被消费过，也就不该在这里被「用掉」。
+          // 意见本身记进账本（hint），所以它不会随这一次失败悄悄消失。
+          appendEvent(project, 'textbook/hint', {
+            text: `↩️ 探查重做没有生效：旧报告没能归档（${archiveMisses.join('、')}），它还留在原位。`
+              + (feedback.length > 0 ? `你的意见（${feedback.join('；')}）已经记在这条账里，不会丢。` : '')
+              + '请把正在占用这些文件的程序关掉（编辑器、同步盘、杀毒软件都可能占着）再点一次。',
+          })
+          sendJson(res, 409, {
+            ok: false,
+            error: `旧报告没能归档（${archiveMisses.join('、')}），这次「让 AI 重做」没有生效：旧报告还留在原位，直接重做会拿它当新结果。请关掉占用这些文件的程序后重试。`,
+          })
+          return
+        }
+        const trimmed = trimExploreArchive(archive, EXPLORE_REDO_ARTIFACTS, ARCHIVE_KEEP)
+        let redoCount = 0
         updateMeta(project, (meta) => {
           meta.status = 'running'
           meta.pendingStage = null
           meta.pendingGate = null
           meta.exploreRedoNote = feedback.length > 0 ? feedback.join('；') : null
+          // 票 pipeline-wiring-gaps/08：探查侧的「来回几次了」（关卡侧是 `countRejections` 从账本折叠出来的，
+          // 探查没有 gate-decision 事件，所以这份计数记在账本 meta 上，**唯一写入点就是这一行**）。
+          // 记的是「真的重做过几次」：归档被闸门拒掉的那一次不算——那一次重做没有发生。
+          meta.exploreRedoCount = (meta.exploreRedoCount ?? 0) + 1
+          redoCount = meta.exploreRedoCount
         })
         appendEvent(project, 'textbook/hint', {
           text: feedback.length > 0
             ? `↩️ 探查结果已标记重做，你的意见（${feedback.join('；')}）已带给 AI，它正在重新探查。`
             : '↩️ 探查结果已标记重做（你没写具体意见），AI 会重新仔细通读后再来；想给它方向随时在对话里说。',
         })
-        handoff(ctx, project, 'explore')
+        if (trimmed.removed > 0 || trimmed.failed > 0) {
+          appendEvent(project, 'textbook/hint', {
+            text: `🧹 归档清理：清掉了 ${trimmed.removed} 份更早的旧件（每种产物只留最近 ${ARCHIVE_KEEP} 份）`
+              + (trimmed.failed > 0 ? `，另有 ${trimmed.failed} 份没清掉（文件被占用），留着不影响重做。` : '。'),
+          })
+        }
+        // 措辞与关卡那一族一致（`runGate` 每 3 次一条）：反复驳回时提醒用户换思路，
+        // 而不是让 AI 一份份地交几乎一样的报告。
+        if (redoCount % 3 === 0) {
+          appendEvent(project, 'textbook/hint', {
+            text: `探查已经来回 ${redoCount} 次了。如果一直不满意，可以在对话里调整目标或换一种思路，或者用「定点修改」回到源探查重新来。`,
+          })
+        }
+        handoff(ctx, project, 'explore', null, '驳回探查结果、重做之前')
         // demo 无主 AI 可唤醒：仅 demo 补 kick 驱动重做（真实模式靠主 AI，加了反而会提前触发 runPhase 重推导）。
         if (exMeta.demo === true) void kick(ctx, project)
         sendJson(res, 200, { ok: true, project, approved: false })
@@ -263,7 +373,7 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
         })
         appendEvent(project, 'textbook/final-approve', { approved: true })
         appendEvent(project, 'textbook/delivery', {
-          book: 'work/book.md', checks: delivered.finalChecks ?? [],
+          checks: delivered.finalChecks ?? [],
           note: `交付完成！点「下载《${delivered.name ?? ''}》.md」保存成品。`,
         })
         sendJson(res, 200, { ok: true, project, delivered: true })

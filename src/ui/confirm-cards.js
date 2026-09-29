@@ -26,6 +26,11 @@ const RE_EXPLORE_REASONS = [
 	"重点难点判断不对",
 ];
 
+// 「拍板通过、继续往下走」那颗推进键的可见文案——**唯一出口**。
+// 票 20 的吸底条上那颗同名按钮取这里（同一个动作、同一个名字，两处不许各写一份），
+// 否则同一句话会随某一处漏改而漂成两种说法。
+export const EXPLORE_CONFIRM_ACCEPT_LABEL = "✅ 满意，继续设计";
+
 export function ExploreConfirmCard(props) {
 	// 注：调用方（WorkbenchView）仍会传 meta，但本卡不使用——不解构以免未用变量。
 	const {
@@ -383,7 +388,7 @@ export function ExploreConfirmCard(props) {
 							onClick: () => onConfirm(true),
 							disabled: busy,
 						},
-						"✅ 满意，继续设计",
+						EXPLORE_CONFIRM_ACCEPT_LABEL,
 					),
 					createElement(
 						"button",
@@ -452,7 +457,7 @@ export function OutlineConfirmCard(props) {
 		createElement(
 			"p",
 			{ style: { margin: "6px 0" } },
-			`AI 计划把这本书分成 ${chapters.length} 章${totalWords > 0 ? `，全书大约 ${totalWords} 字` : ""}。每章标好了用材料的哪一块、覆盖哪些知识点、大概写多长。满意点「通过」，AI 先把第 ${safePick} 章当最佳范例章写出来给你过目；要调就点「让 AI 重做」。`,
+			`AI 计划把这本书分成 ${chapters.length} 章${totalWords > 0 ? `，全书大约 ${totalWords} 汉字` : ""}。每章标好了用材料的哪一块、覆盖哪些知识点、大概写多长（「字」按汉字数，是体量参考、不是硬指标）。满意点「通过」，AI 先把第 ${safePick} 章当最佳范例章写出来给你过目；要调就点「让 AI 重做」。`,
 		),
 		createElement(
 			"div",
@@ -498,7 +503,7 @@ export function OutlineConfirmCard(props) {
 								? `源：${chapter.source}`
 								: null,
 							Number.isFinite(chapter.targetWords)
-								? `约 ${chapter.targetWords} 字`
+								? `约 ${chapter.targetWords} 汉字`
 								: null,
 						]
 							.filter(Boolean)

@@ -1,6 +1,6 @@
 # 参考模式库
 
-> 20 张模式卡，按"教学问题"组织（不按学科）。每张卡解决一个具体的教学设计问题。
+> 21 张模式卡，按"教学问题"组织（不按学科）。每张卡解决一个具体的教学设计问题。
 > 这些不是"你必须套用"的模板，是"你可以选/混搭/新造"的解决方案菜单。
 
 ---
@@ -14,7 +14,7 @@
 
 - **整书架构层**（`structure/`）：设计 OUTLINE 时先翻这组——地基章、收网章、跨章引用、附录汇编、多源裁决、主题低音线
 - **章内板块层**（其他目录）：设计章内板块语法时翻
-  - `concept-anchoring/`：概念锚定类（精确呈现、误区桩、苏格拉底提问、事实vs判断分离）
+  - `concept-anchoring/`：概念锚定类（精确呈现、误区桩、苏格拉底提问、事实vs判断分离、深度铺陈）
   - `assessment/`：评估/练习类（判断题、速判题、推理题、例题、练习梯度、必背锚）
   - `narrative/`：叙事结构类（情境钩子、贯穿案例、主角）
   - `language-learning/`：语言学习特化（词汇分层）
@@ -22,9 +22,9 @@
 ## 注意力引导（按教学目标提示优先看哪些卡）
 
 根据 Phase 3.1 识别的教学目标，提示 Agent 优先看：
-- **认证应试目标**（PMP/CPA/法考）→ 优先看 `assessment/judgment-card`、`assessment/quick-judgment`、`concept-anchoring/fact-vs-judgment`、`assessment/deterministic-anchor`、`structure/multi-source-arbitration`、`structure/foundation-chapter`、`structure/capstone-chapter`、`structure/appendix-compilation`
-- **技能掌握目标**（编程/数学/写作）→ 优先看 `assessment/worked-example`、`assessment/application-problem`、`concept-anchoring/socratic-questioning`
-- **概念理解目标**（哲学/经济学入门）→ 优先看 `concept-anchoring/precise-definition`、`concept-anchoring/misconception`、`narrative/character-protagonist`、`narrative/running-case`、`structure/recurring-leitmotif`
+- **认证应试目标**（PMP/CPA/法考）→ 优先看 `assessment/judgment-card`、`assessment/quick-judgment`、`concept-anchoring/fact-vs-judgment`、`concept-anchoring/depth-elaboration`、`assessment/deterministic-anchor`、`structure/multi-source-arbitration`、`structure/foundation-chapter`、`structure/capstone-chapter`、`structure/appendix-compilation`
+- **技能掌握目标**（编程/数学/写作）→ 优先看 `assessment/worked-example`、`assessment/application-problem`、`concept-anchoring/socratic-questioning`、`concept-anchoring/depth-elaboration`
+- **概念理解目标**（哲学/经济学入门）→ 优先看 `concept-anchoring/precise-definition`、`concept-anchoring/misconception`、`concept-anchoring/depth-elaboration`、`narrative/character-protagonist`、`narrative/running-case`、`structure/recurring-leitmotif`
 - **语言学习目标**（英语/外语）→ 优先看 `language-learning/vocabulary-dimension`、`concept-anchoring/socratic-questioning`、`narrative/scenario-hook`
 
 这不是强制，是注意力引导——Agent 仍需遍历所有卡判断适用性。
@@ -45,7 +45,7 @@
 
 ## 参考架构起点（预装配包）
 
-不想从 20 张原子卡拼装时，可以从这三个预装配包出发再定制。选用时在 style-spec 里说明"为什么这个起点适合本书、做了哪些定制"。
+不想从 21 张原子卡拼装时，可以从这三个预装配包出发再定制。选用时在 style-spec 里说明"为什么这个起点适合本书、做了哪些定制"。
 
 ### 认证应试蓝本
 **适合**：PMP/CPA/法考/医师资格等认证类
@@ -89,6 +89,7 @@
 | misconception | 学习者的常见误区怎么提前暴露和拆解 |
 | socratic-questioning | 怎么设计提问路线图引导学生自己推导 |
 | fact-vs-judgment | 确定性知识（要背）和判断（要推理）怎么分离才不混淆 |
+| depth-elaboration | 核心概念怎么写才有深度（机理/脉络/边界/专家视角） |
 
 ### 评估/练习类（assessment/）
 | 卡 | 解决什么问题 |

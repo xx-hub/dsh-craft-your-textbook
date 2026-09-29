@@ -19,15 +19,22 @@ import {
  *  **`id`**（宿主**没有** `childId` 这个字段），活性位是 `activity`——`'running'` 表示这条子会话的
  *  记录还在会话库里活着（驻留的也算，服务端能拿到的就是这个口径），`'inactive'` 表示只剩磁盘上的记录。
  *
- *  数不出来时返回 `null`（「不知道」，不是 0）：老宿主没有这个方法、宿主没挂投影注册表都会抛
- *  （`SubagentError`）。这一层 try/catch **是会执行的**守卫——暂停本身不许因为一条附注而失败，
+ *  数不出来时返回 `null`（「不知道」，不是 0）。**「数不出来」有两条路，都归到下面那个 `catch`**：
+ *  ① 宿主服务缺席（`ctx.subagents` 没挂、或它没有 `listDescendants`）——可选链短路成 `undefined`，
+ *     这里的 `?? null` **刻意不写成 `?? []`**（折成 `[]` 就与「确实为 0」不可区分，票 10），
+ *     紧接着的缺席守卫抛错；② `listDescendants` 调用真的抛错。
+ *  这一层 try/catch **是会执行的**守卫——暂停本身不许因为一条附注而失败，
  *  这与本票删掉的那两层「永不执行」的 try/catch 不是一回事。
  *
  *  @returns {Promise<number|null>} 在跑的小助手个数；数不出来时 null
  */
 async function countRunningSubagents(ctx, sessionId) {
   try {
-    const children = await ctx?.subagents?.listDescendants?.(sessionId) ?? []
+    // 「数不出来」不许折成 `[]`（票 host-contract-gate/10）：折成 `[]` 会让「服务缺席」与
+    // 「确实一个都没在跑」变成同一个 0，主笔 AI 分不开。折成 `null` 后由下面那次守卫抛错，
+    // 与「调用真的抛错」走同一条出口——`catch` 是缺席的唯一出口（改前它对这一支是死代码）。
+    const children = await ctx?.subagents?.listDescendants?.(sessionId) ?? null
+    if (children === null) throw new Error('宿主小助手服务缺席：ctx.subagents.listDescendants 不可用')
     return children.filter((child) => child?.activity === 'running').length
   } catch (e) {
     ctx?.logger?.warn?.(`textbook: 暂停时没数出小助手个数（记 null 不记 0）: ${String(e instanceof Error ? e.message : e)}`)
@@ -126,7 +133,7 @@ export async function actCollabSignals(ctx, _req, res, action, sessionId, projec
       return
     }
     case 'pause': {
-      // 强制中断：记账 pause → 事件 → 取消主 AI（keepInbox）；绝不 followup。
+      // 暂停：记账 pause → 事件 → 取消主 AI（keepInbox）；绝不 followup。
       // **不碰小助手**（票 dsh-contract-drift/01）：收回小助手是主笔 AI 自己的事，工作台只喊主 AI。
       // 口径：**「已暂停」说的是主 AI，不是整条流水线**——小助手会把手上那段跑完、可能还在往书里写。
       // （本条待人的规矩在 `.scratch/subagent-guidance/issues/08`，不在这里。）
@@ -137,7 +144,7 @@ export async function actCollabSignals(ctx, _req, res, action, sessionId, projec
       const meta = updateMeta(project, (state) => {
         state.pause = {
           at: Date.now(),
-          reason: typeof body.reason === 'string' ? body.reason.slice(0, 200) : '用户在造书工作台点击强制中断',
+          reason: typeof body.reason === 'string' ? body.reason.slice(0, 200) : '用户在造书工作台点击暂停',
           subagentsRunning,
         }
       })

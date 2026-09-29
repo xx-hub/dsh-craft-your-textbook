@@ -19,20 +19,24 @@ import {
   listCustomPatterns,
   getParent,
   projectRuntime,
+  workFile,
+  goldN,
   kick,
   sendJson,
 } from '../engine.js'
-import { mkdirSync, writeFileSync, appendFileSync, existsSync } from 'node:fs'
+import { mkdirSync, writeFileSync, appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { join, basename } from 'node:path'
 import { readSettings, writeSettings } from '../../mineru-lib.js'
 import { generateContent } from '../../content-lib.js'
+import { countHanzi } from '../../domain-rules.js'
 
 
 /** 动作族 · 模式卡·运维：'suggest-words' / 'pattern-analyze' / 'pattern-list' / 'settings' / 'demo-run' / 'debug-spawn'。 */
 export async function actPatternsOps(ctx, _req, res, action, sessionId, project, body) {
   switch (action) {
     case 'suggest-words': {
-      // 每章目标字数建议（AI）：根据目标/路线/章节数；分章清单来自大纲（未定章 words=null，AI 铺章时自定）。
+      // 逐章目标建议（AI）：把范例章盘上实测与现有逐章目标一并喂给小助手；
+      // 返回只供界面预填，落盘必须另走 gold-target-words-set。
       assertSessionOwned(project, sessionId)
       const wordsMeta = readMeta(project)
       if (wordsMeta === null) {
@@ -42,21 +46,63 @@ export async function actPatternsOps(ctx, _req, res, action, sessionId, project,
       const goal = typeof body.goal === 'string' ? body.goal : wordsMeta.goal ?? ''
       const route = body.route === 'human' ? 'human' : wordsMeta.route ?? 'blueprint'
       const science = body.science === true || wordsMeta.science === true
-      const chapterCount = Number(body.chapterCount) || (wordsMeta.outline?.chapters ?? []).length || 7
+      const chapters = wordsMeta.outline?.chapters ?? []
+      const chapterCount = chapters.length > 0 ? chapters.length : (Number(body.chapterCount) || 7)
       const runtime = projectRuntime(ctx, project, wordsMeta)
-      const perChapter = (wordsMeta.outline?.chapters ?? []).map((chapter, index) => ({
-        n: index + 1, title: chapter.title ?? '',
-        words: Number.isFinite(chapter.targetWords) ? chapter.targetWords : null,
+      const currentTargets = chapters.map((chapter, index) => ({
+        n: index + 1,
+        title: chapter.title ?? '',
+        targetWords: Number.isFinite(chapter.targetWords) ? chapter.targetWords : null,
         reason: chapter.volumeReason ?? '',
       }))
+      const goldChapter = goldN(wordsMeta)
+      let goldMeasuredHanzi = null
       try {
-        const result = await generateContent(runtime, 'words', { goal, route, science, chapterCount })
-        sendJson(res, 200, { ok: true, suggestion: { ...result, perChapter } })
+        const goldPath = workFile(project, `chapter-${String(goldChapter).padStart(2, '0')}.md`)
+        if (existsSync(goldPath)) goldMeasuredHanzi = countHanzi(readFileSync(goldPath, 'utf8'))
+      } catch { /* 正文尚未生成时不编实测值 */ }
+
+      const toResponsePerChapter = (resultPerChapter) => {
+        const byChapter = new Map(
+          (Array.isArray(resultPerChapter) ? resultPerChapter : []).map((item) => [Number(item?.n), item]),
+        )
+        return currentTargets.map((chapter) => {
+          const suggested = byChapter.get(chapter.n)
+          const words = Number(suggested?.targetWords)
+          return {
+            ...chapter,
+            words: Number.isFinite(words) && words >= 500 && words <= 50000
+              ? Math.round(words)
+              : chapter.targetWords,
+            reason: typeof suggested?.reason === 'string' ? suggested.reason : chapter.reason,
+          }
+        })
+      }
+
+      try {
+        const result = await generateContent(runtime, 'words', {
+          goal,
+          route,
+          science,
+          chapterCount,
+          goldChapter,
+          goldMeasuredHanzi,
+          currentTargets,
+        })
+        sendJson(res, 200, {
+          ok: true,
+          suggestion: { ...result, perChapter: toResponsePerChapter(result.perChapter) },
+        })
       } catch (error) {
         sendJson(res, 200, {
           ok: true,
           fallback: true,
-          suggestion: { suggested: 6000, range: '5000-7000', reason: '（AI 建议暂不可用，使用默认值）', perChapter },
+          suggestion: {
+            suggested: 6000,
+            range: '5000-7000',
+            reason: '（AI 建议暂不可用，保留现有逐章目标）',
+            perChapter: toResponsePerChapter(null),
+          },
         })
       }
       return

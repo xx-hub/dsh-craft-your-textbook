@@ -19,11 +19,16 @@ import {
   kick,
   sendJson,
 } from '../engine.js'
-import { mkdirSync, existsSync, renameSync, rmSync } from 'node:fs'
+import { mkdirSync, existsSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 
-/** 动作族 · 金标准：'gold-opinion' / 'gold-opinion-revoke' / 'gold-revise' / 'gold-chapter-set' / 'gold-approve'。 */
+/** 逐章目标只在最佳范例章定稿区、且尚未进入写完整本时可写。 */
+export function canEditTargetWords(meta) {
+  return meta?.phase === 4 && meta?.status === 'awaiting-gold' && meta?.goldSealed == null
+}
+
+/** 动作族 · 金标准：意见/修订/改选/逐章目标写回/定稿。 */
 export async function actGold(ctx, _req, res, action, sessionId, project, body) {
   switch (action) {
     case 'gold-opinion': {
@@ -111,6 +116,15 @@ export async function actGold(ctx, _req, res, action, sessionId, project, body) 
         target.status = 'revoked'
       })
       if (target === undefined) { sendJson(res, 404, { ok: false, error: '没有这条意见' }); return }
+      // 票 09（走查 P26）：撤回**自己也要进账本**。原先这里只改 project.json 就直接 200，
+      // 于是《过程记录.md》上这条意见「从没发生过任何变化」，界面与账本对「它还在不在」
+      // 给出相反答案。事件类型**沿用** `textbook/gold-opinion`（不新增类型，闭包测试全绿），
+      // 撤回那一支靠 `revoked: true` 认——形状照 `collab-signals.js` 的 style-note 撤回。
+      appendEvent(project, 'textbook/gold-opinion', {
+        id: target.id,
+        ...(Number.isSafeInteger(target.chapter) ? { chapter: target.chapter } : {}),
+        revoked: true,
+      })
       sendJson(res, 200, { ok: true, project })
       return
     }
@@ -195,6 +209,71 @@ export async function actGold(ctx, _req, res, action, sessionId, project, body) 
       sendJson(res, 200, { ok: true, project, goldChapter: pick })
       return
     }
+    case 'gold-target-words-set': {
+      assertSessionOwned(project, sessionId)
+      const meta = readMeta(project)
+      if (meta === null) {
+        sendJson(res, 404, { ok: false, error: '项目不存在' })
+        return
+      }
+      if (!canEditTargetWords(meta)) {
+        sendJson(res, 409, {
+          ok: false,
+          error: '写完整本已经开始，逐章目标请走「定点修改 · 章节安排」修改。',
+        })
+        return
+      }
+
+      const chapters = meta.outline?.chapters
+      if (!Array.isArray(chapters) || chapters.length === 0) {
+        sendJson(res, 400, { ok: false, error: '当前还没有章节安排，不能写回逐章目标' })
+        return
+      }
+      const updates = body.targets
+      if (!Array.isArray(updates) || updates.length === 0) {
+        sendJson(res, 400, { ok: false, error: '请至少提供一章的逐章目标' })
+        return
+      }
+
+      const normalized = new Map()
+      for (const update of updates) {
+        const n = Number(update?.n)
+        const targetWords = Number(update?.targetWords)
+        if (!Number.isSafeInteger(n) || n < 1 || n > chapters.length) {
+          sendJson(res, 400, { ok: false, error: '逐章目标的章号不合法' })
+          return
+        }
+        if (!Number.isFinite(targetWords) || targetWords < 500 || targetWords > 50000) {
+          sendJson(res, 400, { ok: false, error: '每章目标请填 500-50000 汉字' })
+          return
+        }
+        if (n === goldN(meta)) {
+          sendJson(res, 400, { ok: false, error: '最佳范例章的原定目标不能改；实测只作标定依据' })
+          return
+        }
+        if (normalized.has(n)) {
+          sendJson(res, 400, { ok: false, error: `第 ${n} 章目标重复了，请只保留一项` })
+          return
+        }
+        normalized.set(n, Math.round(targetWords))
+      }
+
+      const updated = updateMeta(project, (state) => {
+        for (const [n, targetWords] of normalized) state.outline.chapters[n - 1].targetWords = targetWords
+      })
+      writeFileSync(
+        workFile(project, 'outline.md'),
+        JSON.stringify({ ...updated.outline, chapters: updated.outline.chapters }, null, 2),
+        'utf8',
+      )
+      sendJson(res, 200, {
+        ok: true,
+        project,
+        targets: [...normalized].map(([n, targetWords]) => ({ n, targetWords })),
+        canEditTargetWords: true,
+      })
+      return
+    }
     case 'gold-approve': {
       // 最佳范例章确认：true → 继续写全书；false → 删掉重写。可同时设置每章目标字数。
       assertSessionOwned(project, sessionId)
@@ -212,7 +291,7 @@ export async function actGold(ctx, _req, res, action, sessionId, project, body) 
         // 兼容旧单值：仅作未填章的兜底。走单一入口（当场新读）先落账——意见为空时下面 approved 路径
         // 不写状态，兜底值会随 advance 重读丢失。
         updateMeta(project, (state) => { state.targetWords = Math.round(body.targetWords) })
-        appendEvent(project, 'textbook/hint', { text: '字数以每章清单为准；这个统一值只作未填章的兜底。' })
+        appendEvent(project, 'textbook/hint', { text: '汉字数以每章清单为准；这个统一值只作未填章的兜底。' })
       }
       if (approved === true) {
         // 定稿沉淀：把尚未撤销的意见转成风格线（source:'gold'），并记金标准母版版本号。

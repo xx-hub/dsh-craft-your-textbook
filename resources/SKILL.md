@@ -56,6 +56,26 @@ description: 让你具备"亲手为自己造一本教材"的能力——把源�
 2. 书要喂给已成型的苏格拉底 AI 软件（Socratopia 等） → pure-blueprint
 3. 用户不确定 → 推荐 pure-blueprint 并等拍板
 
+```dot
+digraph route {
+    rankdir=TB;
+    "用户要造书" [shape=box];
+    "原话含'我自己读/出版/当书出/给真人教师/通读'?" [shape=diamond];
+    "喂给已成型的苏格拉底 AI 软件?" [shape=diamond];
+    "human-readable" [shape=box];
+    "pure-blueprint" [shape=box];
+    "呈现两路线 + 推荐 pure-blueprint，等用户拍板" [shape=box];
+
+    "用户要造书" -> "原话含'我自己读/出版/当书出/给真人教师/通读'?";
+    "原话含'我自己读/出版/当书出/给真人教师/通读'?" -> "human-readable" [label="是"];
+    "原话含'我自己读/出版/当书出/给真人教师/通读'?" -> "喂给已成型的苏格拉底 AI 软件?" [label="否"];
+    "喂给已成型的苏格拉底 AI 软件?" -> "pure-blueprint" [label="是"];
+    "喂给已成型的苏格拉底 AI 软件?" -> "呈现两路线 + 推荐 pure-blueprint，等用户拍板" [label="否/不确定"];
+}
+```
+
+> **注意**：图里"呈现两路线 + 等确认"不是捷径的默认箭头——即使命中推荐，也必须把选择摆在用户面前等拍板。
+
 路线差异和细节见 `references/two-routes.md`。
 
 ### Trigger Contract（命中即履行）
@@ -88,7 +108,7 @@ description: 让你具备"亲手为自己造一本教材"的能力——把源�
 
 - **流程类 skill 优先**：若用户想先探讨"要不要造书 / 造什么书"，先用 `brainstorming` 厘清意图，再回到本 skill 走流程。
 - **调试类**：造书过程中若某章反复审不过、或脚本报错，先 `systematic-debugging` 定位根因，再继续 Phase 4-5。
-- **造书本身是流程**：本 skill 内含路线选择与五步设计，本身就是 process skill；命中后再叠加实现类（如本 skill 内的 scripts/工具）随之执行。
+- **造书本身是流程**：本 skill 内含路线选择与五步设计，本身就是 process skill；命中后再叠加实现类工具随之执行。
 
 ## 用户指令优先级
 
@@ -100,7 +120,7 @@ description: 让你具备"亲手为自己造一本教材"的能力——把源�
 
 | 阶段 | 名称 | 做什么 | 产出 |
 | --- | --- | --- | --- |
-| **Phase 1** | 源材料准备 | PDF→MD（MinerU API）+ 复制脚本进项目 + 装依赖 | `sources-md/`、`scripts/` |
+| **Phase 1** | 源材料准备 | PDF→MD（材料转换） | `sources-md/` |
 | **Phase 2** | 源探查 | 所有有源书必走：摸源结构、角色标签、简码表、权威层级 | `源材料索引.md` 第一层 |
 | **Phase 3** | 教学设计 | **核心阶段**：五步设计（见下）+ 三个用户确认关卡 | META/OUTLINE/style-spec/源材料索引 |
 | **Phase 4** | 金标准验证 | 选一章按设计的语法写 → 四层审计 + 试教（条件触发）→ 通过后回填 style-spec | 金标准章 md |
@@ -108,6 +128,8 @@ description: 让你具备"亲手为自己造一本教材"的能力——把源�
 | **Phase 6** | 终检与交付 | **修订复审**（核实 5.3 的修复到位且没引入新问题）→ 终检 → 拆脚手架 → 质量门 → 交付 | 纯净 BOOK.md |
 
 Mode A（无源从零造）差异：Phase 2 跳过、幻觉 gate 更严，仅适合 AI 知识密度高领域（见 `references/source-material.md` 知识密度自评）。Mode B（有源造书）：Phase 2 必走，按源数量选择探查深度（轻量/中量/完整版）。
+
+**Phase 5.1 并行铺章的落盘纪律**：每批/每章写完，在项目约定的进度账本记一行（章号 → 完成 → 审计结论）。上下文压缩后靠它恢复进度，别靠记忆。
 
 ## 核心：Phase 3 教学设计五步
 
@@ -150,46 +172,28 @@ Mode A（无源从零造）差异：Phase 2 跳过、幻觉 gate 更严，仅适
 - **金标准先行**（Iron Law 2）：没有金标准就并行 = agent 必然漂移
 - **一个 agent 只写一章**，避免长上下文漂移
 - **断言可追溯**：每写一条定义/公式/偏好判断，都能回源或回判断根
+- **深度承诺**：Phase 3 在 style-spec 声明四维深度目标（默认"中"底线），最佳范例章兑现，未兑现回炉
 - **防螺旋**：AI 不得自行加章/附录/机制板块，新需求先问"能不能塞进现有结构"；用户主动加章走定点修改（深改）
 - **交付前必拆脚手架**（Iron Law 3）
 
 ## 参考文件按需加载
 
+> `**REQUIRED:**` = Phase 3 开跑前必须读（不变量是底线、模式库是菜单、契约强制回答设计问题）。其余按需。
+
 | 场景 | 参考文件 |
 | --- | --- |
-| Phase 1 PDF 转换 | 见下方"Phase 1 前置"段落 + `scripts/01_pdf_to_md.py` docstring |
+| **REQUIRED** Phase 3 不变量底线 | `references/invariants.md` |
+| **REQUIRED** Phase 3 模式选型 | `references/patterns/README.md` |
+| **REQUIRED** Phase 3 四文件契约 | `references/file-contracts.md` |
 | Phase 2 源探查 | `references/source-material.md` |
-| Phase 3 四文件契约 | `references/file-contracts.md` |
-| Phase 3 模式选型 | `references/patterns/README.md` |
-| Phase 3 不变量底线 | `references/invariants.md` |
 | Phase 3 板块语法起点 | `references/chapter-grammar-starter.md` |
+| Phase 3.3 深度设计 / Phase 4 深度审计 | `references/depth.md` |
 | Phase 3 路线差异 | `references/two-routes.md` |
 | Phase 4-5 审计 | `references/audit-and-testing.md` |
+| Phase 5 写作 subagent prompt | `references/subagent-prompts/writing-agent-prompt.md` |
+| Phase 5 审计 subagent prompt | `references/subagent-prompts/audit-agent-prompt.md` |
 | Phase 6 交付 | `references/delivery-checklist.md` |
 | 避坑 | `references/anti-patterns.md` |
-
-## ⚠️ Phase 1 前置：MinerU API Token
-
-PDF→Markdown 默认走 MinerU 在线 API（`mineru.net`）。开跑前让用户完成：
-
-0. 定位 skill 脚本目录 + 装依赖：
-
-   ```bash
-   # 依次在用户级、项目级目录查找 skill 位置，取第一个命中
-   SKILL_DIR=$(dirname "$({ find ~/.claude -name SKILL.md -path "*dsh-craft-your-textbook*" 2>/dev/null; find . -name SKILL.md -path "*dsh-craft-your-textbook*" 2>/dev/null; } | head -1)")
-   if [ -z "$SKILL_DIR" ]; then
-     echo "错误：找不到 dsh-craft-your-textbook skill 目录。请确认已正确安装（见 README 安装节）。"
-     return 1 2>/dev/null || exit 1
-   fi
-   pip install -r "$SKILL_DIR/scripts/requirements.txt"
-   ```
-
-   复制脚本：`cp "$SKILL_DIR/scripts/"*.py <项目根>/scripts/`
-1. 打开 <https://mineru.net> 注册申请 API Token
-2. 设环境变量：`export MINERU_TOKEN="你的token"`
-3. 运行 `python <项目根>/scripts/01_pdf_to_md.py <PDF路径> sources-md/`
-
-理科改 `ENABLE_FORMULA = True`。已有 MD 跳过 Phase 1。
 
 ## 一句话核心
 
