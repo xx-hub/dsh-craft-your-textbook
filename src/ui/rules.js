@@ -218,7 +218,7 @@ export function hasPendingReview(pendingReviews, n) {
 }
 
 // 章级徽章（F17 四态 + F35 五态）：优先级 doneSet（章级「交工通过」事件，F40 语义最高）
-// → 主 AI 上报的流水线阶段（chapterPipeline）→ 旧四态账本推导兜底。
+// → 主 AI 上报的流水线阶段（chapterPipeline）→ **有没有在跑的小助手认领它**（票 20）→ 不给徽章。
 //
 // ⚠️ 票 10（判定一 #1/#2，2026-09-23）：徽章**一律「状态词 · 在做什么」**——状态词只取
 // CONTEXT.md「工作台状态词」那三个（轮到你 / 我正在做 / 已完成），后半句才是这一章在干哪道工序。
@@ -226,29 +226,104 @@ export function hasPendingReview(pendingReviews, n) {
 // 既违反「状态词只此三个」，又把机器词「审计」摆到人眼上（判定三 #7）。后半句统一说「检查」
 // （内部词→界面词的同一份译法见 view-rules.CHECK_UI / domain-rules.stageLabelHuman）。
 // 「有意见待 AI 修订」保持不变：它是本词表认可的界面词（CONTEXT.md「意见」词条）。
-export function chapterBadge(row, pendingReviews, doneSet, pipelineStage) {
+//
+// ⚠️ 票 22（2026-09-29 真机走查）：「已完成 · 审过」原先只看**账本里有过交工事件**，
+// 于是「交工之后正文又被改过、没重新审计」的章照样亮「审过」——那一轮 3 章里 2 章的徽章是按**旧稿**
+// 给的，而「已完成 3/3 章」正是按这个徽章算出来的。界面上那句「比正文旧，属于旧稿」**已经算出来了**
+// （同一份服务端事实），只是没人拿它卡住徽章。⇒ 第 5 个入参 `auditStale` 就是那份事实的判据形态
+// （`view-rules.chapterAuditIsStale`，与那句文案取同一条 fact），**不是**客户端重比的 mtime。
+// 这一格**不许**回落成「我正在做 · 执笔/检查」——那是在说一件没人做的事（票 20 那个病）；
+// 「轮到你」按 CONTEXT.md「出错了不单列，归入轮到你」的既有口径：它得有人推一把才会重新长好。
+//
+// ⚠️⚠️ 票 20（2026-09-30 用户裁决 · 状态来源换掉，不是词不够细）：**「我正在做」只留给真在做的事**。
+// 病根：徽章原先是按「清单里有这一章、且它还没定稿」**推导**出来的，于是走查那一屏三章
+// 逐字一样地亮「⏳ 我正在做 · 执笔」，而盘上只有第 1 章的正文、只有 1 个小助手在跑（跑的是第 1 章）。
+// 现在「我正在做」这一支的**唯一**前置是 `claimed`——由 `view-rules.indexRunningChapterClaims`
+// 按「该章产物在不在」＋「名额（＝在跑的小助手数）够不够」判出来；**两者都缺 ⇒ 不显示「我正在做」**。
+// ⇒ 兜底那一支从 `我正在做 · 执笔` 变成 **null（这一格不出声）**：`row.written/audited` 说的是
+// 「产物在不在盘上」，它**不表达「有人在写它」**（票 24 在步清单那侧已按同一条理由改过一次：
+// 有产物但没交工说「还没完成」，不给「我正在做」）。产物那一行本来就逐章显示在卡上，
+// 用户看得见这一章写到哪；**说一件没人做的事则收不回来**。
+// 返回 null 时调用方**整颗徽章不渲染**——不是渲染一颗空徽章，也不是拿别的词顶上。
+const CHAPTER_OPERATION = Object.freeze({
+	writing: { icon: "⏳", tone: "#e3b341", text: "执笔", agent: "写作小助手" },
+	auditing: { icon: "🔍", tone: "#0969da", text: "检查", agent: "检查小助手" },
+	audited: { icon: "🔎", tone: "#0969da", text: "等复核", agent: "复核小助手" },
+	finalizing: { icon: "👁", tone: "#57606a", text: "复核", agent: "复核小助手" },
+});
+
+/** 归属栏那一份图标与色：与徽章**故意不同**——它是次要信息，不与状态抢眼睛。 */
+const CHAPTER_ATTRIBUTION_ICON = "🛠️";
+const CHAPTER_ATTRIBUTION_TONE = "#57606a";
+
+/**
+ * 章级徽章。`claimed` 认不认这一章（「有没有在跑的小助手认领它」，判据在 `view-rules`）。
+ *
+ * @returns {{icon: string, text: string, tone: string} | null} **null ＝这一章此刻没有状态可报**
+ */
+export function chapterBadge(
+	row,
+	pendingReviews,
+	doneSet,
+	pipelineStage,
+	auditStale = false,
+	claimed = false,
+) {
 	const hasReview = hasPendingReview(pendingReviews, row.n);
 	// 「该章已完成」的两个来源（doneSet 交工事件 / 主 AI 上报 done）走同一句。
 	const settled = () =>
 		hasReview
 			? { icon: "📝", text: "轮到你 · 有意见待修订", tone: "#cf222e" }
-			: { icon: "🛡️", text: "已完成 · 审过", tone: "#1a7f37" };
+			: auditStale
+				? { icon: "⚠️", text: "轮到你 · 还没审过", tone: "#bf8700" }
+				: { icon: "🛡️", text: "已完成 · 审过", tone: "#1a7f37" };
+	// 票 22：新鲜度先于任何「说它完了」的来源（交工事件 / AI 自报 done / 有检查记录这一事实）。
+	// 后三者说的是**过去某一刻**发生过什么，这一条说的是**此刻这份正文**有没有被审过。
+	if (auditStale && (doneSet.has(row.n) || pipelineStage === "done" || row.audited === true)) {
+		return settled();
+	}
 	if (doneSet.has(row.n)) return settled();
-	// F35（2026-08-20 走查）：主 AI 经 progress 动作上报的章级流水线阶段；demo/旧账本为 null → 回退四态。
-	if (pipelineStage === "writing")
-		return { icon: "⏳", text: "我正在做 · 执笔", tone: "#e3b341" };
-	if (pipelineStage === "auditing")
-		return { icon: "🔍", text: "我正在做 · 检查", tone: "#0969da" };
-	if (pipelineStage === "audited")
-		return { icon: "🔎", text: "我正在做 · 等复核", tone: "#0969da" };
-	if (pipelineStage === "finalizing")
-		return { icon: "👁", text: "我正在做 · 复核", tone: "#57606a" };
+	// AI 自报 `done` 是「我刚才到哪了」，与账本上的交工事件同属「说它完了」那一族，先于认领。
 	if (pipelineStage === "done") return settled();
-	if (row.written && row.audited)
-		return { icon: "👁", text: "我正在做 · 复核", tone: "#57606a" };
-	if (row.written)
-		return { icon: "🔍", text: "我正在做 · 检查", tone: "#0969da" };
-	return { icon: "⏳", text: "我正在做 · 执笔", tone: "#e3b341" };
+	// 票 20：**只有被认领的章才说「我正在做」**。工序取自 AI 自报的流水线阶段；
+	// 说不出是哪一道工序（没上报 / 不认识的态）就只说状态词那半截，**不猜**。
+	if (claimed) {
+		const operation = CHAPTER_OPERATION[pipelineStage];
+		return operation === undefined
+			? { icon: "⏳", text: "我正在做", tone: "#e3b341" }
+			: { icon: operation.icon, text: `我正在做 · ${operation.text}`, tone: operation.tone };
+	}
+	// 没人在写它：这一格整颗不出声（票面 :98/:104「实跑 1 章时只该有 1 行我正在做」）。
+	return null;
+}
+
+/**
+ * **归属**栏（票 20 · 与状态拆成两件不同的事，票面 :57/:87 裁决）：「谁在写这一章」。
+ *
+ * 与 `chapterBadge` 同形（`{ icon, text, tone } | null`）——两栏的字与色都由本模块出，
+ * 组件里不留展示字面量。
+ *
+ * ⚠️ **这一栏说的是「名额落在这一章上」，不是「我们看见了那个小助手」**：宿主没给
+ * 「哪个小助手在写哪一章」的逐个归属（会话摘要只有 `id`/`parentId`/`origin`/`running`，
+ * 见 `docs/reference/dsh-session-contracts.md` §1），所以「谁」由认领判据**推**出来。
+ * 要逐个归属得先有一条宿主契约——那是另开一票的事，不许在这里拿标题去猜。
+ *
+ * 没有在跑的小助手认领就返回 **null**——调用方整格不渲染。
+ * ⚠️ 空着就是空着：**不许**退回成「排队中」或任何别的话（票面 :99「那正是把计划说成事实的另一种写法」）。
+ * 它也**不是**状态词（不占 CONTEXT.md「工作台状态词」那三个词的名额）：它答的是「谁」，不是「走到哪了」。
+ *
+ * @param {boolean} claimed 这一章此刻有没有在跑的小助手认领它
+ * @param {string | null} pipelineStage AI 自报的章级流水线阶段（决定是哪一道工序的小助手）
+ * @returns {{ icon: string, text: string, tone: string } | null}
+ */
+export function chapterAttribution(claimed, pipelineStage) {
+	if (claimed !== true) return null;
+	const operation = CHAPTER_OPERATION[pipelineStage];
+	return {
+		icon: CHAPTER_ATTRIBUTION_ICON,
+		text: operation === undefined ? "小助手" : operation.agent,
+		tone: CHAPTER_ATTRIBUTION_TONE,
+	};
 }
 
 // 已交工通过的章（纯账本推导，票 14 口径）：该章有机器记下的章级 `agent-end` 且 `outcome==='ok'`
@@ -450,28 +525,103 @@ function isRoundedOpaqueBox(box) {
 	return Number.isFinite(parts[3]) ? parts[3] > 0 : true;
 }
 
-// ── 焦点区吸底决策条（走查 P3 / `walkthrough-fixes` 票 20）────────────────────────
+// ── 「现在」那张卡要自己进视野（`walkthrough-fixes` 票 24）────────────────────────
 //
-// 确认点上的推进键（「✅ 满意，继续设计」）原本埋在几千字报告底下：真机量到焦点区滚动容器
-// `clientH 1165 / scrollH 2949`，那颗键在容器内 `top 2926`＝要滚过约 2.9 个视口高度才摸得到。
-// 票面把形态留给实现者定，只钉三条硬要求：
-//   ①**只在 `scrollH > clientH`（内容超出）时出现**——不超出时凭空插一条是纯噪音；
-//   ②出现时给滚动区留出**等于自身高度**的下边距，最后一行可点元素不许被它压住；
-//   ③它不是容器级 `onClick` 的整块热区（spec 不变量 2）——条上那颗按钮自己就是热区，
-//     身份＝**发动作**（推进键那条动作），不是"又展开又发动作"的整块。
+// 票 20 治的是**同一类**病的另一半（确认点那颗推进键埋在几千字报告底下）；票 24 这一半治的是
+// **终检/交付屏**——那里没有第二颗键可给，「认可，交付」就是那颗唯一定案键，而它在 2551px 内容列的
+// `y 1523`（真机量测，见票面表格），用户那一侧干脆整屏空白。于是**自动把那张卡带进可视带**是唯一
+// 的解法，而不是再造一个出口。
+// ⚠️ 票 20 那一半**曾经**的解法是「再给一颗同一动作的键」（焦点区吸底决策条），那条已按
+// `walkthrough-fixes/18` 的裁决**整条删掉**——同一屏里那颗键渲染了两次（用户原话「满意的那行位置不对」）。
+// ⇒ 记这一句是因为它当年被拿来当「探索/大纲/定稿/交工那四张为什么不自动滚」的**理由**：
+// 那四张至今**不滚**，而那条理由（底对齐会把正在读报告的用户一把拽到几千字下面）本身仍然成立；
+// 失效的只是「探索有第二出口」那一半，见 `view-rules.autoScrollCardKey` 与票 20 的 `## Comments`。
 //
-// 判据收在这里一处（纯函数、可独立测）；`client-entry.js` 只负责量、只负责渲染。
-// ⚠️ 真几何（2.9 个视口那个数、吸底后 `elementFromPoint` 命中谁）node 侧量不到，
-// 这里只判"出不出、留多少"，不冒充位置级事实。
-export function stickyDecisionBar({ enabled, scrollHeight, clientHeight, barHeight }) {
-	const content = Number(scrollHeight);
-	const view = Number(clientHeight);
-	// 量不到（还没布局 / 页签未激活，`clientHeight` 为 0）时不猜：宁可不出这条。
-	const overflow = Number.isFinite(content) && Number.isFinite(view) && view > 0 && content > view;
-	if (enabled !== true || overflow === false) return { show: false, paddingBottom: 0 };
-	const height = Math.round(Number(barHeight));
-	// 自身高度还没量到时留 0（宁可先不挡，也不要按猜的数留白）；量到了就一字不差地留出来。
-	return { show: true, paddingBottom: Number.isFinite(height) && height > 0 ? height : 0 };
+// 三条口径：
+//   ① **量不到不猜，且量不到就不算数**：页签没激活／还没布局（`clientHeight === 0`）、卡还没
+//      长出来时返回 `measured: false`——调用方**必须**拿这一位决定要不要记账。否则一次「量不到」
+//      的帧会把「已经摆过」记上，之后每帧都提前返回，**原病原样复发**（2026-09-30 首轮实现里
+//      的那个 bug；票面 §Answer 已记）。
+//   ② **一像素也不多给**：整张卡已经在可视带里 → `scrollTop: null`（`measured` 仍为 true）。
+//      **不在每一次轮询上抢滚动**——用户自己滚到哪儿是用户的事，判据只管「进来时没在视野里」
+//      这一种。
+//   ③ **装得下就顶对齐、装不下就底对齐**：唯一定案键长在卡的**底部**（票面实测它就在最下面），
+//      卡比可视带还高时先把它带进来；卡装得下时顶对齐＝票面那句「钉在容器顶部」，抬头那句
+//      「🛡️ 最后检查完成，等你对整本书把关」也一起看得见。
+//
+// 判据收在这里一处（纯函数、可独立测）；`client-entry.js` 只负责量坐标、只负责写 `scrollTop`。
+// ⚠️ 真几何（滚完之后 `getBoundingClientRect()` 落在第几个视口、`elementFromPoint` 命中谁）
+// node 侧量不到——本文件头与 `test-layout-anchors.mjs` 头已有同样的自陈，这里只判"滚到哪"。
+
+/** 卡与可视带之间留的那道缝（px）。量不到时**不用**它下判断。 */
+const DECISION_CARD_MARGIN = 12;
+
+/** 「量不到」的读数（**只此一份**，免得两处各造一个字面量）。 */
+const CARD_SCROLL_NOT_MEASURED = Object.freeze({ scrollTop: null, measured: false });
+
+/**
+ * 闸门卡：容器该滚到哪，**以及这一帧到底量到了没有**。
+ *
+ * 全部入参都在**焦点区滚动容器的内容坐标系**里（不是视口坐标）——调用方负责换算
+ * （`卡片 rect.top - 容器 rect.top + 容器 scrollTop`），本函数不碰 DOM。
+ *
+ * @param {{ cardTop: number, cardHeight: number, viewportHeight: number, scrollTop: number }} input
+ * @returns {{ scrollTop: number | null, measured: boolean }}
+ *   `measured: false` ＝ **这一帧不算数**（量不到），调用方不要拿它当「已经摆过」；
+ *   `measured: true` ＋ `scrollTop: null` ＝ 量到了，且**不要动**。
+ */
+export function decisionCardScroll(input) {
+	const { cardTop, cardHeight, viewportHeight, scrollTop } = input ?? {};
+	const top = Number(cardTop);
+	const height = Number(cardHeight);
+	const view = Number(viewportHeight);
+	const from = Number(scrollTop);
+	// 量不到（还没布局 / 页签未激活 / 卡还没长出来 / 这一格根本没渲染）→ **这一帧不算数**。
+	if (![top, height, view, from].every(Number.isFinite)) return CARD_SCROLL_NOT_MEASURED;
+	if (view <= 0 || height <= 0) return CARD_SCROLL_NOT_MEASURED;
+	const bottom = top + height;
+	// ① 整张卡已经在可视带里 → 一像素不动（`measured` 仍为 true：这一帧确实量到了）。
+	if (
+		top >= from + DECISION_CARD_MARGIN &&
+		bottom <= from + view - DECISION_CARD_MARGIN
+	)
+		return { scrollTop: null, measured: true };
+	// ② 装得下 → 顶对齐（抬头那句也一起进视野）。
+	// ③ 装不下 → 底对齐：唯一定案键在卡的底部，先把它带进来。
+	const fits = height + DECISION_CARD_MARGIN * 2 <= view;
+	const next = Math.max(
+		0,
+		Math.round(
+			fits ? top - DECISION_CARD_MARGIN : bottom + DECISION_CARD_MARGIN - view,
+		),
+	);
+	return { scrollTop: next === from ? null : next, measured: true };
+}
+
+// ── 焦点区空白兜底（票 24 要求③）──────────────────────────────────────────────
+//
+// 「阶段片亮了 ⚡、内容区却是空的」比没有提示更让人发毛（用户的原话是「页面有问题」）。
+// 空白与「还没画完」在人眼前分不开，所以**宁可多一句**：工作台那一屏该给内容而没有时，
+// 焦点区必须**有一句人话**说明并给出路（刷新），而不是留一大片白。
+// ⚠️ 这句话是判定线① 的出口，字只此一份；**唯一的调用点**是 `client-entry.js` 里那个
+// 「读不到书、又不加载」的窗口——**仓内唯一一处真的能把整块渲染成空的地方**。
+// 「现在」主卡那一格**刻意没有**这道兜底：`focusCardKey` 是全函数（九个返回值每一个都有卡），
+// 挂一个今天走不到的分支只会造出一条「形状断言冒充行为断言」的假绿（2026-09-30 双轴 review
+// 的判断，已按它改：把那处分支与它的纯函数一起删掉，兜底只留真能触发的那一个）。
+
+/** 焦点区兜底句（界面词只此一份；判定线① 的出口，改字要过 `test-wording-invariants.mjs`）。 */
+export const BLANK_FOCUS_TEXT = "这一屏该出来的卡片没画出来。刷新一下试试。";
+
+/**
+ * 兜底句出不出：**该给内容却没给**时出，其余一律不出。
+ *
+ * @param {{ expectsContent?: unknown, rendered?: unknown }} input
+ *   `expectsContent` ＝ 这一屏本来就该给用户一件事看；`rendered` ＝ 这一次**到底渲染了没有**。
+ * @returns {string | null} 该显示的那句话；不出时 `null`
+ */
+export function blankFocusText(input) {
+	const { expectsContent, rendered } = input ?? {};
+	return expectsContent === true && rendered !== true ? BLANK_FOCUS_TEXT : null;
 }
 
 

@@ -19,6 +19,7 @@ import {
   handoff,
   chapterArtifacts,
   chapterDone,
+  noteStyleSpecChange,
   writeSnapshot,
   proposeGate,
   proposeRevision,
@@ -27,6 +28,7 @@ import {
   scanScaffolding,
   scaffoldResidue,
   stripLoaderRegion,
+  stripChapterTitleHeading,
   specFingerprint,
   styleSpecDeclaresNoExercises,
   runQualityChecks,
@@ -659,8 +661,8 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
             const { chapterPath } = chapterArtifacts(project, index + 1)
             const body2 = existsSync(chapterPath) ? readFileSync(chapterPath, 'utf8').trim() : ''
             const heading = `# 第${index + 1}章 ${chapters[index]?.title ?? ''}`
-            // 章节正文若自带一级标题则去掉，避免与章标题重复。
-            const stripped = body2.replace(/^#\s+.*$/m, '').trim()
+            // 章节正文若自带章标题则去掉，避免与机器拼的章标题重复（见 stripChapterTitleHeading）。
+            const stripped = stripChapterTitleHeading(body2, chapters[index]?.title ?? '').trim()
             parts.push('', '---', '', heading, '', stripped)
           }
           // human 路线：成品顶部给 AI 老师留 loader 装配指令（正文 prose 当素材库用），保留在成品里。
@@ -736,6 +738,9 @@ export async function actChapters(ctx, _req, res, action, sessionId, project, bo
           }
           // style-spec 对账（Q9，2026-08-27）：范例章定稿后 spec 被改过 → 契约修改必须留痕。
           // 机器只认自查报告里的「style-spec 变更：」声明——没声明就打回，防 AI 静默放宽契约迁就检查。
+          // ⚠️ 票 12 · ①：**先补记一笔再对账**——工作台没开过、这一路也没人轮询时，
+          // 那一笔就不在账本里；补检让「留痕」不依赖「有人正开着界面」。
+          try { noteStyleSpecChange(project) } catch { /* 补记失败不许挡住对账本身 */ }
           let specNow = null
           try { specNow = specFingerprint(project) } catch { /* spec 被删/不可读：视为已变更（堵「删 spec 逃检查」的逃逸口） */ }
           if (subMeta.styleSpecHash != null && specNow !== subMeta.styleSpecHash

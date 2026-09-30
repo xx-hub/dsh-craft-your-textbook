@@ -16,6 +16,7 @@ import {
   bindContextOccupancy,
   chapterArtifacts,
   chapterDone,
+  noteStyleSpecChange,
   deepAffected,
   dshHome,
   foldGate,
@@ -562,6 +563,11 @@ function handleEvents(req, res) {
       sendJson(res, 404, { ok: false, error: '项目不存在' })
       return
     }
+    // 票 12 · ①：AI 改写作规范这件事**机器替它记账**。检测点选在这里的理由与代价写在
+    // `engine.noteStyleSpecChange` 的注释里（稳态只读不写；终检交工那一次还会补检）。
+    // ⚠️ 必须排在 `readEvents` **之前**：这一笔落进账本后，本轮响应要能把它带回去，
+    // 否则用户得再等一个轮询周期才看见（实测轮询间隔 2 秒——不差，但顺序摆在这里更符合因果）。
+    try { noteStyleSpecChange(project) } catch { /* 记账失败不许拖垮这一轮读取 */ }
     const events = readEvents(project, after)
     // 定稿区展示用的实测值是**响应派生**，不落 project.json：服务端当场读盘上当前范例章，
     // 用 domain-rules 的唯一汉字计数口径算好后随 meta 视图下发，浏览器不另读正文。
@@ -852,6 +858,9 @@ async function handleProcess(ctx, req, res) {
   }
   try {
     assertSessionOwned(project, sessionId)
+    // 票 12 · ①：与 `handleEvents` 同一个检测点，理由见 `engine.noteStyleSpecChange` 的注释。
+    // 工作台这两条路都是 2 秒一轮，且**同时**在跑；去重（`styleSpecSeen`）保证同一次变更只记一条。
+    try { noteStyleSpecChange(project) } catch { /* 记账失败不许拖垮这一轮读取 */ }
     sendJson(res, 200, { ok: true, project, segments: buildProcessMap(project) })
   } catch (error) {
     sendJson(res, 500, { ok: false, error: String(error instanceof Error ? error.message : error) })

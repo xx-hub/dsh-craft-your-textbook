@@ -475,6 +475,7 @@ export const EVENT_TYPES = new Set([
 	"textbook/deep-undo",
 	"textbook/pattern-added",
 	"textbook/submit-rejected",
+	"textbook/style-spec-change",
 ]);
 
 /**
@@ -530,4 +531,11 @@ export const EVENT_META = Object.freeze({
 	// 交工/提审被拒（票 audit-matrix-contract/01 (d)）：机器把拒收与原因入账——用户与下一个接手的人
 	// 不必再翻对话轨迹才知道这道闸门响过。**要开口**（用户正是被「机器报错、AI 说没事」卡住的人）。
 	"textbook/submit-rejected": { label: "交工被拒", emoji: "🚫" },
+	// 写作规范在范例章定稿之后被改过（票 `walkthrough-fixes/12` · 用户 2026-09-29 拍板选 ①）。
+	// **机器替 AI 记这一笔**：原来只有终检交工那一刻的一次对账（改了又不声明就打回 400），
+	// 于是「范例章定稿 88 分钟后规范被改、这 88 分钟里第 1–12 章全部照旧版落盘」这件事，
+	// 账本里一个字都没有、界面上也看不出来——**机器有判据、界面看不出来、账本里也没有**。
+	// 与 P31（「每章一个检查文件」被悄悄换成「每批一份」）同一个源簇，形状也同源：
+	// **留痕而不禁止**——改规范本身是 AI 在样章执行中的正常收敛，直接拒收会变成死结。
+	"textbook/style-spec-change": { label: "写作规范变更", emoji: "📝" },
 });

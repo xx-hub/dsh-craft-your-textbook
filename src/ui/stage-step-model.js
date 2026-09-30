@@ -7,11 +7,15 @@
  * 交给各消费方共用——「一次推导」由此成立。
  *
  * 外部只有一个 interface：
- *   createStageStepProjector({ meta, segments })  →  project(request)
+ *   createStageStepProjector({ meta, segments, runningSubagentCount })  →  project(request)
  * `request` 是带 tag 的三选一（per-tag **最小形状**，tag 真实缩小 interface）：
  *   · { kind: "overview" } 全览条用：headline / currentPhaseText / counts / 分组行 / 阶段片文件数
  *   · { kind: "phase", phase, focus?, optimisticSegmentKey? } 阶段页用：阶段名 / intro / 完整行 / 焦点 / 计数
  *   · { kind: "focus", ref, fallbackPhase? } 工作台焦点用：这一步 / 这一段落在第几阶段
+ *
+ * `runningSubagentCount`（在跑的小助手数，票 20 加的第三个入参）只喂章那几行：「我正在做」凭什么说得出来。
+ * 它与章节卡徽章（`chapters-map.js`）走**同一个判据函数**，两屏因此不可能一个说有人在写、
+ * 另一个说没人认领。
  *
  * canonical snapshot、索引、排序、key 兼容解析、diagnostics 全藏在 implementation 内；返回对象
  * 深冻结、只读，不含 callback / 时间 / 导航目标 / 写动作。
@@ -40,6 +44,7 @@ import {
 	openableArtifacts,
 	decisionText,
 	artifactFactText,
+	indexRunningChapterClaims,
 	PHASE_INTRO,
 } from "./view-rules.js";
 import { SEGMENT_PHASE, segmentHuman } from "../domain-rules.js";
@@ -86,17 +91,53 @@ const buildRowText = (title, status, statusWord) => {
 
 // ── 归一：材料准备 / 章内五态 / 章数 ───────────────────────────────────────
 
-/** 章内五态 → 写 / 审 / 复核 三步各走到哪（票 01 §2 的完成判据）。 */
-function chapterStepStatuses(stage, segStatus) {
-	if (stage === "writing") return ["active", "pending", "pending"];
-	if (stage === "auditing") return ["done", "active", "pending"];
-	if (stage === "audited") return ["done", "done", "pending"];
-	if (stage === "finalizing") return ["done", "done", "active"];
-	if (stage === "done") return ["done", "done", "done"];
+/** 章内五态 → 写 / 审 / 复核 三步各走到哪（票 01 §2 的完成判据）。
+ *
+ * ⚠️ 票 22（2026-09-29 真机走查）：**机器事实先判**。原来 AI 自报的 `stage` 排在 `segStatus` 前面，
+ * 于是「AI 最后一次报的是 auditing」会**永久压住**随后落到账本上的交工事件——
+ * 走查那一屏正是这样冻着的：`▶ 第 2 章 · 审（我正在做）`／`○ 第 2 章 · 复核（还没到这一步）`，
+ * 而账本与章节卡都已经记下「第 2 章 22:10:42 交工」，那一屏**一个子智能体都没在跑**。
+ * 交工是**账本事件**，清单既然是账本的投影就该在同一轮刷新里跟上；AI 自报的是「我刚才到哪了」，
+ * 那是**过去某一刻**的读数。两件事都真，冲突时**机器的那一件赢**。
+ *
+ * ⚠️⚠️ 票 20（2026-09-30 用户裁决 · 换掉状态**来源**）：**AI 自报的五态只答「这一章上一刻走到哪了」**，
+ * 它**不表示此刻有人在写它**。原先 `active` 直接由它推导，于是铺章里排队的章逐行亮起
+ * 「▶ 我正在做」——与章节卡那几行、顶栏那个「N 个小助手在跑」三处互相打架。
+ * 现在 **五态映射只在「这一章被认领」时**（`claimed`，判据与章节卡徽章**同一份**：
+ * `view-rules.indexRunningChapterClaims`）才给 `active`；没被认领就落回 `pending`，
+ * 由 `chapterStatusWord` 按「产物在不在盘上」说准是「还没完成」还是「还没到这一步」——
+ * 与票 24 在这一档上定的口径同款：**产物在 ≠ 有人在写**。
+ * ⚠️ **服务端给的段状态 `active` 对章段**也**要认领**，尽管它长着机器的样子：
+ * `buildProcessMap` 的章段那一格是 `phase >= 5 && stageN !== null`（`src/workflow.js`）——
+ * **`stageN !== null` 就是 AI 自报过**，所以对章而言这一位是自报的**改写**，不是第二个来源。
+ * 留着它不设闸 ＝ 走查那一屏原样复发（3 章都报过阶段、只跑 1 个 ⇒ 3 行「我正在做」）。
+ * 定点修改不靠它：服务端 `deep-modify` 会**清掉**被重做章的 `chapterPipeline` 条目（F35），
+ * 那一章的段状态因此是 `pending`；「用户刚点了重做」那个窗口由 `PhasePage` 的**乐观标记**管
+ * （它只管到下一份 `/textbook/process` 为止，见那个文件的注释），**不靠这一位**。
+ */
+/** 自报五态 → 三步各走到哪（`CHAPTER_PROGRESS_STAGES` 里除 `done` 外的四态；值＝三步状态）。 */
+const CHAPTER_STAGE_STEPS = Object.freeze({
+	writing: Object.freeze(["active", "pending", "pending"]),
+	auditing: Object.freeze(["done", "active", "pending"]),
+	audited: Object.freeze(["done", "done", "pending"]),
+	finalizing: Object.freeze(["done", "done", "active"]),
+});
+
+/** 被认领、但自报阶段判不出在哪一道工序（没上报／不认识的值）→ 只说「这一章在被做」，不猜是哪一步。 */
+const CHAPTER_STEPS_UNPLACED = Object.freeze(["active", "pending", "pending"]);
+
+function chapterStepStatuses(stage, segStatus, claimed) {
+	// ① 机器判定的「这一章已交工」（`segStatus` 来自服务端 `chapterDone`）——最高优先。
 	if (segStatus === "done") return ["done", "done", "done"];
+	// ② 「做完」与「在写」是**两件不同的事**：自报 `done` 说的是这一章已经走完（与①同族，
+	// 都由机器随后盖章），它不占用名额、不需要认领。票 20 只管「我正在做」那一支。
+	if (stage === "done") return ["done", "done", "done"];
+	// ③ 轮到用户（与「在写」也无关，它说的是「等你拍板」）。
 	if (segStatus === "waiting-user") return ["waiting-user", "pending", "pending"];
-	if (segStatus === "active") return ["active", "pending", "pending"];
-	return ["pending", "pending", "pending"];
+	// ④ 票 20：章段上「我正在做」**只有一个来源**——认领（判据与章节卡徽章同一份）。
+	//    没认领就一律 pending，哪怕服务端把这一段判成 `active`（对章而言那是自报的改写，见上）。
+	if (claimed !== true) return ["pending", "pending", "pending"];
+	return CHAPTER_STAGE_STEPS[stage] ?? CHAPTER_STEPS_UNPLACED;
 }
 
 /** 材料准备这一步走到哪：完成判据＝书已进阶段 2（`meta.phase >= 2`）。 */
@@ -171,10 +212,16 @@ function chapterStartedOnDisk(seg) {
 /**
  * 章内一步的状态词：只在这一档（pending）上做区分，其余档交回默认的 `stepWord`。
  * 返回 null ＝「按默认词走」；调用方 `makeRow` 只在给了非空串时覆盖。
+ *
+ * ⚠️ 票 20：AI 自报的阶段**不再**足以压住这一档的「产物判据」——自报的是过去某一刻，
+ * 此刻谁在写由 `chapterStepStatuses` 的认领那一支管。只有**这一章真被认领**时，五态映射才知道
+ * 剩下那几步各自该说「还没到这一步」，那才是自报阶段能贡献的信息。
+ * 没被认领而产物已在盘上的章，落回「还没完成」（票 24 的口径）：产物在 ≠ 有人在写。
  */
-function chapterStatusWord(status, stage, seg) {
+function chapterStatusWord(status, stage, seg, claimed) {
 	if (status !== "pending") return null; // 已完成/轮到你/我正在做：各走各的默认词
-	if (typeof stage === "string" && stage !== "") return null; // AI 上报了：机器知道它在干哪一步
+	// 认领 ＋ 自报阶段 → 机器知道剩下几步还没到，用默认词。
+	if (claimed === true && typeof stage === "string" && stage !== "") return null;
 	if (chapterStartedOnDisk(seg)) return CHAPTER_NOT_DONE_YET_WORD;
 	return null; // 真没开始：「还没到这一步」本来就是准的
 }
@@ -274,7 +321,7 @@ function makeRow(step, segments, enriched) {
 }
 
 /** 一份 payload 的 step 模型（**步**只派生一次；材料准备 / 章内三步 / 其余每段一步）。 */
-function deriveSteps(meta, segments) {
+function deriveSteps(meta, segments, chapterClaims) {
 	const steps = [];
 
 	const pushMaterialStep = () => {
@@ -295,7 +342,10 @@ function deriveSteps(meta, segments) {
 
 	const pushChapterSteps = (n, seg) => {
 		const stage = seg?.stage ?? chapterPipelineStage(meta, n);
-		const statuses = chapterStepStatuses(stage, seg?.status);
+		// 票 20：这一章此刻有没有在跑的小助手认领它——**与章节卡徽章同一份判据**
+		// （`view-rules.indexRunningChapterClaims`，在 `createStageStepProjector` 里算一次）。
+		const claimed = chapterClaims.has(n);
+		const statuses = chapterStepStatuses(stage, seg?.status, claimed);
 		const segmentKey = seg?.key ?? `chapter-${n}`;
 		for (let i = 0; i < CHAPTER_STEPS.length; i += 1) {
 			const step = {
@@ -305,7 +355,7 @@ function deriveSteps(meta, segments) {
 				phase: chapterStepPhase(seg),
 				status: statuses[i],
 				// 票 24（P17）：这一档的说法由「产物在不在盘上」决定，不让 UI 自己猜。
-				statusWord: chapterStatusWord(statuses[i], stage, seg),
+				statusWord: chapterStatusWord(statuses[i], stage, seg, claimed),
 				chapter: n,
 				segmentKey: seg?.key ?? null,
 				segment: seg ?? null,
@@ -360,11 +410,16 @@ function deriveSteps(meta, segments) {
  * 私有 canonical snapshot：一次归一 + first-wins 索引 + 计数。**不直接暴露**给调用方——
  * 只经 `project` 投影。`rowByStepKey` / `rowBySegmentKey` 都 first-wins（只在缺键时写），
  * 保住 legacy `.find()` first-match 语义（Map 若 last-wins 会悄悄改重复 key 的行为）。
+ *
+ * ⚠️ 票 20：「谁在写哪一章」的认领**在这里算一次**，全览条与阶段页的所有行共用同一份
+ * （`indexRunningChapterClaims` 与 `chapters-map.js` 的章卡徽章是**同一个函数**，
+ * 不许两处各判各的——两处各判一次就是两套真相）。
  */
-function buildSnapshot({ meta, segments }) {
+function buildSnapshot({ meta, segments, runningSubagentCount }) {
 	const normMeta = meta ?? undefined;
 	const normSegments = Array.isArray(segments) ? segments : [];
-	const steps = deriveSteps(normMeta, normSegments);
+	const chapterClaims = indexRunningChapterClaims(normSegments, runningSubagentCount);
+	const steps = deriveSteps(normMeta, normSegments, chapterClaims);
 
 	const overviewRows = steps.map((step) => makeRow(step, normSegments, false));
 	const phaseRows = steps.map((step) => makeRow(step, normSegments, true));
@@ -537,6 +592,10 @@ function projectFocus(snapshot, request) {
  * 建一个只读 projector。`{ meta, segments }` 是同一份 process/meta 快照；调用方（WorkbenchView）
  * 负责用 `useMemo([meta, processSegs])` 保证同一快照只建一次。
  * 返回 `{ project }`——调用方只经 `projector.project(request)` 读事实。
+ *
+ * ⚠️ 票 20：`runningSubagentCount`（在跑的小助手数，与顶栏「🔎 N 个小助手在跑」同一份读数）是**第三个入参**，
+ * 章那几行凭什么说「我正在做」全由它决定。**缺这一格按 0 算**——那意味着清单不说「我正在做」，
+ * 是安全方向（少说一句收得回来，多说一句就是票 20 那个病）。
  */
 export function createStageStepProjector(input) {
 	const snapshot = buildSnapshot(input ?? {});

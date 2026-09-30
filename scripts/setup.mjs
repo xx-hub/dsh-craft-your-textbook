@@ -8,7 +8,8 @@
  *
  * 做五件事：
  *   0. **先探测宿主版本**——低于最低支持版本就**明确报错并以非零退出，一个文件都不写**
- *   1. 用 `dsh plugin` 把本插件装进 profile（等价于 pnpm add）
+ *   1. 用 `dsh plugin` 把本插件装进 profile（等价于 pnpm add）——**装的是带版本号的 spec**，
+ *      所以发布当天也不会被包管理器的新版本冷却挡回上一版（见 `planInstallSpec`）
  *   2. 把 dsh-craft-your-textbook 写进 profile 的 bundles 列表（没有它宿主不会挂载）
  *   3. **检测**宿主组合树里造书模式的那一行，与本包携带的声明补丁逐项比对并如实报告
  *   4. 提醒重启并**新开会话**，并给出「怎么确认真的注册上了」的那条命令
@@ -131,6 +132,7 @@ function usage() {
 用法：
   npx dsh-craft-your-textbook               安装到默认的 web profile
   npx dsh-craft-your-textbook --profile tui 安装到指定 profile
+  npx dsh-craft-your-textbook --upgrade     升级到当前最新的一版
 
 第 3 步**不再往任何目录写文件**——造书模式现在由本插件包随 bundle 发出的
 preset/textbook.patch.yml 声明，宿主每次启动重算组合树。旧机制留下的
@@ -138,6 +140,11 @@ preset/textbook.patch.yml 声明，宿主每次启动重算组合树。旧机制
 
 装之前会先读宿主版本：低于 ${MINIMUM_HOST_VERSION} 会**直接报错退出、一个文件都不写**
 （那一版的宿主用的是另一套模式机制，本包不双轨）。
+
+── 为什么要有 --upgrade ──
+dsh 装插件时把你的 profile 记成 \`"<包名>": "^<装上的那一版>"\`。这个范围本来允许装更新的，
+但包管理器**认已经记下来的那一版**，不会自己回头去看有没有新的——所以「卸载再装一次」
+也升不了级。--upgrade 就是先把那一行改掉，再让 dsh 重新装一次。
 
 安装后请重启 dsh 并**新开**一个会话（已经开着的会话不会换组合）：
   新会话 → 模式选「造书模式」→ 中间会出现「工作台」页签。`)
@@ -1232,14 +1239,226 @@ export function formatRestartNotice({ profile = 'web' } = {}) {
   ].join('\n')
 }
 
+/* ── 升级：把 profile 里记死的那个版本号解开 ────────────────────────────────── */
+
+/**
+ * 本包在包管理器里的名字。
+ *
+ * 开发板里它是 `dsh-craft-your-textbook`（本仓的包名），发布版由 `scripts/release.mjs`
+ * 的包名改写把它逐字换成 `dsh-craft-your-textbook`——**所以这一处写开发板名**，
+ * 与本文件其余地方（第 1 步 `add`、第 2 步 bundles）同一口径，不另开一份。
+ */
+const PACKAGE_NAME = 'dsh-craft-your-textbook'
+
+/** npm registry 的「这个包现在最新是哪一版」。只用到 Node 内置的 fetch。 */
+const REGISTRY_LATEST_URL = (name) => `https://registry.npmjs.org/${name}/latest`
+
+/**
+ * 读 npm 上当前最新的一版。
+ *
+ * ## 读不出就说读不出，**绝不拿一个版本号糊过去**
+ *
+ * 这一步的产出直接写进用户的 profile。拿「大概的最新版」去改一个真实用户的配置，
+ * 比不改坏得多——所以取不到就返回 `unreadable`，由调用方如实告诉用户「没改、为什么」。
+ * 这与本文件第 0 步读宿主版本是同一条纪律。
+ *
+ * @returns `{ok: true, version}` 或 `{ok: false, code, detail}`
+ */
+export async function readLatestPublishedVersion({
+  packageName = PACKAGE_NAME,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = 15000,
+} = {}) {
+  if (typeof fetchImpl !== 'function') {
+    return { ok: false, code: 'registry-unreachable', detail: '这个 Node 环境里没有 fetch' }
+  }
+  const url = REGISTRY_LATEST_URL(packageName)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetchImpl(url, { signal: controller.signal })
+    if (response?.ok !== true) {
+      return {
+        ok: false,
+        code: 'registry-unreachable',
+        detail: `${url} 返回了 ${response?.status ?? '(没有状态码)'}`,
+      }
+    }
+    const body = await response.json()
+    const version = typeof body?.version === 'string' ? body.version.trim() : ''
+    if (version === '') {
+      return { ok: false, code: 'registry-unreadable', detail: `${url} 的返回里没有 version 字段` }
+    }
+    return { ok: true, version }
+  } catch (fetchError) {
+    return {
+      ok: false,
+      code: 'registry-unreachable',
+      detail: `连不上 ${url}（${fetchError?.message ?? String(fetchError)}）`,
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** 改写档位。**封闭枚举**——多一档就会有人问它是什么意思，少一档就会把「没改」说成「改了」。 */
+const UNPIN_STATES = new Set(['rewritten', 'already-current', 'not-declared', 'no-target'])
+
+/** 判定的唯一出口：档名在册才放行，非法档名在这里就抛。 */
+function finishUnpin(state, rest) {
+  if (!UNPIN_STATES.has(state)) throw new Error(`内部错误：非法改写档位 ${state}`)
+  return Object.freeze({ ...rest, state })
+}
+
+/**
+ * 把 profile 里那行记死的版本号，改成指向**当前最新版**的范围。
+ *
+ * ## 为什么必须「改写」而不是「重装」
+ *
+ * dsh 装插件时往 profile 的 `package.json` 写的是 `"<包名>": "^<装上的那一版>"`。
+ * `^x.y.z` 本来允许装更新的，但包管理器**认已经记下来的那个版本**：specifier 没变，
+ * 它就不会回头去看有没有新的。所以「卸载再装一次」「再点一次安装」都升不了级——
+ * 除非有人先把那行改掉，让它不再被满足。
+ *
+ * ⚠️ 这**不是**本插件的毛病，是 dsh 插件机制对所有第三方插件都这样。
+ * 本函数是能拿到的最小解法：改一个字符串，然后让宿主自己那条 `pnpm install` 去重新解析。
+ *
+ * ## 纯函数：不碰盘
+ *
+ * 传进去的是**已解析的 profile package.json 对象**，返回的是「要改成什么」。
+ * 写盘那一下在 `applyUnpinToProfile` 里，测试可以分别钉判据与落盘。
+ */
+export function planUnpin({ pkg, packageName = PACKAGE_NAME, latestVersion }) {
+  if (!isRecord(pkg) || typeof latestVersion !== 'string' || latestVersion === '') {
+    return finishUnpin('no-target', { packageName, from: null, to: null, field: null })
+  }
+  const target = `^${latestVersion}`
+  for (const field of ['dependencies', 'devDependencies']) {
+    const bucket = pkg[field]
+    if (!isRecord(bucket) || typeof bucket[packageName] !== 'string') continue
+    const from = bucket[packageName]
+    // specifier 已经指向当前最新版 ——「已经是它」是一档，不是一档「没改成的失败」。
+    if (from === target) return finishUnpin('already-current', { packageName, from, to: target, field })
+    bucket[packageName] = target
+    return finishUnpin('rewritten', { packageName, from, to: target, field })
+  }
+  return finishUnpin('not-declared', { packageName, from: null, to: null, field: null })
+}
+
+/** `planUnpin` 的落盘那一下。**只改一个键**，其余字节按原样写回。 */
+export function applyUnpinToProfile({ profilePkg, ...args }) {
+  let pkg
+  try {
+    pkg = JSON.parse(readFileSync(profilePkg, 'utf8'))
+  } catch (parseError) {
+    return finishUnpin('no-target', {
+      ...args, packageName: args.packageName ?? PACKAGE_NAME, from: null, to: null, field: null,
+      detail: `${profilePkg} 读不出内容：${parseError?.message ?? String(parseError)}`,
+    })
+  }
+  const plan = planUnpin({ pkg, ...args })
+  if (plan.state === 'rewritten') {
+    writeFileSync(profilePkg, JSON.stringify(pkg, null, 2) + '\n', 'utf8')
+  }
+  return plan
+}
+
+/** 一次改写的完整报告。每一档都指名**接下来做什么**，不给「升级失败」让人自己猜。 */
+export function formatUnpinNotice(plan, { profile = 'web', packageName = PACKAGE_NAME, latest = null } = {}) {
+  const lines = []
+  switch (plan.state) {
+    case 'rewritten':
+      lines.push(`✅ 已把 profile 里记死的版本号改掉了：\`${plan.from}\` → \`${plan.to}\``)
+      lines.push('   （dsh 装插件时记的是「装上的那一版」，包管理器认这一行、不自己去看有没有新的——')
+      lines.push('   所以不改这一行，卸载重装多少次都还是原来那一版。）')
+      break
+    case 'already-current':
+      lines.push(`ℹ️  profile 里记的已经是当前最新版（\`${plan.to}\`），这一行不用改。`)
+      lines.push('   下面那一步仍会跑一次安装，好把「记着的」与「装着的」对齐。')
+      break
+    case 'not-declared':
+      lines.push(`ℹ️  profile 的 package.json 里没有 \`${packageName}\` 这一行——本插件不在这个 profile 的依赖里。`)
+      lines.push(`   若你是想装它，直接跑：dsh plugin --profile ${profile} add ${packageName}`)
+      return lines.join('\n')
+    case 'no-target':
+      lines.push(`⚠️ 这一步没有改任何东西：${plan.detail ?? '读不到可改写的目标'}`)
+      return lines.join('\n')
+    default:
+      throw new Error(`内部错误：非法改写档位 ${plan.state}`)
+  }
+  lines.push('')
+  lines.push('现在让 dsh 重新装一次（它会把上面那个新范围解析成当前实际最新版）：')
+  lines.push(`  dsh plugin --profile ${profile} install`)
+  if (latest !== null) lines.push(`  目标版本：${latest}`)
+  lines.push('')
+  lines.push('装完**重启 dsh**（关掉再打开），再**新开**一个会话。')
+  return lines.join('\n')
+}
+
+/* ── 首次安装：装哪一版（`planInstallSpec`）──────────────────────────────── */
+
+/**
+ * 首次安装要交给 `dsh plugin add` 的那个 spec。
+ *
+ * ## 为什么不是裸包名
+ *
+ * 包管理器对新发布的版本有一层**冷却**（pnpm 11 的 `minimum-release-age`，默认 1440 分钟
+ * ＝ 24 小时）。实测（2026-10-03，1.3.1 发布约 10 小时后）：`pnpm add <包名>`、
+ * `pnpm add <包名>@latest`、`pnpm add <包名>@^1` **全部装到 1.2.0**（它们解析成「最新的、
+ * 够老的那一版」），只有 `pnpm add <包名>@^1.3.1` 装到 1.3.1。所以**发布当天**用裸包名装，
+ * 用户拿到的是上一版——而插件页对话框里那行版本（走 `pnpm view`，不受这条策略限制）
+ * 显示的是新的，两边天然对不上。
+ *
+ * ⇒ 这一步读一次 registry，把「要装的那一版」写进 spec。**冷却期外它是多余的，冷却期内
+ * 它是唯一能让用户拿到最新版的那一步。**
+ *
+ * ## 读不出就照旧装，且**明说**
+ *
+ * `fallback` 那一档不是失败：用户要的是「把插件装上」，registry 读不出来不该把人挡在门外。
+ * 但**不许悄悄退回裸包名**——那正是「以为装上了、其实拿到上一版」的那条路。所以回落时
+ * 一定带一句「可能装到上一版」和那条能补的命令。
+ *
+ * **纯函数**：不联网、不碰盘，所以能被逐档喂读数钉住。
+ */
+const INSTALL_SPEC_STATES = new Set(['pinned', 'fallback'])
+
+function finishInstallSpec(state, rest) {
+  if (!INSTALL_SPEC_STATES.has(state)) throw new Error(`内部错误：非法安装 spec 档位 ${state}`)
+  return Object.freeze({ ...rest, state })
+}
+
+export function planInstallSpec({ latest, packageName = PACKAGE_NAME } = {}) {
+  const version = typeof latest === 'string' ? latest.trim() : ''
+  if (version === '') {
+    return finishInstallSpec('fallback', { packageName, spec: packageName, latest: null })
+  }
+  return finishInstallSpec('pinned', { packageName, spec: `${packageName}@^${version}`, latest: version })
+}
+
+/** 回落那一档要说的话：说清「装到的可能不是最新版」＋**怎么补**（而不是「安装失败」）。 */
+export function formatInstallSpecNotice(plan, { latest = null } = {}) {
+  if (plan.state === 'pinned') {
+    return `ℹ️  这一版钉住了：\`${plan.spec}\`（registry 上当前最新是 ${latest ?? plan.latest}）。`
+  }
+  return [
+    `⚠️ 读不到 npm 上 ${plan.packageName} 的最新版：这次按**裸包名**装，可能装到的是上一版。`,
+    '   （发布不到一天的新版本会被包管理器的新版本冷却挡回去——这是它自带的策略，不是装错了。）',
+    '   装完想确认自己装的是哪一版、或者换到最新版，跑：',
+    `     npx ${plan.packageName} --upgrade`,
+  ].join('\n')
+}
+
 /* ── CLI ──────────────────────────────────────────────────────────────────── */
 
 function parseArgs(argv) {
   let profile = 'web'
+  let upgrade = false
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--profile') {
       profile = argv[i + 1]
       i++
+    } else if (argv[i] === '--upgrade') {
+      upgrade = true
     } else if (argv[i] === '--sync') {
       throw new Error(
         '`--sync` 已随旧机制一起退役：0.1.7 之后宿主不再扫 ~/.dsh/.agent-presets/，'
@@ -1250,7 +1469,7 @@ function parseArgs(argv) {
       throw new Error(`不认识的参数：${argv[i]}（安装器没有「跳过检查」这类开关）`)
     }
   }
-  return { profile }
+  return { profile, upgrade }
 }
 
 /**
@@ -1298,6 +1517,8 @@ export async function runInstaller({
   presetDir = join(PKG_DIR, 'preset'),
   composeTree = defaultComposeTree,
   readVersion = defaultHostVersion,
+  readLatest = readLatestPublishedVersion,
+  runHost = spawnHost,
   minimumVersion = MINIMUM_HOST_VERSION,
 } = {}) {
   if (argv.includes('-h') || argv.includes('--help')) {
@@ -1305,8 +1526,9 @@ export async function runInstaller({
     return 0
   }
   let profile
+  let upgrade
   try {
-    profile = parseArgs(argv).profile
+    ({ profile, upgrade } = parseArgs(argv))
   } catch (parseError) {
     error(`❌ ${parseError.message}`)
     return 1
@@ -1342,13 +1564,79 @@ export async function runInstaller({
   }
   log('')
 
+  // ── 0b) 升级：把 profile 里记死的那个版本号解开（只有 --upgrade 才做）────────
+  //
+  // 位置在第 1 步**之前**是刻意的：第 1 步要触发的正是「让包管理器重新解析」，
+  // 而重新解析的前提是 specifier 已经不再被 lock 满足。两步顺序反了就白跑。
+  //
+  // ⚠️ **两条路都要读一次 registry**：升级用它解开记死的号，普通安装用它**钉住要装的那一版**
+  // （裸包名会撞上新版本冷却，见 `planInstallSpec`）。读一次，两处用同一个读数——
+  // 两个读数会出现「升级说 1.3.1、装的说 1.2.0」那种自相矛盾，而用户看不到读数只看到结果。
+  let latest = null
+  try {
+    latest = await readLatest({ packageName: PACKAGE_NAME })
+  } catch (latestError) {
+    latest = { ok: false, code: 'registry-unreachable', detail: latestError?.message ?? String(latestError) }
+  }
+  let latestVersion = null
+  if (upgrade) {
+    log('第 0b 步：解开 profile 里记死的版本号（--upgrade）…')
+    if (latest.ok === true) {
+      latestVersion = latest.version
+      const unpin = applyUnpinToProfile({
+        profilePkg: join(target.profileDir, 'package.json'),
+        packageName: PACKAGE_NAME,
+        latestVersion,
+      })
+      for (const line of formatUnpinNotice(unpin, { profile, packageName: PACKAGE_NAME, latest: latestVersion }).split('\n')) {
+        log(line === '' ? '' : `  ${line}`)
+      }
+      if (unpin.state === 'no-target') {
+        error('❌ 这一步没有改任何东西，升级中止（插件与 bundles 仍然照原样，没被破坏）。')
+        return 1
+      }
+    } else {
+      // 读不出最新版就**不改**。拿一个猜的版本号去改真实用户的配置，比不改坏得多。
+      for (const line of [
+        `⚠️ 读不到 npm 上 ${PACKAGE_NAME} 的最新版：${latest.detail ?? '原因不详'}`,
+        '   本安装器**不拿「大概的最新版」糊过去**，所以**一个字节都没有改**。',
+        '   等网络通了一次再跑同一条命令就好：',
+        `     npx ${PACKAGE_NAME} --upgrade`,
+        '',
+        '   想自己看最新版是多少：',
+        `     npm view ${PACKAGE_NAME} version`,
+      ]) error(line === '' ? '' : `  ${line}`)
+      return 1
+    }
+    log('')
+  }
+
   // ── 1) dsh plugin add ─────────────────────────────────────────────────────
-  log('第 1 步：把插件装进 profile（dsh plugin add）…')
+  log(upgrade ? '第 1 步：让 dsh 重新装一次（dsh plugin install）…' : '第 1 步：把插件装进 profile（dsh plugin add）…')
   // 走宿主 CLI 的**唯一出口**：Windows 上 `dsh` 是 npm 装的那层 `.cmd` shim，不经 shell
   // 跑不了（`spawnSync('dsh.cmd', …)` 恒 EINVAL）。漏掉这一层的后果是「静默没装上」——
   // 用户以为装完了，第 3 步才报「组合树里没有那一行」，病因与症状隔了两步
   // （票 `ship-mode-installable/01`）。
-  const r = spawnHost(dshBin, ['plugin', '--profile', profile, 'add', 'dsh-craft-your-textbook'], { stdio: 'inherit' })
+  // ⚠️ 升级走 `install` 而不是 `add`：`add` 对已装的包会报「已经装过了」直接返回，
+  // 真正让 specifier 重新解析的是 `install`（dsh 把 pnpm 参数逐字转发，见 lib/bin.js）。
+  // ⚠️ 普通安装传的是**带版本号的 spec**（`pkg@^<registry 最新>`）：裸包名会被包管理器的
+  // 新版本冷却挡回上一版，于是「发布当天装的人」拿到的是上一版（`planInstallSpec` 的注释）。
+  // 这一步**只把版本写进交给宿主的 spec**，不碰用户的 profile 文件——改 profile 那一行仍然
+  // 只由 `--upgrade` 那一步做（`applyUnpinToProfile`），两条路的权限面不许混。
+  const installSpec = planInstallSpec({ latest: latest.ok === true ? latest.version : null })
+  if (!upgrade) {
+    // 钉住那一版是**好消息**（走 log）；回落是**要盯一眼的事**（走 error，与本文件其余
+    // 「读不出/拿不准」的警告同一出口）——「可能装到上一版」这句话绝不能混进普通输出里
+    // 被滚过去。
+    const sink = installSpec.state === 'pinned' ? log : error
+    for (const line of formatInstallSpecNotice(installSpec, { latest: installSpec.latest }).split('\n')) {
+      sink(line === '' ? '' : `  ${line}`)
+    }
+  }
+  const pluginArgs = upgrade
+    ? ['plugin', '--profile', profile, 'install']
+    : ['plugin', '--profile', profile, 'add', installSpec.spec]
+  const r = runHost(dshBin, pluginArgs, { stdio: 'inherit' })
   if (r.error?.code === 'host-cli-rejected') {
     error(`❌ ${r.error.message}`)
     error('  这一条是本脚本自己拒绝执行的，不是 dsh 报的错。请换一条不带 shell 元字符的 dsh 路径。')
@@ -1356,7 +1644,7 @@ export async function runInstaller({
   }
   if (r.error) {
     error(`⚠️  没能自动调用 dsh 命令（${r.error.message}）。`)
-    error(`  请手动执行一次：dsh plugin --profile ${profile} add dsh-craft-your-textbook`)
+    error(`  请手动执行一次：dsh ${pluginArgs.join(' ')}`)
     error('  然后继续看下面的步骤。')
   } else if (r.status !== 0) {
     error(`⚠️  dsh plugin 返回了非零状态（${r.status}），请看一下上面的报错。`)
@@ -1364,7 +1652,7 @@ export async function runInstaller({
   log('')
 
   // ── 2) bundles 列表 ───────────────────────────────────────────────────────
-  log('第 2 步：把 dsh-craft-your-textbook 加进 profile 的 bundles 列表…')
+  log(`第 2 步：把 ${PACKAGE_NAME} 加进 profile 的 bundles 列表…`)
   const profilePkg = join(target.profileDir, 'package.json')
   if (!existsSync(profilePkg)) {
     error(`❌ 找不到 ${profilePkg}`)
@@ -1380,12 +1668,12 @@ export async function runInstaller({
     return 1
   }
   const bundles = pkg.dsh?.profile?.bundles ?? []
-  if (bundles.includes('dsh-craft-your-textbook')) {
+  if (bundles.includes(PACKAGE_NAME)) {
     log('  已经在列表里，跳过。')
   } else {
     pkg.dsh ??= {}
     pkg.dsh.profile ??= {}
-    pkg.dsh.profile.bundles = [...bundles, 'dsh-craft-your-textbook']
+    pkg.dsh.profile.bundles = [...bundles, PACKAGE_NAME]
     writeFileSync(profilePkg, JSON.stringify(pkg, null, 2) + '\n', 'utf8')
     log('  已写入 bundles 列表。')
   }

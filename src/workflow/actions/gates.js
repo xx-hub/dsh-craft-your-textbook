@@ -327,9 +327,11 @@ export async function actGates(ctx, _req, res, action, sessionId, project, body)
             const pad = String(row.n).padStart(2, '0')
             const what = row.miss.reason === 'artifact'
               ? `缺产物（work/chapter-${pad}.md / work/audit-${pad}.md）`
-              : row.miss.reason === 'review'
-                ? '还有未处置的抽查意见'
-                : '没有机器记下的交工通过（还没按章交工）'
+              : row.miss.reason === 'stale'
+                ? '检查记录比正文旧（正文改过之后没重新审计，那份「审过」是旧稿的）'
+                : row.miss.reason === 'review'
+                  ? '还有未处置的抽查意见'
+                  : '没有机器记下的交工通过（还没按章交工）'
             return `第${row.n}章${title === '' ? '' : `《${title}》`}：${what}`
           })
           sendJson(res, 409, {

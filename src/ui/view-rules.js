@@ -174,9 +174,10 @@ export const CHECK_UI = {
 	"必含板块齐全（契约项）": "该有的板块都在",
 	"无禁用词（契约项）": "没有出现不该用的词",
 	"章节引用可追溯（无引用矛盾）": "每章标的材料出处都真实存在",
-	// 票 20：这一项从线索级警示改成**真门槛**（有重复标题即拦交付），白话名跟着写实——
-	// 机器查的是**全书**标题去重（同章内重复也算），不是只查「跨章」，所以按判据收成这一句。
-	"无重复标题": "整本书里没有重复的标题",
+	// 2026-09-30 诊断后按判据写实：这一项现在只查**同一章内**的小节标题重名（跨章同名多半是
+	// 每章都有的板块名，只提示不拦，见 ADR-0008 修订 2026-09-30）；章名唯一性单独立下一条。
+	"无重复标题": "同一章里没有重名的小节",
+	"章名全书唯一": "每章的章名在全书中都不一样",
 };
 
 export const checkHuman = (name) => CHECK_UI[name] ?? name;
@@ -199,6 +200,39 @@ export function focusCardKey(meta, gate) {
   if (meta?.phase === 5) return "chapters";
   if (meta?.phase === 1) return "upload";
   return "status";
+}
+
+/**
+ * 要**自动带进焦点区可视带**的那两张闸门卡（`autoScrollCardKey` 的清单，**只此一份**）。
+ *
+ * 就是票面写的那一类：「拍板 / 认可这类**唯一可行动作**」——`gate`（关卡拍板）与
+ * `final`（最后检查认可）。**为什么只有这两张**（2026-09-30 双轴 review 之后收窄的）：
+ *   · `explore`——**不收**。那张卡实测高 2949px、推进键在 `top 2926`；底对齐会把正在读报告的
+ *     用户一把拽到几千字下面，那条理由**仍然成立**。
+ *     ⚠️ 但它原来那句「票 20 给了吸底条、它有第二出口了」**已经不成立**：票 18 裁决把那条吸底条
+ *     整条删掉（同一屏里那颗键渲染两次），于是探索这一屏**既不滚、也没有第二出口**——
+ *     推进键要滚过约 2.9 个视口才摸得到（票 20 那个病重新变成未修）。换个解法（报告默认折叠
+ *     之类）是产品裁决，**没裁之前不许在这里"顺手把它滚进去"**，见票 20 的 `## Comments`。
+ *   · `outline` / `gold` / `chapters`——**不收**。票 20 的「不要一次改全部」仍然成立：
+ *     票 24 报的是最后检查那一屏，这三张不是本票说的那一类。
+ *
+ * 要扩只改这张表一处，不在渲染处另写一遍。
+ */
+const AUTO_SCROLL_CARD_KEYS = Object.freeze(["gate", "final"]);
+
+/**
+ * 焦点区主卡路由出来的 key 是不是**要自动带进可视带**的那一张（票 `walkthrough-fixes/24`）。
+ *
+ * 名字照它回答的事起：它只判「这一张要不要被滚过去」，不判「这一张能不能改结果」
+ * （那是 CONTEXT「现在」词条的事，`focusCardKey` 那个 `switch` 才是那张卡的内容）。
+ *
+ * @param {object | null | undefined} meta 当前书的状态投影
+ * @param {object | null | undefined} gate 当前关卡
+ * @returns {string | null} 是则返回那一张卡的 key，否则 `null`
+ */
+export function autoScrollCardKey(meta, gate) {
+  const key = focusCardKey(meta, gate);
+  return AUTO_SCROLL_CARD_KEYS.includes(key) ? key : null;
 }
 
 /**
@@ -504,17 +538,25 @@ export function artifactNameWith(name, qualifier) {
 /** 产物事实里的正文/检查记录分类（路径与既有产物判据同形，不另造一套）。 */
 const AUDIT_FACT_PATH_RE = /^work\/audit(?:-[^/]+)?\.md$/i;
 
-/** 事实里的时间是服务端给的；这里只做有效性检查与既有的可读时间格式化。 */
+/** 产物事实里的时间是服务端给的；这里只做有效性检查与既有的可读时间格式化。 */
 function artifactFactTime(modifiedAt) {
-	if (modifiedAt === null || modifiedAt === undefined || modifiedAt === "") return "";
-	let date;
-	try {
-		date = modifiedAt instanceof Date ? modifiedAt : new Date(modifiedAt);
-	} catch {
-		return "";
-	}
-	if (!Number.isFinite(date.getTime())) return "";
-	return formatTime(date);
+	const at = artifactFactTimestamp(modifiedAt);
+	return at === null ? "" : formatTime(new Date(at));
+}
+
+/**
+ * 一条产物事实的时刻 → **毫秒数**；读不出就 null（不猜、不填 0）。
+ *
+ * ⚠️ 票 20：**这是全仓读 `artifactFacts[].modifiedAt` 的唯一一处**（复审时把两处 reader
+ * 合成一处——「同一件事实两处各读一遍、接受的形状还不同」正是本仓记档过的病）。
+ * 生产形状是服务端的 `stat.mtimeMs`（一个数，`src/workflow.js` 的 `buildArtifactFacts`）；
+ * 这里**也**认 ISO 字符串／`Date`，因为契约快照里写的就是时间，而**读不出就是读不出**——
+ * 认不出的值落 null，调用方各自决定「说什么」（排序与格式化都不许拿 0 当时刻）。
+ */
+function artifactFactTimestamp(modifiedAt) {
+	if (modifiedAt === null || modifiedAt === undefined || modifiedAt === "") return null;
+	const ms = modifiedAt instanceof Date ? modifiedAt.getTime() : new Date(modifiedAt).getTime();
+	return Number.isFinite(ms) ? ms : null;
 }
 
 /** 一条产物事实的展示分类：只认服务端给的 kind，缺省时再按既有路径形状认。 */
@@ -581,17 +623,128 @@ function auditFactText(fact, time) {
  * @param {number} n 章号（1 基）
  */
 export function chapterAuditFreshnessText(segments, n) {
+	const fact = chapterAuditFact(segments, n);
+	return fact === null ? "" : auditFactText(fact, artifactFactTime(fact.modifiedAt));
+}
+
+/**
+ * 同一份服务端事实的**判据形态**（票 22）：这一章的检查记录是不是**比正文旧**。
+ *
+ * 与 `chapterAuditFreshnessText` 取的是**同一条 fact**（同一个 `chapterAuditFact`）——
+ * 一句话「比正文旧，属于旧稿」和一颗「审过」徽章因此不可能一个说旧稿、一个说审过。
+ * 取不到事实（没下发／没 stat 到／这一章还没写检查记录）→ `false`（**读不出不是「旧」**）。
+ */
+export function chapterAuditIsStale(segments, n) {
+	const fact = chapterAuditFact(segments, n);
+	return fact !== null && fact.freshness === "stale";
+}
+
+// ── 票 20（2026-09-30 用户裁决）：「谁在写这一章」的**唯一**判据 ──────────────────
+//
+// 病（2026-09-29 真机走查）：三章的徽章**逐字一样**地写着「⏳ 我正在做 · 执笔」，
+// 而那一刻盘上只有第 1 章那一份正文、只有 1 个小助手在跑（跑的是第 1 章的检查）。
+// 徽章不是「查出来的」——它是按「清单里有这一章、且它还没定稿」推导出来的。
+// ⇒ **「我正在做」只留给真在做的事**，本节是它唯一的判据（章节卡徽章与步清单都经它）。
+//
+// 名额从**真实在跑的小助手数**来（`runningSubagentCount`，与顶栏「🔎 N 个小助手在跑」同一份读数
+// ——票面 :93「第三问不是决策，是硬要求」：同屏两个数字必须一致）。候选从**真实产物**来：
+// 这一章必须已经有产物落盘（票面 :98「没有产物就不许显示执笔中」），按产物最后一次被写下的
+// 时刻从新到旧排——铺章是一章一章派的，最新的那一章就是刚开工的那一章。
+//
+// ⚠️ **主笔 AI 自己不占名额**：它派完活就在等，会话照旧 `running`；把它算进去会让
+// 「我正在做」的行数恒比顶栏那个「N 个小助手在跑」多一行，票面 :104 要求的逐字相等立刻破。
+// 主笔 AI 自己的在跑另有出处（横幅 / 活性行 / 状态条），章这一层不替它说话。
+// ⚠️ 读不出 `modifiedAt` 的段**不进候选**：没有可陈述的时刻就排不出先后，
+// 拿别的章的时刻顶替是又一次把猜测说成事实。
+
+/** 章段的章号（`chapter-N` 的 N）；不是章段就 null。 */
+function chapterNoOfSeg(seg) {
+	const match = /^chapter-(\d+)$/.exec(String(seg?.key ?? ""));
+	return match === null ? null : Number(match[1]);
+}
+
+/** 这一段上的产物最后一次被写下的时刻（各条 `artifactFacts` 里最晚的那个）；读不出 → null。 */
+function segmentArtifactTouchedAt(seg) {
+	const facts = Array.isArray(seg?.artifactFacts) ? seg.artifactFacts : [];
+	let latest = null;
+	for (const fact of facts) {
+		const at = artifactFactTimestamp(fact?.modifiedAt);
+		if (at === null) continue;
+		if (latest === null || at > latest) latest = at;
+	}
+	return latest;
+}
+
+/** 这一章 AI 自报的流水线阶段是不是「还在进行中」（非空、且不是 `done`）。**认领的第三条判据**。 */
+function chapterStageInFlight(seg) {
+	return typeof seg?.stage === "string" && seg.stage !== "" && seg.stage !== "done";
+}
+
+/**
+ * 「谁在写这一章」的认领表（票 20 · **状态与归属唯一的来源**）：一组**章号**。
+ *
+ * 判据**三条**，缺一条不进候选：**该章产物在不在**（票面 :98）、**AI 说它还在进行中**、
+ * **名额够不够**（名额＝在跑的小助手数）。名额用完就停 ⇒ **认领数 ≤ 名额**，票面 :63/:104「顶栏 N 个小助手在跑 ＝ 列表里 N 行我正在做」
+ * 那条硬要求由构造保证：屏上**永远不会出现比在跑的小助手还多的「我正在做」**。
+ *
+ * ⚠️ **两个方向都要说准，别只说一个**（复审时把「恒等于」这句改掉）：
+ *   · 候选比名额**多** → 行数 ＝ 名额（相等，常见情形）；
+ *   · 候选比名额**少**（如刚派出去、正文一个字都还没落盘） → 行数 **小于**名额。
+ *     那种时刻屏上是「0 行我正在做 / 1 个小助手在跑」，**两个数字各自都在说自己那件事**，
+ *     少说的那一格是「还没开始」而不是谎报——比反过来（说一件没人做的事）安全得多。
+ *   · 名额多于章数（在跑的小助手里有别阶段的，末检查那 5 个分查就是） → 行数 ＝ 章数。
+ *
+ * ⚠️ 这里**只回答「有没有人认领」**，不捎带「在干哪一道工序」：工序由各调用点已经拿到的那份
+ * `chapterPipeline`／`seg.stage` 说（同一个上游事实）。往这张表里塞一份没人读的载荷就是
+ * 「凭猜测给归属命名」，正是本票要治的那件事。
+ *
+ * @param {unknown[]} segments 服务端下发的分段（每章一段，带 `status` / `artifactFacts`）
+ * @param {unknown} runningSubagentCount 在跑的小助手数（`indexSubagentDescendants()` 那个 `runningCount`）
+ * @returns {Set<number>} 被认领的章号
+ */
+export function indexRunningChapterClaims(segments, runningSubagentCount) {
+	const claims = new Set();
+	const slots = Number.isSafeInteger(runningSubagentCount) && runningSubagentCount > 0 ? runningSubagentCount : 0;
+	if (slots === 0) return claims;
+	const candidates = [];
+	for (const seg of Array.isArray(segments) ? segments : []) {
+		const n = chapterNoOfSeg(seg);
+		if (n === null) continue;
+		// 已交工的章没有人在写它（`status: 'done'` 是服务端 `chapterDone` 那一份，与徽章同源）。
+		if (seg?.status === "done") continue;
+		const touchedAt = segmentArtifactTouchedAt(seg);
+		if (touchedAt === null) continue;
+		// ⚠️ 认领的**三条**硬判据，第三条是「AI 说它还在进行中」（`stage` 非空且不是 `done`）。
+		// 为什么自报也能当判据之一：票面 :98 只禁「没有产物就说执笔中」，没有说「有产物就许说」。
+		// 而**只按产物排**会在好几个章都有正文时随便挑一个（走查实测：四章的书里第 3 章上报
+		// writing、正文刚写完的第 4 章时间戳更新 ⇒ 名额落到第 4 章，屏上就说「在写第 4 章」）。
+		// 三条齐了才是「有东西正在这一章上发生」；缺任何一条都**整格不出声**（票 14 的老规矩：
+		// 宁可少说一句，也别拿一句新的假静默换一句旧的实话）。
+		if (!chapterStageInFlight(seg)) continue;
+		candidates.push({ n, touchedAt });
+	}
+	// 同为进行中的几个候选：产物最新的在前（铺章是一章一章派的，最新的就是刚开工的那一章），
+	// 同一时刻按章号。
+	// ⚠️ 候选多于名额时这一层**仍然是推断**：宿主没给「哪个小助手在写哪一章」的逐个归属
+	// （会话摘要只有 id/parentId/origin/running），所以「谁被认领」是排出来的，不是看见的。
+	candidates.sort((a, b) => b.touchedAt - a.touchedAt || a.n - b.n);
+	for (const candidate of candidates.slice(0, slots)) claims.add(candidate.n);
+	return claims;
+}
+
+/** 那一章的「检查记录」事实（`chapter-N` 段里 kind 为检查记录的那条）；没有就 null。 */
+function chapterAuditFact(segments, n) {
 	const list = Array.isArray(segments) ? segments : [];
 	const seg = list.find((row) => row?.key === `chapter-${n}`);
-	if (seg === undefined) return "";
+	if (seg === undefined) return null;
 	const facts = Array.isArray(seg.artifactFacts) ? seg.artifactFacts : [];
 	for (const fact of facts) {
 		if (fact === null || typeof fact !== "object") continue;
 		const path = relPath(fact.path);
 		if (artifactFactKind(fact, path) !== "检查记录") continue;
-		return auditFactText(fact, artifactFactTime(fact.modifiedAt));
+		return fact;
 	}
-	return "";
+	return null;
 }
 
 /**

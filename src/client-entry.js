@@ -41,6 +41,10 @@ import { createBookProjection } from "./workbench-projection.js";
 // 暴露事实**取自契约面动作目录**，调用点不再自己维护第二份清单。它无 React 依赖，也不碰
 // payload / 用户确认 / 宿主形状——那些仍在下面各调用点原样发出。
 import { uiCallable, uiReadOnly } from "./workbench-actions.js";
+// 「有没有新版本」自检（判据与网络都在这个 module 里）。**请求由 apply(ctx) 在注册时发起**，
+// 组件只订阅一个已算好的结果——渲染期零请求，否则会污染首屏那几条读通道的请求计数
+// （test-workbench-first-screen.mjs 的 fetch 桩把每次调用都记进 calls，且未 stub 的直接抛）。
+import { startUpdateCheck, updateNoticeText, useUpdateNotice } from "./ui/update-notice.js";
 // 书级 UI 隔离壳（内部件，不进导出表面）：以 bookKey 为 key，切书/切会话时书级子树整体重挂。
 import { BookSessionScope } from "./ui/book-session-scope.js";
 // 领域规则与纯函数（rules）：本文件直接用的 + 为保持产物表面而再导出的；
@@ -68,8 +72,10 @@ import {
 	// 取「输入区**容器**的 top」，不取输入元素自身的 top——宿主作曲家卡在输入元素上方还有
 	// padding-top / 提示语 / 排队消息行。判据与真机证据见 rules.js 里这一节的注释。
 	pickComposerAnchorTop,
-	// 票 20：焦点区吸底决策条的判据（纯函数；「只在内容超出时出现 + 留出等于自身高度的下边距」）。
-	stickyDecisionBar,
+	// 票 24：拍板/认可那两张闸门卡要**自己进视野**（滚到哪 ＋ 这一帧量到了没有）＋ 焦点区空白
+	// 的兜底句（出不出、那句话是什么字）。判据只此一份；这里只负责量坐标与渲染。
+	decisionCardScroll,
+	blankFocusText,
 } from "./ui/rules.js";
 // 展示派生（事件→文件、阶段→产物、stage→界面文案）集中放卡片域 view-rules.js，
 // 壳只留薄绑定；领域源仍是 domain-rules。
@@ -80,12 +86,12 @@ import {
 	// 事件行入口判据的三种处境（票 08）：open / blocked（给灰字）/ none（什么都不长）。
 	workEntryForEvent,
 	focusCardKey,
+	// 票 24：这一张主卡要不要被**带进焦点区可视带**（拍板/认可那两张，见上面那条 effect）。
+	autoScrollCardKey,
 	workEntryAction,
 	artifactName,
 	// 事件行行首的类型词（票 06）：只出客户端词表，不端服务端 label 上屏。
 	eventHuman,
-	// 吸底条那颗状态词（票 20）：经 `stepWord` 取，不在壳里另抄一份「轮到你」。
-	stepWord,
 } from "./ui/view-rules.js";
 // 候选 06：「阶段 / 步」视图模型。WorkbenchView 用 useMemo([meta, processSegs]) 建**一次**
 // projector，交给全览条 / 阶段页 / 阶段片接线 / 焦点解析共用——同一份 process/meta 只推导一次。
@@ -147,7 +153,7 @@ import {
 	foldKnowledgeMap,
 } from "./ui/chapters-map.js";
 // 确认卡。
-import { ExploreConfirmCard, OutlineConfirmCard, EXPLORE_CONFIRM_ACCEPT_LABEL } from "./ui/confirm-cards.js";
+import { ExploreConfirmCard, OutlineConfirmCard } from "./ui/confirm-cards.js";
 // 顶栏、状态条与面板。
 import {
 	StatusStrip,
@@ -662,34 +668,69 @@ export function WorkbenchView(props) {
 	const sessionRef = useRef(session);
 	sessionRef.current = session;
 
-	// 焦点区吸底决策条（走查 P3 / 票 20）：确认点上的推进键埋在几千字报告底下（真机量到要滚过
-	// 约 2.9 个视口高度），补一条**只在内容超出时**出现的吸底条，就近再给一次那颗推进键。
-	// 判据是 `stickyDecisionBar`（`src/ui/rules.js` 的纯函数，可独立测）；这里只负责**量**。
-	// 无 DOM 的渲染环境（冒烟/单测的 react-test-renderer）量到 null 就原样跳过，不抛、不猜。
+	// 焦点区滚动容器的 ref：票 24 那条 effect 要量它的高度与滚动位置（把拍板/认可那两张
+	// 闸门卡带进可视带）。⚠️ 票 20 曾在这里另挂一个「量焦点区内容有没有超出」的 effect，
+	// 那是吸底决策条的接线，**已随那条一起删掉**（票 18 裁决 B：同一屏里那颗推进键渲染了两次，
+	// 下面那次孤零零右对齐在卡片外面——用户原话「满意的那行位置不对」）。
+	// 无 DOM 的渲染环境（冒烟/单测的 react-test-renderer）量到 null，下面的 effect 原样跳过。
 	const focusScrollRef = useRef(null);
-	const stickyBarRef = useRef(null);
-	const [focusOverflow, setFocusOverflow] = useState(false);
-	const [stickyBarH, setStickyBarH] = useState(0);
-	// 不带依赖数组：每次重渲后重量一次（内容随轮询变长/变短），值不变就不写 state、不重画。
+
+	// 票 24 · ①：**拍板 / 认可**那两张闸门卡要自己进焦点区可视带。
+	//
+	// 病（真机量测，票面表格）：走到第 6 阶段「最后检查」并通过后，那颗「✅ 认可，交付」在
+	// 2551px 高的内容列里 `y 1523`，而可视滚动容器只有 700px —— **要滚过 1851px 才摸得到**，
+	// 用户那一侧干脆整屏空白。票 20 那一类「再给一颗同一动作的键」的解法治不了这一屏：那里没有
+	// 第二颗键可给，「认可，交付」就是唯一定案键，**只能把卡本身带进来**（不是再造一个出口）。
+	// ⚠️ 票 20 自己那条解法（焦点区吸底决策条）后来已按 `walkthrough-fixes/18` 整条删掉，
+	// 所以现在**连那一类解法都不在了**——「定案键仍只有卡上那一颗」这条更硬了。
+	//
+	// 什么时候动、什么时候**不动**（这一段是这个接线唯一要紧的地方）：
+	//   · `autoScrollCardKey` 说这一张不在那张表里（探索/大纲/定稿/章节/上传/状态/已交付）→ 不动。
+	//     每一条的理由写在 `view-rules.autoScrollCardKey` 的注释里（探索那一屏的理由是：底对齐会把
+	//     正在读报告的用户一把拽到几千字下面——**那条理由仍然成立**；它原来那句「票 20 给了第二出口」
+	//     已随票 18 删掉，见该处注释与票 20 的 `## Comments`）。
+	//   · `nowCardRef` 为空（回看态：主卡根本不渲染）→ 不动，并把记账清掉，回到「现在」时重新摆；
+	//   · **量不到（`measured: false`）→ 不记账**。这条是首轮实现踩过的坑：页签没激活那一帧
+	//     `clientHeight` 是 0，若照样记「已经摆过」，之后每帧都提前返回，**原病原样复发**。
+	//   · 记上账之后，**同一张卡、同样的高、同样的位置** → 一像素不再动。2 秒轮询每一帧都
+	//     重渲，若每帧都重摆，用户自己往上滚去读报告会被一次次拽回底部。位置也记在账里：
+	//     **内容坐标系里的 `cardTop` 不随用户滚动而变**，它变＝卡上方的东西真的长高了
+	//     （比如终检的 AI 报告后到、全览条被展开），那种情况要重新摆一次。
+	// 滚到哪由纯函数 `decisionCardScroll` 判（`src/ui/rules.js`）；这里只负责量坐标、只写
+	// `scrollTop`。无 DOM 的渲染环境（react-test-renderer）量到 null 就原样跳过，不抛、不猜。
+	const nowCardRef = useRef(null);
+	const autoScrollMemoRef = useRef(null);
+	const scrollCardKey = autoScrollCardKey(meta, gate);
 	useEffect(() => {
-		const el = focusScrollRef.current;
-		if (el === null || typeof el.getBoundingClientRect !== "function") return undefined;
-		const measure = () => {
-			const overflow = el.scrollHeight > el.clientHeight;
-			setFocusOverflow((prev) => (prev === overflow ? prev : overflow));
-			const bar = stickyBarRef.current;
-			const height =
-				bar === null || typeof bar.getBoundingClientRect !== "function"
-					? 0
-					: Math.round(bar.getBoundingClientRect().height);
-			setStickyBarH((prev) => (prev === height ? prev : height));
-		};
-		measure();
-		// 视口改大小那条路也要重量（此时不一定有重渲）。
-		if (typeof window === "undefined" || typeof window.addEventListener !== "function")
-			return undefined;
-		window.addEventListener("resize", measure);
-		return () => window.removeEventListener("resize", measure);
+		const card = nowCardRef.current;
+		if (scrollCardKey === null || card === null || typeof card.getBoundingClientRect !== "function") {
+			// 这一格现在没有那张卡：清记账，免得回到「现在」时拿旧的一份当「已经摆过」。
+			autoScrollMemoRef.current = null;
+			return;
+		}
+		const box = focusScrollRef.current;
+		if (box === null || typeof box.getBoundingClientRect !== "function") return;
+		const cardRect = card.getBoundingClientRect();
+		// 换算到**容器的内容坐标系**（不是视口坐标）：卡片离容器顶的距离 ＋ 已经滚过的距离。
+		const cardTop = cardRect.top - box.getBoundingClientRect().top + box.scrollTop;
+		const memo = autoScrollMemoRef.current;
+		if (
+			memo !== null &&
+			memo.key === scrollCardKey &&
+			memo.height === cardRect.height &&
+			memo.top === cardTop
+		)
+			return;
+		const { scrollTop, measured } = decisionCardScroll({
+			cardTop,
+			cardHeight: cardRect.height,
+			viewportHeight: box.clientHeight,
+			scrollTop: box.scrollTop,
+		});
+		// 量不到就**不记账**：下一帧量到了还要再摆一次（否则原病复发，见上面第三条）。
+		if (measured !== true) return;
+		autoScrollMemoRef.current = { key: scrollCardKey, height: cardRect.height, top: cardTop };
+		if (scrollTop !== null) box.scrollTop = scrollTop;
 	});
 
 	// 拖分界（2026-08-21 修「不跟手」）：旧实现每帧 mousemove 都 setDeskHeight，
@@ -1243,17 +1284,6 @@ export function WorkbenchView(props) {
 		pendingStageView === "gate"
 			? gateHuman(pendingGateView ?? "?")
 			: stageHuman(pendingStageView);
-	// 票 20（走查 P3）：吸底决策条出不出、给滚动区留多少下边距——判据是纯函数
-	// `stickyDecisionBar`（`src/ui/rules.js`，可独立测）。**只给「读材料挑重点」那个确认点**：
-	// 票面「选定主决策按钮是哪一个」定的就是确认点卡上那颗推进键，同一动作在别的阶段另有落点
-	// 形态，本票不顺手改全部。量不到（无 DOM 的测试环境 `focusScrollRef.current` 为 null）时
-	// 判据返回「不出」，不猜。
-	const stickyBox = stickyDecisionBar({
-		enabled: meta !== null && focusCardKey(meta, gate) === "explore",
-		scrollHeight: focusScrollRef.current?.scrollHeight ?? 0,
-		clientHeight: focusScrollRef.current?.clientHeight ?? 0,
-		barHeight: stickyBarH,
-	});
 	const humanTurn =
 		meta !== null &&
 		(meta.status === "awaiting-explore" ||
@@ -1285,9 +1315,15 @@ export function WorkbenchView(props) {
 	// commit 都会换新的 `meta` 对象与新的 `processSegs` 数组，对象身份正是「换了一份快照」的
 	// 现有信号（两者现在都由同一份 snapshot 派生，所以这个信号只随真实 commit 变）。
 	// `workFiles` **不进** projector（阶段/步产物读 `seg.artifacts`），它同样来自 snapshot。
+	// ⚠️ 票 20：`subagentRuns.runningCount` 是第三个入参——章那几行凭什么说「我正在做」全由它决定
+	// （判据函数与章节卡徽章共用 `view-rules.indexRunningChapterClaims`）。
+	// 依赖挂的是**那个数**而不是 `subagentRuns` 对象：挂对象等于宿主每推一次会话摘要就重建整棵
+	// 步模型（而那份摘要在轮询里也会换新身份），挂数则只在「在跑的小助手**真的增减了**」时重算。
+	// ⚠️ 它必须是依赖、不许省：省了就等于清单比章卡慢一拍，两屏各说各的——正是票 22 记过的那个病。
+	const runningSubagentCount = subagentRuns.runningCount;
 	const stageStepProjector = useMemo(
-		() => createStageStepProjector({ meta, segments: processSegs }),
-		[meta, processSegs],
+		() => createStageStepProjector({ meta, segments: processSegs, runningSubagentCount: runningSubagentCount }),
+		[meta, processSegs, runningSubagentCount],
 	);
 	const stageStepOverview = stageStepProjector.project({ kind: "overview" });
 
@@ -1296,6 +1332,9 @@ export function WorkbenchView(props) {
 	// 错误条那句话：动作级错误（壳里那份 `error`）优先，没有才轮首屏的读取错误
 	// （`loadError` 从 readiness 派生）。两者共用**同一句** `⚠️ …`，位置与从前一致。
 	const visibleError = (ui) => (ui.error !== null ? ui.error : loadError);
+	// 「有新版可升」那一行。与 visibleError 一样**只在有话说的时候渲染**：`behind` 出句子，
+	// `up-to-date`／`unreadable` 出 null——「已是最新」和「读不到」都不该占用户的眼睛。
+	const updateNotice = updateNoticeText(useUpdateNotice());
 	// 顶栏介入工具条：风格线/留言清单（旧账本 ?? [] 兜底）与面板开关/暂停入口。
 	const styleNotes = (meta?.styleNotes ?? []).filter(
 		(n) => n.status === "active",
@@ -1361,7 +1400,16 @@ export function WorkbenchView(props) {
 						{ style: { ...S.hint, padding: "16px" } },
 						"正在打开这本书…",
 					)
-				: null;
+				: // 票 24 ③：这里原来 `return null`——**整块空白**，与上面那句注释自己写的
+					// 「空窗期给一句话，不留空白」正相反（走查 2026-09-29 那一屏：用户原话
+					// 「页面有问题」）。空白与「还在读」在人眼前分不开，所以宁可多一句：说清没画
+					// 出来，并给出路（刷新）。**这一支是仓内唯一一处真的能把整块渲染成空的地方**，
+					// 也是 `blankFocusText` 唯一的调用点（判据只有一份，理由见 rules.js 那节注释）。
+					createElement(
+						"p",
+						{ style: { ...S.hint, padding: "16px" } },
+						blankFocusText({ expectsContent: true, rendered: false }),
+					);
 		}
 	}
 
@@ -1410,6 +1458,9 @@ export function WorkbenchView(props) {
 			visibleError(ui) !== null
 				? createElement("p", { style: S.error }, `⚠️ ${visibleError(ui)}`)
 				: null,
+			updateNotice === null
+				? null
+				: createElement("p", { style: S.update }, `🆕 ${updateNotice}`),
 			loading
 				? createElement("p", { style: S.hint }, "加载中…")
 				: showWizardForm
@@ -1574,8 +1625,8 @@ export function WorkbenchView(props) {
 						return createElement(
 						"div",
 						{
-							// 票 20：焦点区那个滚动容器要能**量**自己（`scrollHeight/clientHeight`
-							// 判内容有没有超出），据此决定吸底条出不出。
+							// 焦点区滚动容器要能**量**自己（`getBoundingClientRect` / `clientHeight`
+							// / `scrollTop`），票 24 的「把那张闸门卡带进可视带」据此写 scrollTop。
 							ref: focusScrollRef,
 							style: {
 								position: "relative",
@@ -1587,9 +1638,9 @@ export function WorkbenchView(props) {
 								// 滚动链会把「内层滚到底」变成「整个工作台平移」（外层那条挂在宿主页签容器
 								// 上，见 measure() 的注释）。断言见 test-layout-anchors.mjs。
 								overscrollBehavior: "contain",
-								// 票 20：吸底条出现时，下边距**等于它自身的高度**（判据见
-								// `stickyDecisionBar`）——最后一行可点元素因此不会被它压住。
-								padding: `12px 16px ${stickyBox.paddingBottom + 12}px`,
+								// ⚠️ 这一段下边距曾按吸底条自身的高度给过（`stickyBox.paddingBottom + 12`），
+								// 随那条一起删掉了（票 18 裁决 B：屏上同一颗推进键渲染了两次）。
+								padding: "12px 16px",
 							},
 						},
 						// 全览条：全书几步、还剩几步、现在在第几阶段 + 展开清单（收起时不渲染清单内容）。
@@ -1682,6 +1733,9 @@ export function WorkbenchView(props) {
 						visibleError(ui) !== null
 							? createElement("p", { style: S.error }, `⚠️ ${visibleError(ui)}`)
 							: null,
+						updateNotice === null
+							? null
+							: createElement("p", { style: S.update }, `🆕 ${updateNotice}`),
 						// 阶段片（焦点区顶部那排六格）＝**常驻导航面**：有书就渲染，浏览某一步 / 停在阶段页
 						// 时照常在。2026-09-22 票 12（spec 不变量 13 / ADR-0012 决策 2）：旧规则 F22
 						// 「浏览历史时主进度条隐藏」**撤销**——那正是"回看时找不到回到现在"的成因；
@@ -1820,9 +1874,12 @@ export function WorkbenchView(props) {
 						// 「现在」那张主卡只属于现场：在看某一阶段的页面时，页面自己交代
 						// "这一步的书夹产物在哪"，别再叠一张能操作的卡进去
 						// （2026-09-21 用户裁决：回看页只读，能改结果的动作只出现在「现在」）。
-						viewPhase !== null || browsing !== null
-							? null
-							: (() => {
+						//
+						// 票 24：这一格外面那层 `div` **只为挂一个 ref**（量它自己的盒子，好把拍板/认可
+						// 那张卡带进焦点区可视带——见上面那条 effect）。它没有样式，布局与从前逐像素相同。
+						(() => {
+						if (viewPhase !== null || browsing !== null) return null;
+						const card = (() => {
 							// 焦点区主卡路由（抽成 focusCardKey 纯函数：view-rules.js，可独立测试）。
 							switch (focusCardKey(meta, gate)) {
 								case "gate":
@@ -1955,6 +2012,10 @@ export function WorkbenchView(props) {
 									// `src/workflow.js` 的 `buildArtifactFacts`），浏览器不拿文件时间自己重算——
 									// 所以这里只把**已经下发的**分段事实透下去，不新增取数通路。
 									chapterSegments: processSegs,
+									// 票 20：此刻真在跑的小助手有几个 —— 「我正在做」与「归属」两处的**同一个**入参。
+									// 与顶栏「🔎 N 个小助手在跑」（`panels.js` 的 ActivityLine，同一份
+									// `subagentRuns.runningCount`）逐字相等，屏上两个数字因此不会打架。
+									runningSubagentCount: runningSubagentCount,
 										project: projectId,
 										session: sessionRef.current,
 										postAction, // F39 过目态内联展开/段级三键
@@ -1991,8 +2052,14 @@ export function WorkbenchView(props) {
 										deletingId: deletingId === projectId,
 									});
 							}
-						})(),
-						// 「之前的过程」是现场的账本回放（与"我正在看哪一步"无关），阶段页上不摆它。
+						})();
+						// 这一层是**纯测量壳**：没有样式、不参与排版之外的任何事（票 24 ①）。
+						// ⚠️ 这里**刻意没有**「这一格空了就摆兜底句」的分支：`focusCardKey` 是全函数
+						// （九个返回值每一个都有卡），那种分支今天走不到，只会造出一条「形状断言冒充
+						// 行为断言」的假绿。兜底句只挂在真正能把整块渲染成空的那一窗（见上面 ③）。
+						return createElement("div", { ref: nowCardRef }, card);
+					})(),
+					// 「之前的过程」是现场的账本回放（与"我正在看哪一步"无关），阶段页上不摆它。
 						viewPhase === null
 							? createElement(
 							"div",
@@ -2268,54 +2335,13 @@ export function WorkbenchView(props) {
 							// 两条路都不发动作；`book-delete` 仍然只有第二下（确认那颗）发，且只发一次。
 							onCancelDelete: () => setDeletingId(null),
 						}),
-						// 票 20（走查 P3）：焦点区**吸底决策条**——滚到哪一段都在，就近再给一次那颗推进键
-						// （确认点上的「✅ 满意，继续设计」原本在容器内 top 2926，要滚过约 2.9 个视口高度
-						// 才摸得到）。四条规矩：
-						//   · **只在内容超出时出现**（判据是纯函数 `stickyDecisionBar`）；内容装得下时
-						//     凭空插一条纯属噪音。
-						//   · 出现时容器已按**它自身的高度**留出下边距（上面那个 `padding`），所以它压住
-						//     的只是那一段留白——**最后一行可点元素不会被它压住**。
-						//   · **不是容器级 `onClick` 的整块热区**（spec 不变量 2）：条本身不可点，热区是
-						//     那颗真按钮，身份＝**发动作**（`explore-confirm`），不掺「展开」——一个热区
-						//     只干一件事。
-						//   · 「👀 看完整报告」与两个折叠清单**照旧不撤**：吸底是叠加，不是替换。
-						stickyBox.show && viewPhase === null && browsing === null
-						? createElement(
-							"div",
-							{
-								ref: stickyBarRef,
-								style: {
-									position: "sticky",
-									bottom: 0,
-									marginTop: "8px",
-									padding: "8px 0 4px",
-									display: "flex",
-									alignItems: "center",
-									justifyContent: "flex-end",
-									gap: "8px",
-									background: "var(--dsw-alias-bg-layer-1)",
-									borderTop: "1px solid var(--dsw-alias-border-l2)",
-								},
-							},
-								createElement(
-									"span",
-									{ style: { fontSize: "12px", opacity: 0.8 } },
-									// 状态词只有那三个（CONTEXT「工作台状态词」），经 `stepWord` 取，这里不另抄一份
-									// ——抄一份就会与清单那边漂成两种说法。
-									`⚡ ${stepWord("waiting-user")}`,
-								),
-								createElement(
-									"button",
-									{
-										style: S.bigBtn(true),
-										onClick: () => confirmExplore(true),
-										disabled: busy,
-									},
-									// 可见文案取自卡里那个**唯一出口**（同一个动作、同一个名字）。
-									EXPLORE_CONFIRM_ACCEPT_LABEL,
-								),
-							)
-						: null,
+						// 票 20（走查 P3）曾在这里渲染焦点区**吸底决策条**（滚到哪一段都在，就近再给一次那颗推进键）。
+						// **已按票 18 的裁决整条删掉**（2026-10-04 用户选 B）：真机走查拍到的那一屏里，卡内那颗推进键与
+						// 条上那颗**同名键渲染了两次**，下面那次孤零零地右对齐挂在卡片外面（用户原话：「满意的那行位置不对」）。
+						// 落点①要求那颗副本**从 DOM 里删掉**（隐藏或 `visibility` 都不算——那份仍在 DOM 里，键盘 Tab 还能
+						// 走到它），所以连条带键一起删，不留空壳：那层 sticky 底栏留着就是另一种噪音。
+						// ⚠️ 随之**重新变成未修**的是票 20 那个病本身（那颗键仍在容器内 `top 2926`，要滚过约 2.9 个视口
+						// 高度）——另找一个解法（报告默认折叠之类）是产品裁决，**不许在这里顺手补**，见票 20 的 `## Comments`。
 					);
 					},
 				),
@@ -2442,6 +2468,11 @@ export function WorkbenchView(props) {
 }
 
 export function apply(ctx) {
+	// 「有没有新版本」：**在注册时**发起，不在渲染时。位置是刻意的——工作台的 fetch 桩会把
+	// 每一次调用都记进 calls，且未被 stub 的请求直接抛，所以渲染路径上一次都不能多发。
+	// 这里 fire-and-forget：它答不上来（断网、registry 改形状）也只是不显示任何东西，
+	// 组件只订阅一个已经算好的快照。
+	void startUpdateCheck();
 	// 「打开一份文件看看」的服务入口：交给右侧 Sidebar 的导航面（上下文服务，
 	// 见 ADR-0010 决策 1/7）。工作台组件只拿这一个函数，不直接碰 ctx。
 	// ⚠️ sidebarRight 是硬依赖（inject 里已声明）：解不到就没有这个函数，

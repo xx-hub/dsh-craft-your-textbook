@@ -8,6 +8,7 @@
 import { createElement, useEffect, useMemo, useState } from "react";
 import { S } from "./styles.js";
 import {
+	chapterAttribution,
 	chapterBadge,
 	deriveDoneSet,
 	hasPendingReview,
@@ -21,7 +22,14 @@ import { GoldReader } from "./gold-table.js";
 // ⚠️ 候选 06：步模型的四态词 / 分组 / 计数 / rowText **不再**从这里取——它们住在
 // `stage-step-model.js` 的 projection 里，行自带 `rowText` / `detailLines` / `target`。
 // 本 module 只保留章节卡要的 `PHASE_UI` / `artifactName` / `workEntryAction`。
-import { PHASE_UI, artifactName, chapterAuditFreshnessText, workEntryAction } from "./view-rules.js";
+import {
+	PHASE_UI,
+	artifactName,
+	chapterAuditFreshnessText,
+	chapterAuditIsStale,
+	indexRunningChapterClaims,
+	workEntryAction,
+} from "./view-rules.js";
 // 票 09：章节卡非过目态那颗「打开」＝票 02 那颗共用按钮，住中性模块（阶段页再导出它）。
 // ⚠️ 不许从 `./phase-page.js` import：那个文件已经 import 本文件（`foldKnowledgeMap`），
 // 反向 import 会成环（`chapters-map → phase-page → chapters-map`）。
@@ -34,6 +42,9 @@ import { goldChapterNo } from "../domain-rules.js";
  * 别各拼一遍。
  */
 const chapterRel = (n) => `work/chapter-${String(n).padStart(2, "0")}.md`;
+
+/** 「准备中」那一格：图标与中性色，逐字保持票 20 之前那一格的样子（组件里不留零散字面量）。 */
+const CHAPTER_NOT_READY = Object.freeze({ icon: "⏳", tone: "#57606a" });
 
 // 票 27 · P38 ①：章节卡那颗「打开」按态分——**没定稿的章在按钮自己身上说清这一点**。
 //
@@ -190,6 +201,12 @@ export function ChaptersCard(props) {
 		events,
 		workFiles,
 		chapterSegments,
+		// 票 20：此刻**真在跑**的小助手有几个（`indexSubagentDescendants()` 那个 `runningCount`，与顶栏
+		// 「🔎 N 个小助手在跑」同一份读数）。它决定「我正在做」有几个名额——章卡与归属都经它，
+		// 所以屏上「说我在做的行数」**≤**「几个小助手在跑」，候选够时两者相等（票面 :63/:103）。
+		// ⚠️ 缺这一格按 0 算（不是缺省成「全都在写」）：少说一次「我正在做」收得回来，
+		// 多说一次就是票 20 那个病本身。
+		runningSubagentCount,
 		project,
 		session,
 		// 票 28：主 AI 上下文占用百分比（null = 宿主读不到，界面不显示这一格）。
@@ -321,6 +338,13 @@ export function ChaptersCard(props) {
 	const contextNote = contextOccupancySentence(contextPercent);
 	const contextNoteText = contextNote === "" ? "" : `（${contextNote}）`;
 
+	// 票 20：这一屏的「谁在写哪一章」——**一份**认领表，徽章与归属都读它，不各判各的。
+	// 判据见 `view-rules.indexRunningChapterClaims` 的注释（产物 ＋ 名额两条硬判据）。
+	const chapterClaims = useMemo(
+		() => indexRunningChapterClaims(chapterSegments, runningSubagentCount),
+		[chapterSegments, runningSubagentCount],
+	);
+
 	const sendReview = (n) => {
 		if (comment.trim() === "") return;
 		void onReview(n, comment.trim()).then(() => {
@@ -400,7 +424,23 @@ export function ChaptersCard(props) {
 			// F35：主 AI 上报的章级流水线阶段（meta.chapterPipeline[n-1]={stage,updatedAt}；旧账本兜底 null → 四态回退）。
 			const pipelineStage =
 				(meta?.chapterPipeline ?? [])[row.n - 1]?.stage ?? null;
-			const badge = chapterBadge(row, pendingReviews, doneSet, pipelineStage);
+			// 票 22：徽章认「**此刻这份正文**有没有被审过」——与下面那句新鲜度文案同一条服务端事实
+			// （`view-rules.chapterAuditIsStale`）。不传这一格时徽章照旧只看交工事件（原行为）。
+			const auditStale = chapterAuditIsStale(chapterSegments, row.n);
+			// 票 20：这一章此刻**有没有在跑的小助手认领它**（唯一的「我正在做」前置条件）。
+			// 徽章与下面那颗归属**读同一个值**——一处说「有人在写」、另一处说「没人认领」是新的自相矛盾。
+			const claimed = chapterClaims.has(row.n);
+			const badge = chapterBadge(
+				row,
+				pendingReviews,
+				doneSet,
+				pipelineStage,
+				auditStale,
+				claimed,
+			);
+			// 票 20 · 归属栏（与状态拆成两件事）：没有在跑的小助手就**整格不渲染**——
+			// 不留占位、不写「排队中」（那正是把计划说成事实的另一种写法，票面 :99）。
+			const attribution = chapterAttribution(claimed, pipelineStage);
 			const open = reviewing === row.n;
 			const fileMissing = !hasChapterFile(row.n);
 			// 票 09（`workbench-transitions/spec.md` §3 热区表「章节卡」行 / 不变量 2）：入口**拆身份**。
@@ -470,18 +510,37 @@ export function ChaptersCard(props) {
 						{ style: { flex: 1, fontSize: "13px", fontWeight: 600 } },
 						`第 ${row.n} 章《${row.title}》`,
 					),
-					!prepared
-						? createElement(
-								"span",
-								{ style: { fontSize: "12px", color: badge.tone } },
-								`${badge.icon} 准备中`,
-							)
+				!prepared
+					? // 「准备中」答的是**这一屏的账还没读回来**（`chapterStatus` 一个都没有），
+					// 不是某一章的状态，所以它不占章徽章那一格、也不占状态词三词。
+					// ⚠️ 逐字保持票 20 之前的样子（图标 ⏳ ＋ 中性色），本票只把**有账可读**那一格换成判据。
+					createElement(
+						"span",
+						{ style: { fontSize: "12px", color: CHAPTER_NOT_READY.tone } },
+						`${CHAPTER_NOT_READY.icon} 准备中`,
+					)
+					: // 票 20：徽章**可以没有**——没人在写这一章、它也还没定稿，这一格整颗不出声
+					// （不是空徽章，也不是拿「排队中」之类的说法顶上）。
+					badge === null
+						? null
 						: createElement(
-								"span",
-								{ style: { fontSize: "12px", color: badge.tone } },
-								`${badge.icon} ${badge.text}`,
-							),
-				),
+							"span",
+							{ style: { fontSize: "12px", color: badge.tone } },
+							`${badge.icon} ${badge.text}`,
+						),
+				// 票 20 · 归属栏（「谁在写这一章」，与状态分开的一栏）：认领才说话，
+				// 空着就**整格不渲染**——不留占位、不写「排队中」。
+				attribution === null
+					? null
+					: createElement(
+						"span",
+						{
+							style: { fontSize: "11px", color: attribution.tone, opacity: 0.85 },
+							title: "这一章此刻是谁在写",
+						},
+						`${attribution.icon} ${attribution.text}`,
+					),
+			),
 				sourceIndex !== ""
 					? createElement(
 							"div",

@@ -324,8 +324,26 @@ function logEntryText(event) {
     // **展开详情**那一格承担（`src/ui/event-cards.js` 的 `replayRowDetail`，印人话词）。
     // 与上面 `announceText` 是两处**同理由、不同对象**（一份是文件流水、一份是对话播报）。
     case 'textbook/submit-rejected': return `🚫 交工被拒：${data.reason ?? ''}`
+    // 票 12 · ①：《过程记录.md》那一行（事后翻账的人看的）。措辞与对话播报**共用**下面那一份
+    // `styleSpecChangeWhen`——两处各写一遍就是「一处改、另一处漏」。
+    case 'textbook/style-spec-change':
+      return `📝 写作规范在范例章定稿后被改过：${styleSpecChangeWhen(data)}`
     default: return null
   }
+}
+
+
+/**
+ * 「写作规范变更」那一笔要说清的两件事（**两个出口共用这一份**，不各写一遍）：
+ * **哪一版变了**（指纹）与**此刻已经写了多少章**（不一致的波及面）。
+ * 读不出指纹就说「读不到」——**读不出不是「没变」**（那会让真被改过的人以为自己没问题）。
+ */
+function styleSpecChangeWhen(data) {
+  const from = typeof data?.from === 'string' && data.from !== '' ? data.from : '读不到'
+  const to = typeof data?.to === 'string' && data.to !== '' ? data.to : '读不到（文件已不在）'
+  const n = Number.isSafeInteger(data?.chapters) ? data.chapters : null
+  const written = n === null ? '' : `，此刻已写 ${n} 章`
+  return `改动前 ${from} → 改动后 ${to}${written}`
 }
 
 
@@ -505,6 +523,11 @@ function announceText(event) {
     // 界面上用户要读的那一格是事件行的**展开详情**（`src/ui/event-cards.js` 的 `replayRowDetail`），
     // 那里才印人话阶段词。**这不是漏了，是四个出口里逐个点名后的第三处「不印」。**
     case 'textbook/submit-rejected': return `🚫 交工被拒：${String(data.reason ?? '').slice(0, 200)}`
+    // 票 12 · ①：机器替 AI 记「它改了机器契约」这一笔。**两个出口都开口**——
+    // 《过程记录.md》是事后翻账的人看的，对话播报是**当下**就该让用户与主笔 AI 知道的那一条
+    // （此刻已写的那些章是照改动前那一版写的，这是不一致的唯一一处可核证据）。
+    case 'textbook/style-spec-change':
+      return `📝 写作规范在范例章定稿后被改过（${styleSpecChangeWhen(data)}）`
     default: return null
   }
 }
@@ -1240,11 +1263,33 @@ function chapterHasSubmitEvent(projectId, n, meta = null, events = null) {
 
 
 /**
+ * 票 22：**正文一改，审过就失效**——检查记录必须**晚于**当前这份正文才算审过它。
+ *
+ * 判据是**两个文件的 mtime 谁更晚**，与 `src/workflow.js` 的 `buildArtifactFacts` 里那条
+ * 「新鲜度是服务端事实」**同一口径**（那边算给界面看，这边卡住闸门；两边读的是同一对文件）。
+ * 读不到 mtime（stat 抛了）时**不判旧稿**——「读不出」不许当成「有问题」，那会让一本正常书
+ * 凭空被拦住；那种情况下上面的「两份产物在」已经扛住了最要紧的那一半。
+ */
+function chapterAuditOlderThanChapter(chapterPath, auditPath) {
+  try {
+    return statSync(auditPath).mtimeMs < statSync(chapterPath).mtimeMs
+  } catch {
+    return false
+  }
+}
+
+
+/**
  * 过目闸门「全部章节都写好了」的单章判据（票 14，**界面数字与闸门共用这一份**，不许写第二份）：
  *  ① 两份产物存在（`work/chapter-NN.md` ＋ `work/audit-NN.md`，今天已有）；
- *  ② 该章有机器记下的「交工通过」（见 chapterHasSubmitEvent）；
- *  ③ 该章**没有未处置（`status === 'pending'`）的抽查意见**——这条是票 10「翻案 → 这本书重新被拦住」
+ *  ② **检查记录不比正文旧**（票 22：正文在审计之后又改过 ⇒ 那份审计审的是旧稿，「审过」当场失效）；
+ *  ③ 该章有机器记下的「交工通过」（见 chapterHasSubmitEvent）；
+ *  ④ 该章**没有未处置（`status === 'pending'`）的抽查意见**——这条是票 10「翻案 → 这本书重新被拦住」
  *     的服务端一半：翻案把意见写回 `pending` 之后，**即使该章早就交工过**，过目闸门也必须重新拦住它。
+ *
+ * ⚠️ ② 是**验货**那一半，不是显示那一半（票面 :48-53）：没被审过的正文带着「已审过」进合并、
+ *  进交付，比「清单没刷新」严重一个量级。而它必须落在这里——界面的「已完成 X/Y 章」与章徽章
+ *  取的就是这一份（票 14 的同源不变量），写在别处就是「两个数字打架」的老病复发。
  *
  * 老书/在建书不新造迁移：某章没交工就重新走既有逐章交工（`stage-submit chapters` 那个写入点在），
  * **不退回到「按文件判」兜底**（不变量 2）。
@@ -1256,13 +1301,14 @@ function chapterDone(projectId, n, meta = null, events = null) {
 
 /**
  * 同一份判据的「差在哪一项」形态（**不重复判据，只给结论起个名**）：
- * 满足返回 `null`，不满足返回 `{ reason: 'artifact' | 'review' | 'submit' }`——
- * `chapters-review-confirm` 闸门要据此说清「是产物缺、还是该章有未处置意见、还是压根没交工」。
- * 三项与 chapterDone 一一对应，顺序也一致。
+ * 满足返回 `null`，不满足返回 `{ reason: 'artifact' | 'stale' | 'review' | 'submit' }`——
+ * `chapters-review-confirm` 闸门要据此说清「是产物缺、还是审的是旧稿、还是该章有未处置意见、还是压根没交工」。
+ * 四项与 chapterDone 一一对应，顺序也一致。
  */
 function chapterGateMiss(projectId, n, meta = null, events = null) {
   const { chapterPath, auditPath } = chapterArtifacts(projectId, n)
   if (!existsSync(chapterPath) || !existsSync(auditPath)) return { reason: 'artifact' }
+  if (chapterAuditOlderThanChapter(chapterPath, auditPath)) return { reason: 'stale' }
   const current = meta ?? readMeta(projectId)
   const pending = (current?.pendingReviews ?? []).some((r) => r?.chapter === n && r?.status === 'pending')
   if (pending) return { reason: 'review' }
@@ -2023,6 +2069,44 @@ function stripLoaderRegion(text) {
 }
 
 
+// ── 标题身份：合并剥章标题与终检判重共用同一份定义（不许两处各写一份正则）──
+
+/** 行首「第N章」（数字或中文数字都收）。章标题行与普通小节标题的分界。 */
+const CHAPTER_HEADING_RE = /^第\s*[0-9一二三四五六七八九十百零两]+\s*章/
+
+/**
+ * 标题归一化：**只留文字与数字**（剥掉 emoji、符号、标点、空白）。
+ * ⚠️ 旧口径只删 8 个标点（`[\s，。、,.·：:]`），emoji 原样留在串里——
+ * 「🚧 常见误区」按 6 个字符算，混过了「≥6 字才参与判重」那道闸，于是每章都有的
+ * 板块名被判成「重复标题」拦交付（三本真书实测 27 / 12 / 1 处，见 ADR-0008 修订 2026-09-30）。
+ */
+export function headingKey(text) {
+  return String(text).replace(/[^\p{L}\p{N}]/gu, '')
+}
+
+/**
+ * 剥掉章正文自带的章标题行——合并时机器已经拼了一个 `# 第N章 <大纲标题>`，
+ * 正文里那一行留着，成品里同一个章标题就出现两次，终检「无重复标题」会把
+ * **「第X章」判成重复标题、拦交付**（这正是用户报的那条）。
+ * ⚠️ 旧实现 `body.replace(/^#\s+.*$/m, '')` 只认单 `#`：AI 把章标题写成 `##` 时剥不掉。
+ * 判据：文件里**第一个**标题行，且它长得像章标题（行首「第N章」，或与本章大纲标题同串）；
+ * 第一个标题不是章标题就当它是真的小节标题，一个字不动。
+ */
+export function stripChapterTitleHeading(body, outlineTitle) {
+  const text = String(body)
+  const want = headingKey(outlineTitle)
+  for (const match of text.matchAll(/^(#{1,6})[ \t]+(.*)$/gm)) {
+    const title = match[2].trim()
+    if (title === '') continue
+    const bare = headingKey(title.replace(CHAPTER_HEADING_RE, ''))
+    const isChapterish = CHAPTER_HEADING_RE.test(title) || (want !== '' && bare === want)
+    if (!isChapterish) return text
+    return text.slice(0, match.index) + text.slice(match.index + match[0].length)
+  }
+  return text
+}
+
+
 /** 真实模式：最后检查交办给主 AI（自查报告），机器硬检查兜底后交付；演示模式：机器质量门 + 交付（共用 book.md 缺失兜底）。 */
 async function runPhase6(ctx, projectId, meta) {
   const bookPath = workFile(projectId, 'book.md')
@@ -2048,6 +2132,42 @@ async function runPhase6(ctx, projectId, meta) {
 /** style-spec 指纹：范例章交工时定格，终检交工时对账——契约修改必须留痕（Q9，2026-08-27）。 */
 function specFingerprint(projectId) {
   return createHash('sha256').update(readFileSync(workFile(projectId, 'style-spec.md'), 'utf8')).digest('hex').slice(0, 16)
+}
+
+
+/**
+ * 票 12 · ①：**机器替 AI 记「它改了机器契约」这一笔**（落账侧检测）。
+ *
+ * 病（2026-09-29 真机走查）：范例章 22:57:09 定稿、指纹 `1e117f928b674fc7` 定格，
+ * **`work/style-spec.md` 在 88 分钟后的 00:25:22 被改写**——而这 88 分钟里第 1–12 章全部照**旧版**落盘。
+ * 机器**有**判据（终检那一次对账），但它：① 拦在最后一刻、② 拦错了对象（说的是「你的报告要补一句声明」，
+ * 不是「你那 12 章是照一份已经作废的契约写的」）、③ **账本里一个字都没有**。
+ *
+ * 判据只有一条：**当前指纹 ≠ 范例章定稿时定格的那一枚**。其余全是边界：
+ * - 范例章还没定稿（`styleSpecHash` 为 null）⇒ 根本没有「定稿后」这一说，不记；
+ * - 读不到文件 ⇒ `to` 记 null 并照记一笔（「删掉规范逃检查」也是一次变更，**读不出不是「没变」**）；
+ * - **同一次变更只记一条**（`styleSpecSeen` 存的是「已记过的那一枚」）——
+ *   调用点在工作台 2 秒一轮的轮询里，不去重就是每两秒一条事件，把账本淹掉。
+ *
+ * ⚠️ **为什么检测点是一个 GET**：AI 用文件工具直接改盘，服务端没有写入点可挂；
+ * 唯一「那段时间里一定在跑」的东西是工作台自己的轮询（`/textbook/process`）。
+ * 稳态下它**只读不写**（指纹没变就立即返回），且终检交工那一次也会补检一次，
+ * 所以「工作台没开过」也不漏记。**这是一个有意的取舍，写在这里以免下一个人当漏洞改掉。**
+ *
+ * @returns {boolean} 这一次是否真的新记了一条
+ */
+function noteStyleSpecChange(projectId) {
+  const meta = readMeta(projectId)
+  const frozen = meta?.styleSpecHash
+  if (frozen == null) return false
+  let now = null
+  try { now = specFingerprint(projectId) } catch { /* 文件不在/读不到：to 记 null，那也是一次变更 */ }
+  if (now === frozen) return false
+  if ((meta.styleSpecSeen ?? frozen) === now) return false
+  const chapters = (meta.outline?.chapters ?? []).filter((_c, i) => existsSync(workFile(projectId, `chapter-${String(i + 1).padStart(2, '0')}.md`))).length
+  appendEvent(projectId, 'textbook/style-spec-change', { from: frozen, to: now, chapters })
+  updateMeta(projectId, (state) => { state.styleSpecSeen = now })
+  return true
 }
 
 
@@ -2258,43 +2378,83 @@ function runQualityChecks(projectId) {
       note: badRefs.length === 0 ? '每章标称的源材料都真实存在' : `发现引用矛盾：${badRefs.slice(0, 3).join('；')}`,
     })
   }
-  // 事实矛盾（机器层，票 20 改口径）：重复标题 = 疑似重复/冲突内容；深层的语义矛盾由 AI 自查报告承载。
-  // 只揪「内容性」标题（规范化的标题 ≥6 字，且不是通用小节名），避免「本章小结/本节练习」这类
-  // 合法重复被误判成矛盾；真正的语义矛盾仍靠 AI 自查报告逐项核对。
+  // 事实矛盾（机器层，2026-09-30 诊断后拆成两件事——旧口径是**一条判据两头都不准**）：
+  //   旧口径拿「全书所有 H1–H3 标题归一化后去重」当重复标题。实测（ADR-0008 修订 2026-09-30）：
+  //     ① 每章都有的**板块名**（🚧 常见误区 / 🎬 场景引入…，书自己在 style-spec 里声明的）被判重复
+  //        → 拦交付，三本真书分别 27 / 12 / 1 处，全是误伤；
+  //     ② 两章**章名真写成一样**反而**放行**——机器拼的「第1章」「第2章」前缀让归一化串不相等。
+  //   所以：章名唯一性单独立一条（读大纲，精确）；小节标题去重收窄成**同一章内**才拦。
   if (meta?.demo !== true) {
-    const headings = []
-    const headingRe = /^#{1,3}\s+(.*)$/gm
-    for (const match of bookText.matchAll(headingRe)) {
-      const title = match[1].trim()
-      if (title.length >= 4) headings.push(title)
+    // ① 章名全书唯一：直接读大纲的章名，不经正文——正文里的写法（`#`/`##`/带不带冒号）不该影响这一条。
+    const seenChapterTitles = new Set()
+    const dupChapterTitles = []
+    for (const chapter of meta?.outline?.chapters ?? []) {
+      const key = headingKey(chapter?.title ?? '')
+      if (key === '') continue // 没有章名不是「两章同名」，归别处管
+      if (seenChapterTitles.has(key)) {
+        if (!dupChapterTitles.includes(key)) dupChapterTitles.push(key)
+      } else seenChapterTitles.add(key)
     }
+    checks.push({
+      name: '章名全书唯一',
+      ok: dupChapterTitles.length === 0 || otherWaived,
+      note: dupChapterTitles.length === 0
+        ? '每一章的章名在全书中都不一样'
+        : (otherWaived
+          ? `你已同意：以你的说明为准（重名章：${dupChapterTitles.slice(0, 3).join('、')}）`
+          : `有 ${dupChapterTitles.length} 组章名在书里重复：${dupChapterTitles.slice(0, 3).join('、')}——请在拍板定方案那一关改掉重名的章名，再重新交工做最后检查`),
+    })
+
+    // ② 无重复标题 → 收窄为**同一章内**的小节标题重复。跨章同名多半是每章都有的板块名
+    //    （设计使然，AI 改不掉——那是本书自己定的板位），机器分不出「板位名」与「复制粘贴的
+    //    小节名」：字符串完全一样。所以跨章同名只**提示**（`warn` 第三态，不拦交付），
+    //    语义归 AI 自查报告与合并前跨章审计（「机器扫结构、AI 查语义」分工不变）。
+    //    同章内同名则多半是复制粘贴的产物，是真重复，拦。
+    //    归一化用 `headingKey`：剥掉 emoji/符号/标点（旧的只删 8 个标点，emoji 留在串里
+    //    把「🚧 常见误区」撑成 6 个字符混过下面的长度闸——那是 27 处误伤的直接成因）。
+    //    标题正则的空白也从 `\s` 收紧成 `[ \t]`：`\s` 吃换行，一行裸 `##` 会把下一行正文收成标题。
     const BOILERPLATE = /小结|练习|答案|习题|本节|本章|目标|重点|方法|导入|复习|课后|思考/
-    const seen = new Map()
-    const dup = []
-    for (const h of headings) {
-      const k = h.replace(/[\s，。、,.·：:]/g, '')
-      if (k.length < 6 || BOILERPLATE.test(k)) continue
-      if (seen.has(k)) dup.push(`「${h}」`)
-      else seen.set(k, true)
+    const perChapter = new Map() // 章号 → 该章已出现的小节标题键
+    const acrossChapters = new Map() // 键 → 出现在几章（同章内多次只算一章）
+    const dupInChapter = [] // 同章内重名：显示用（保留书里原样的标题，好让人照着改）
+    const dupInChapterKeys = new Set() // 同章内重名的键：只作集合判据，不重复显示
+    let chapterNo = 0
+    for (const match of bookText.matchAll(/^(#{1,3})[ \t]+(.*)$/gm)) {
+      const title = match[2].trim()
+      if (title.length < 4) continue
+      // 机器拼的章标题行（`# 第N章 …`）开启新的一章；它自己归 ① 那条判，这里只用来分章。
+      if (match[1].length === 1 && CHAPTER_HEADING_RE.test(title)) {
+        chapterNo += 1
+        continue
+      }
+      const key = headingKey(title)
+      if (key.length < 6 || BOILERPLATE.test(key)) continue
+      const seenHere = perChapter.get(chapterNo) ?? new Set()
+      if (seenHere.has(key)) {
+        dupInChapterKeys.add(key)
+        if (!dupInChapter.some((shown) => shown === title)) dupInChapter.push(title)
+      } else {
+        seenHere.add(key)
+        acrossChapters.set(key, (acrossChapters.get(key) ?? 0) + 1)
+      }
+      perChapter.set(chapterNo, seenHere)
     }
-    // 票 20（2026-09-24 用户拍板）：这条**是真门槛**——有重复标题就 `ok:false`、交付被拦（走既有
-    // 「机器打回 → AI 修 → 重新终检」回路）。推翻 ADR-0008 修订 3 的后半条（「线索级、不拦交付」）：
-    // README 已对用户承诺「机器兜底再验一遍：…没有重复的标题」，`ok` 恒真等于空头承诺。
-    // 判据强度照实写：查的是**全书标题去重**——同一内容性标题在书里出现不止一次就算（同章内重复
-    // 同样算），**不叫「跨章」**；机器只看字符串，同名是否**真矛盾**仍是语义判断，归 AI 自查报告与
-    // 合并前跨章审计（「机器扫结构、AI 查语义」分工不变，变的是机器这一侧的强度）。
-    // 误伤出口：`other` 豁免仍放行（豁免是人手动放行，不是常规路径）。`warn` 保留（第三态表征），
-    // 只是这条不再出现「ok:true + warn:true」。
-    // 注意：不要再把 `ok` 改回恒真——那会让这条退回空头承诺（test-gate-write-points.mjs 钉着）。
+    // 跨章同名（不含同章内已报的那些）：只提示，不拦。
+    const sharedAcross = [...acrossChapters.entries()]
+      .filter(([key, chapters]) => chapters > 1 && !dupInChapterKeys.has(key))
+      .map(([key]) => `「${key}」`)
+    const blocked = dupInChapter.length > 0
     checks.push({
       name: '无重复标题',
-      ok: dup.length === 0 || otherWaived,
-      warn: dup.length > 0,
-      note: dup.length === 0
-        ? '全书没有重复的内容性标题'
-        : (otherWaived
-          ? `你已同意：以你的说明为准（重复标题：${dup.slice(0, 3).join('、')}）`
-          : `发现重复标题 ${dup.slice(0, 3).join('、')}——同一个标题在书里出现不止一次（同章内重复也算），请合并或改写重名的小节，改完重新交工做最后检查`),
+      ok: !blocked || otherWaived,
+      warn: !blocked && sharedAcross.length > 0,
+      note: blocked
+        ? (otherWaived
+          ? `你已同意：以你的说明为准（重复标题：${dupInChapter.slice(0, 3).map((t) => `「${t}」`).join('、')}）`
+          : `发现重复标题 ${dupInChapter.slice(0, 3).map((t) => `「${t}」`).join('、')}——同一个标题在同一章里出现不止一次，请合并或改写重名的小节，改完重新交工做最后检查`)
+        : (sharedAcross.length > 0
+          ? `同一章里没有重名的小节；这些标题在多章里各出现一次（多半是每章都有的板块）：${sharedAcross.slice(0, 3).join('、')}——是不是内容重复，请 AI 在自查报告里说明`
+          : '每一章里都没有重名的小节标题'),
     })
   }
   return checks
@@ -2722,7 +2882,7 @@ function buildStageBrief(projectId) {
       // 票 walkthrough-fixes/32 · ADR-0027：终检改派 5 个小助手分查。**协调员不读正文**（§6.1 硬约束）——
       // 终检是全书体量最大、上下文余量最小的那个时点，让它亲自通读 book.md 等于把最贵的读放在最没余量的地方。
       // 三层归属在这条字符串里必须自洽：协调员**不读正文** / **仍能改点名的条目** / **styleCheck 逐条交代由分报告做**。
-      brief.task = `最后检查**分头查，不要自己通读**（口径见 audit-and-testing.md §十「派 5 个小助手分查」那一节）：按那一节派 5 个上下文干净的小助手分查 work/book.md，各查各负责的范围（成品完整与每章自查记录 / AI 脚手架残留与练习答案齐全 / 与已拍板设计一致 / 材料可追溯与引用矛盾 / 事实与跨章一致性），**派发那一刻你手里一章正文都不许有**，只收 5 份报告。五份各自出结论（通过／不通过）＋**条目级**点名（「第 3 章有问题」不算点名，要指到具体哪一处）。**五份不合成**：你只做汇总裁决，不逐条回正文复核（核实是写那份报告的助手自己的活）；按点名的那几条**直接改**——只改点名的条目，不通读全书、不顺手重写别的章。改完把五份结论汇成一份自查报告（人话）随 stage-submit（stage=final, report=...）交工。${REPORT_WORDING_RULE}**风格线逐条交代由五份分报告各自做、你不读正文所以不做**：交工时要对**每一条**生效中的风格线（workbench_status 的 styleNotes 里 status 为 active 的那些）都有交代——把五份报告里各自交代的去向合并成一份 styleCheck:[{id, status, note?, chapter?}] 随交工一起交：adopted＝已落实（写清落实在哪章）、conflict＝与哪一章冲突（note 必写一句冲突理由）、superseded＝已不再适用；漏一条机器会拒收（哪一路没交代就唤醒那一路补，别自己凭印象编）。机器硬检查会兜底（乱码/章节数/必含板块/禁用词/重复标题，判据来自已拍板的 style-spec/outline）；全过后你在工作台等用户「认可」才算交付。`
+      brief.task = `最后检查**分头查，不要自己通读**（口径见 audit-and-testing.md §十「派 5 个小助手分查」那一节）：按那一节派 5 个上下文干净的小助手分查 work/book.md，各查各负责的范围（成品完整与每章自查记录 / AI 脚手架残留与练习答案齐全 / 与已拍板设计一致 / 材料可追溯与引用矛盾 / 事实与跨章一致性），**派发那一刻你手里一章正文都不许有**，只收 5 份报告。五份各自出结论（通过／不通过）＋**条目级**点名（「第 3 章有问题」不算点名，要指到具体哪一处）。**五份不合成**：你只做汇总裁决，不逐条回正文复核（核实是写那份报告的助手自己的活）；按点名的那几条**直接改**——只改点名的条目，不通读全书、不顺手重写别的章。改完把五份结论汇成一份自查报告（人话）随 stage-submit（stage=final, report=...）交工。${REPORT_WORDING_RULE}**风格线逐条交代由五份分报告各自做、你不读正文所以不做**：交工时要对**每一条**生效中的风格线（workbench_status 的 styleNotes 里 status 为 active 的那些）都有交代——把五份报告里各自交代的去向合并成一份 styleCheck:[{id, status, note?, chapter?}] 随交工一起交：adopted＝已落实（写清落实在哪章）、conflict＝与哪一章冲突（note 必写一句冲突理由）、superseded＝已不再适用；漏一条机器会拒收（哪一路没交代就唤醒那一路补，别自己凭印象编）。机器硬检查会兜底（乱码/章节数/必含板块/禁用词/章名全书唯一/无重复标题，判据来自已拍板的 style-spec/outline；**章名唯一性读大纲的章名，同一章里重名的小节才算重复——每章都有的同名板块（板位）不拦，只在自查报告里说明**）；全过后你在工作台等用户「认可」才算交付。`
       brief.counts = { chapters: (meta.outline?.chapters ?? []).length, sources: (meta.sources ?? []).length }
       brief.methodology = `${mtl('references/delivery-checklist.md')}\n\n${mtlWithTail('references/audit-and-testing.md', 'final')}`
       brief.outputs = ['维护 work/progress.md（每章一行：写完/审计/验货）']
@@ -2988,6 +3148,7 @@ export {
   stripLoaderRegion,
   runPhase6,
   specFingerprint,
+  noteStyleSpecChange,
   parseStyleSpecList,
   styleSpecDeclaresNoExercises,
   runQualityChecks,

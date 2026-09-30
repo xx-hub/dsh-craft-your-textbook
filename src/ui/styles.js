@@ -50,6 +50,15 @@ export const S = {
 		fontSize: "13px",
 		margin: "8px 0",
 	},
+	// 「有新版可升」那一行。**刻意不是 error 色**：它不是出错了，是一条要人决定的提示，
+	// 染成红的会和上面那行真错误抢同一份注意力（用户已经学会忽略红色的那一行）。
+	// 次要文字用 `opacity` 而不是写一个色值 token——本文件里其余条目引用的都是宿主
+	// **已证明存在**的那些 token，凭空引一个不存在的会让整条 color 声明失效退回继承色。
+	update: {
+		fontSize: "12px",
+		opacity: 0.85,
+		margin: "8px 0",
+	},
 	bigBtn: (primary) => ({
 		border: "none",
 		borderRadius: "10px",
