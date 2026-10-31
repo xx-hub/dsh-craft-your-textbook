@@ -27,7 +27,7 @@
  *
  * 收编的是**形状读取**（哪个键、不是数组就当没有、解析失败返回 `null`），
  * **一个字都不动措辞**。同一份 `knowledge-map.json` 在屏上仍然有两副不同的说法：
- * 本 module 的 `foldKnowledgeMap` 印「📚 章节建议（N 章）」「🎯 知识点清单（N 个）」，
+ * 本 module 的 `foldKnowledgeMap` 印「📚 章节建议（N 章）」「🎯 知识点清单（N 个）」「🧭 教法（N 条）」，
  * 而源探查确认卡印「📚 AI 建议的章节安排（后续可再调）」与它自己那份折叠口。
  * 那是**产品决定**，不是重构遗留：两处服务于两种读法（就地折叠的纯文本清单 vs 一张要拍板的卡），
  * 统一成一句会同时毁掉两处。收编时**不许顺手统一措辞**。
@@ -42,16 +42,55 @@
 // ── 形状读取：工作区/knowledge-map.json ───────────────────────────────────────
 
 /**
- * 把 `工作区/knowledge-map.json` 的原文读成那三份清单。
+ * 把 `工作区/knowledge-map.json` 的原文读成那四份清单。
  *
  * 收编前这里有两份各读各的：`chapters-map.js` 的 `foldKnowledgeMap` 与 `confirm-cards.js`
  * 里那份内联 `JSON.parse`。键名与「不是数组就当没有」这条兜底因此住在两个文件里。
  *
+ * ⚠️ 第四份 `methods`（**教法**，机器键 `teachingMethods`）与另三份同一条兜底：**不是数组就
+ * 当没有**、**缺席就是空数组**。它是可选键（学生用书里可能一条教法都没有）——这里只读形状，
+ * 不判它合不合契约（形状闸在 `src/workflow/knowledge-map-assembly.js` 与交工那一跳）。
+ *
+ * 票 `knowledge-graph-build/07` 多返回一位 `graph`：**知识点图那两个键**（`cards` / `edges`）。
+ * 它**不是**「多一个数组」那种加键——它要回答的是「这张图在不在」：
+ * `graph === null` ＝ 合并件**两个图键一个都没有** ⇒ 老书那一档（形状闸的过渡口径：
+ * `src/workflow/knowledge-map-gate.js` 的 `graphPresent === false`，照旧放行）；只要有一个键在，
+ * 就必须两个都在（闸门第 5 条），所以**一个在、另一个不在**时这里也返回 `null`
+ * ——界面据此**不渲染**那块图，而不是把半份图当完整图摆上屏。
+ *
  * @param {string} text `knowledge-map.json` 的原文。
- * @returns {{chapters: object[], kps: object[], materials: object[]}|null}
+ * @returns {{chapters: object[], kps: object[], methods: object[], materials: object[],
+ *   graph: {cards: object[], edges: object[]}|null}|null}
  *   读不出来（非字符串 / 空串 / 坏 JSON / 字面 `null` / 不是对象）时 `null`。
  */
 export function parseKnowledgeMap(text) {
+	const data = parseKnowledgeMapRaw(text);
+	if (data === null) return null;
+	return {
+		chapters: Array.isArray(data.chapterSuggestion) ? data.chapterSuggestion : [],
+		kps: Array.isArray(data.knowledgePoints) ? data.knowledgePoints : [],
+		// 键序＝读者取用序（知识那一族挨着），不是 JSON 原文的键序。
+		methods: Array.isArray(data.teachingMethods) ? data.teachingMethods : [],
+		materials: Array.isArray(data.materials) ? data.materials : [],
+		graph: knowledgeGraphOf(data),
+	};
+}
+
+/**
+ * **原始**合并对象：这份机器 JSON 的 `JSON.parse` 那一半——形状读取的**唯一** `JSON.parse` 落点。
+ *
+ * 为什么要有它（票 `rcb-build/06` 合并期修整）：折叠视图（{@link parseKnowledgeMap}）只交出那四份
+ * 清单 ＋ 图，**不带 `readerSlices` 这类书级键的原样**——而界面那一栏「缺口」的派生读数要按
+ * `readerSlices` 现算（票 `rcb-build/09`）。若让消费方各自 `JSON.parse` 一遍，形状知识就又长成
+ * 两份，而 `test-phase-page.mjs` 那条「依赖方向」判据点名的正是这种第二份解析。
+ * ⇒ 原始解析收在本 module，消费方按需取；⛔ 消费方不许自己再解析一遍。
+ *
+ * 兜底与 {@link parseKnowledgeMap} 逐字同一条：非字符串／空串／坏 JSON／字面 `null`／不是对象 ⇒ `null`。
+ *
+ * @param {string} text `工作区/knowledge-map.json` 的原文
+ * @returns {object|null} 原始对象（形状一律不判、键一律不折）
+ */
+export function parseKnowledgeMapRaw(text) {
 	if (typeof text !== "string" || text === "") return null;
 	let data;
 	try {
@@ -60,22 +99,32 @@ export function parseKnowledgeMap(text) {
 		return null;
 	}
 	if (data === null || typeof data !== "object") return null;
-	return {
-		chapters: Array.isArray(data.chapterSuggestion) ? data.chapterSuggestion : [],
-		kps: Array.isArray(data.knowledgePoints) ? data.knowledgePoints : [],
-		materials: Array.isArray(data.materials) ? data.materials : [],
-	};
+	return data;
+}
+
+/**
+ * 图那两个键的**形状读取**（唯一一处）：两个键都在且都是数组才认。
+ * ⚠️ 「不是数组就当没有」这条本 module 的既有兜底在这里也成立——半个图不算图（见上）。
+ */
+function knowledgeGraphOf(data) {
+	if (!Array.isArray(data.cards) || !Array.isArray(data.edges)) return null;
+	return { cards: data.cards, edges: data.edges };
 }
 
 // ── 折叠：机器产物 → 人读清单（就地折叠，不开右栏）─────────────────────────────
 
 // F38（2026-08-20 走查）：knowledge-map.json 的最小人读折叠——把原始 JSON 的
-// 章节建议/知识点清单/材料小节折叠成逐行清单；解析失败或无内容返回 null（回退原样）。
+// 章节建议/知识点清单/教法/材料小节折叠成逐行清单；解析失败或无内容返回 null（回退原样）。
+//
+// ⚠️ 票 pgb04/04 加的「教法」那一组**不是新开一个折叠块**：它还是这一个折叠（`foldKnowledgeMap`
+// 一份文本），只是多印一组行——「⛔ 不新增折叠块」说的是卡片上那些可点开的块，不是这里的分组。
+// 它印的是 `teachingMethods[]`（「某个知识点怎么讲」那一层），与 `knowledgePoints[]` 同族但**不混**：
+// 教法不进知识点清单那一组，也不参与任何覆盖判据（今天机器只拼不校验，读数不是债）。
 export function foldKnowledgeMap(text) {
 	const km = parseKnowledgeMap(text);
 	if (km === null) return null;
 	const lines = [];
-	const { chapters, kps, materials } = km;
+	const { chapters, kps, methods, materials } = km;
 	if (chapters.length > 0) {
 		lines.push(`📚 章节建议（${chapters.length} 章）`);
 		chapters.forEach((chapter, index) => {
@@ -95,6 +144,17 @@ export function foldKnowledgeMap(text) {
 			lines.push(
 				`· ${title}${diff !== "" ? `（${diff}）` : ""}${src !== "" ? ` ${src}` : ""}`,
 			);
+		}
+		lines.push("");
+	}
+	if (methods.length > 0) {
+		lines.push(`🧭 教法（${methods.length} 条）`);
+		for (const method of methods) {
+			const title = String(method?.title ?? "").trim();
+			if (title === "") continue;
+			// 教法**不收 `difficulty`**（`CONTEXT.md` 的「教法」词条），所以这里没有知识点那一行的括号难度。
+			const src = String(method?.source ?? "").trim();
+			lines.push(`· ${title}${src !== "" ? ` ${src}` : ""}`);
 		}
 		lines.push("");
 	}

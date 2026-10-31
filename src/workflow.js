@@ -11,10 +11,12 @@ import {
   GATE_LABELS,
   PROJECT_ID_RE,
   appendEvent,
+  appendHumanActionEvent,
   assertSessionOwned,
   bindAnnounce,
   bindContextOccupancy,
   chapterArtifacts,
+  chapterWordReading,
   chapterDone,
   noteStyleSpecChange,
   deepAffected,
@@ -27,6 +29,9 @@ import {
   kick,
   listProjects,
   logEntryText,
+  // 票 `dsh-contract-drift/09`：「提问没记上」那一句的唯一措辞出处（`logEntryText` 与
+  // 本文件 `handleQuestion` 共用，⛔ 不在这里手抄第二份）。
+  questionUnrecordedText,
   moveAcrossDevices,
   processLogPath,
   projectDir,
@@ -45,6 +50,16 @@ import {
   workDir,
   workFile,
   updateMeta,
+  // 票 `depth-review-2026-10/04`：`.redo` 标记那一步（本文件唯一的归档点）走 engine 那一份原语
+  // ——「归档成没成」的判据六条路径只许有一份，本文件不再内联 renameSync。
+  archiveWorkArtifacts,
+  // 票 `confirm-points-redesign-build/08`：范例章旧稿清单与「现在是第几稿」的唯一出处
+  // （原先那一段内联实现搬进 `engine.js`，站 8 的结论件要写同一个「第几稿」）。
+  goldDraftsOf,
+  goldDraftVersionOf,
+  // 票 `confirm-points-redesign-build/09`：站 0／1「只提示人」那一句的**唯一出口**（标签簇，
+  // 由 `engine.js` 再导出）——上传那一支（站 1 的清单增了一件）引的就是这一份。
+  STATION_VALUE_EDIT_HINT,
 } from './workflow/engine.js'
 import { actBooks } from './workflow/actions/books.js'
 import { actWizard } from './workflow/actions/wizard.js'
@@ -56,13 +71,21 @@ import { actCollabSignals } from './workflow/actions/collab-signals.js'
 import { actChapters, readChapterAuditSummary } from './workflow/actions/chapters.js'
 import { actPatternsOps } from './workflow/actions/patterns-ops.js'
 import { buildActionFamilyTable } from './workflow/registration.js'
+import { listStationDecisionActions } from './contract-actions.js'
 import { runAction } from './workflow/action-runner.js'
 import { bookShapeReport, refreshArtifactRegistry } from './workflow/book-shape.js'
-import { readFileSync, readdirSync, writeFileSync, existsSync, statSync, mkdirSync, renameSync, rmSync, realpathSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync, statSync, mkdirSync, rmSync, realpathSync } from 'node:fs'
 import { join, resolve, basename } from 'node:path'
 import { isWithin } from './path-guard.js'
-import { readSettings, autoSplitAvailable } from './mineru-lib.js'
-import { MAX_UPLOAD_BYTES, uploadTooLargeMessage, productOpenMode, artifactKind, SEGMENT_PHASE, countHanzi, contextOccupancyPercent, convertedState, ROLES, guessRoleFromName, isAcceptedMaterialFormat, unsupportedMaterialFormatMessage, chapterRel, chapterName } from './domain-rules.js'
+import { autoSplitAvailable, mineruTokenStatus } from './mineru-lib.js'
+// 票 `confirm-points-redesign-build/08`：站 8／9 的结论件读侧（`metaView.stationDecisions`
+// 那一个折叠的唯一来源）。⛔ 本文件不自己解析 `工作区/决策/NN.json`。
+import { readStationDecision, readEffectiveStationDecision, decisionApproved } from './workflow/decision-record.js'
+// 票 `graph-read-one-answer/04`：合并件的读侧只问这一个出口（票 01 的窄出口）——
+// `/textbook/events` 的 `knowledgeMap` 原文与 `exploreSummary` 三格出自**同一次**读。
+// ⛔ 本文件不再自己 `readFileSync ＋ JSON.parse` 那份件（第六份手搓读盘）。
+import { readMergedMap } from './workflow/knowledge-graph-build.js'
+import { MAX_UPLOAD_BYTES, uploadTooLargeMessage, productOpenMode, artifactKind, SEGMENT_PHASE, countHanzi, contextOccupancyPercent, convertedState, MATERIAL_INTAKE, judgeMaterialFileIntake, chapterRel, chapterName, auditRel, auditName, KNOWLEDGE_MAP_EXCLUSIONS_FILE_NAME, READER_QUESTIONNAIRE_RETURNED_FILE_NAME } from './domain-rules.js'
 
 
 export const name = 'textbook-workflow'
@@ -225,37 +248,62 @@ function readRawBody(req) {
 }
 
 
-/** POST /textbook/upload?session=&project=&name=&role= （raw body = 原件字节；后缀闸门见下） */
+/**
+ * 材料受理判据说「不收」时的那一个回包（票 `upload-formats/01`）。**唯一出口**：
+ * 四条拒收路径（第一段的名单外／第二段的通道外与坏件）都从这里出去，⛔ 不许各写一份——
+ * 少带一个 `code` 的那一处，客户端就分不出「格式不支持」与「文件已损坏」。
+ */
+function sendIntakeRejection(res, verdict) {
+  sendJson(res, 400, { ok: false, code: verdict.code, error: verdict.message })
+}
+
+
+/** POST /textbook/upload?session=&project=&name=&declared= （raw body = 原件字节；后缀闸门见下）
+ *
+ * ⚠️ **票 `pre-gold-build/02`：这里不再收 `role` 参数**——上传那一刻还没有角色这回事。
+ * 角色由探查段开头那一趟**书级材料判定**产出（`工作区/材料判定.json`，派发档 `material-survey`），
+ * 交工那一刻机器按 `num` 并进合并件的 `materials[]`（口径见
+ * `.scratch/pre-gold-processes/issues/11` 的 `§6` 第 7／8 行：上传落库**键缺席**、URL 参数退役）。
+ *
+ * ⚠️ **票 `confirm-points-redesign-build/03`：多了一个 `declared` 参数**——那句材料声明（「我只上传
+ * 有权使用的材料……」）从建书屏搬到了**真正要上传的这一站**。它是**用户在这一屏的勾选**
+ * （`UploadArea` 那颗勾选框，界面在没勾时**不让**发上传），随这一趟上传一起交上来，落成
+ * `meta.materialDeclaration`（字段名归实现定）＋ **一条账**（走既有通道 `textbook/hint`）。
+ * ⛔ 服务端**不替用户声明**：没带 `declared=1` 的请求一个字的声明都不落——「承诺面 ＞ 实现面」
+ * 正是本票要治的形状。声明**只落一次**（同一颗勾选框连传多份，账上只有第一条）。
+ */
 async function handleUpload(ctx, req, res) {
   const url = new URL(req.url, 'http://localhost')
   const sessionId = requireSession(url.searchParams.get('session'), res)
   if (sessionId === null) return
   const project = url.searchParams.get('project')
   const name = url.searchParams.get('name')
-  // 缺参数不是越界：缺省走文件名规则的那个兜底角色（guessRoleFromName 对任何名字都回它，
-  // 必在 ROLES 内）。**不另写一个 '学生用书' 字面量**——接口处不维护第二份角色值。
-  const role = url.searchParams.get('role') ?? guessRoleFromName('')
+  // 用户在站 1 勾了那句材料声明吗（见上方契约注释）。
+  const declared = url.searchParams.get('declared') === '1'
   if (project === null || !PROJECT_ID_RE.test(project)) {
     sendJson(res, 400, { ok: false, error: '缺少或非法的 project 参数' })
     return
   }
   // ⚠️ 票 07：受理闸门与 400 文案**都从 `MATERIAL_FORMATS` 派生**（`src/domain-rules.js`），
-  // 浏览器那个 `<input accept>` 由**同一份**常量派生——两侧不许各写一份（照 `ROLES` /
+  // 浏览器那个 `<input accept>` 由**同一份**常量派生——两侧不许各写一份（照
   // `MAX_UPLOAD_BYTES` 的先例）。原来这里是 `!/\.pdf$/i.test(name)` 一行手抄的后缀，
   // 改名单时它会**静默**留在原地（前端放行、后端拒收，或反过来）。
   // 名单里的多数格式（图片 / Office）上游只有散文声明、零成功记录 ⇒ 那一格在界面上标「未标定」。
-  if (name === null || name.trim() === '' || !isAcceptedMaterialFormat(name)) {
-    sendJson(res, 400, { ok: false, error: unsupportedMaterialFormatMessage() })
+  //
+  // ⚠️ **票 `upload-formats/01`：受理判定分两段，第一段只看名字。**
+  // 名单外的一律当场拒（不必把一个注定退回去的 500MB 请求体读进来）；但**通道外**那几档
+  // （今天只有 epub）要看到**字节**才能把「文件本身是坏 zip」与「这个格式云端不收」分开报——
+  // 前者要用户重新拿一份，后者要用户换一条路。所以那一档**不在这里拒**，往下走读到字节再判。
+  // 两段用的是**同一份**判据（`judgeMaterialFileIntake`，界面那次选文件也调它）。
+  const nameVerdict = judgeMaterialFileIntake({ name })
+  // 「这一档要不要看到字节才定得下来」只认判据自己声明的 `needsBytes`，⛔ 不在这里猜枚举
+  // （写成「状态不是这两档」的取反，加第五档时会把它静默归进「名字就能判」那一支）。
+  if (nameVerdict.needsBytes === false && nameVerdict.status !== MATERIAL_INTAKE.ACCEPTED) {
+    sendIntakeRejection(res, nameVerdict)
     return
   }
-  // 素材角色是**封闭五分类**（CONTEXT.md「素材角色」/ ADR-0023 决策 1）。原先这一格是裸取查询串：
-  // 同函数里 project 与 name 都有闸门，唯独角色没有——越界值原样落进材料清单，并原样流进阶段
-  // 任务说明里给 AI 的材料表，「分类法只有五个值」只由界面与一处事后过滤器保证，直连即可绕过。
-  // 白名单取 `ROLES`（唯一取值来源）而不写死五个字符串：规范集合日后变更，这道闸门自动跟随。
-  if (!ROLES.includes(role)) {
-    sendJson(res, 400, { ok: false, error: `非法的 role 参数（素材角色只认：${ROLES.join(' / ')}）` })
-    return
-  }
+  // ⚠️ **票 `pre-gold-build/02`：那一道 `role` 白名单闸门随参数一起退役**——上传接口不再收角色，
+  // 也就没有「越界角色直连绕过界面」这条口子（口径见这张票的 §6 第 7／8 行）。
   try {
     assertSessionOwned(project, sessionId)
   } catch (error) {
@@ -274,20 +322,38 @@ async function handleUpload(ctx, req, res) {
       sendJson(res, 400, { ok: false, error: '文件内容为空' })
       return
     }
+    // ⚠️ **第二段**（票 `upload-formats/01`）：拿到字节之后，同一份判据再判一次。
+    // 这一档只对**登记过的通道外格式**有意义（epub 的坏 zip）——受理格式不走这条，
+    // `judgeMaterialFileIntake` 对它们直接返回 ACCEPTED（要不要替 MinerU 先验容器是另一个决定）。
+    // 拒的时候**一个字节都不落盘**（票面验收②的隐含要求：被拒的那份不许留在 sources/ 里）。
+    const bytesVerdict = judgeMaterialFileIntake({ name, bytes })
+    if (bytesVerdict.status !== MATERIAL_INTAKE.ACCEPTED) {
+      sendIntakeRejection(res, bytesVerdict)
+      return
+    }
     writeFileSync(join(sourcesDir(project), safeName), bytes)
     // ⚠️ 状态改在 updateMeta 的改法里（当场新读）：上面 `await readRawBody` 期间可能已经有一笔
     // 记进了账本——原先拿着函数开头那份旧状态整份写回，会把账高打回读请求体之前的旧值，
     // 于是同一拍的下一次上传重号（真账本头六笔 source-added 序号全是 1，票 02）。
     let added = false
     let resent = false
+    // 这一趟是否**第一次**落那句材料声明（同一个勾选框连传多份，账上只留第一条）。
+    let declaredNow = false
     updateMeta(project, (state) => {
+      // ── 材料声明（票 `confirm-points-redesign-build/03`）────────────────────────────
+      // 用户在这一屏勾了它（界面没勾不许发上传），所以这一条账记的是**用户真的表过的态**。
+      // 只落一次：已经声明过的（`materialDeclaration` 在）不再重复落账。
+      if (declared === true && state.materialDeclaration === undefined) {
+        state.materialDeclaration = { at: Date.now(), by: 'user' }
+        declaredNow = true
+      }
       const sources = state.sources ?? []
-      // 幂等：同一文件名重复上传只更新角色，不再追加条目/事件。
+      // 幂等：同一文件名重复上传不再追加条目/事件（**也不再更新角色**——票 `pre-gold-build/02`
+      // 起这里一个字都不写角色：上传那一刻还没有角色，它由探查段开头的书级材料判定产出）。
       // 背景：客户端瞬时网络失败（Failed to fetch）时服务端已落盘，前端重传同一批文件；
       // 无幂等 → meta.sources 与 timeline 逐次重复（实测 4 文件 × 3 轮 = 12 条）。
       const existing = sources.find((source) => source.file === safeName)
       if (existing !== undefined) {
-        existing.role = role
         // 票 `mineru-formats/03`（ADR-0028 决策 3）的**「补传」那一半**：同一个名字再传一次，
         // 而那一格正是一个缺口（`failed`）⇒ 这是用户对这一份表过态「我补一份」，把它放回
         // `'pending'`，下一轮状态机真的会重转它（`failed` 自己不会被挑中重传，票 02）。
@@ -300,7 +366,9 @@ async function handleUpload(ctx, req, res) {
           resent = true
         }
       } else {
-        sources.push({ file: safeName, role, converted: 'pending' })
+        // ⚠️ **键缺席**（不是空串）：`role` 从此不由上传写面维护，⛔ 也不在这里补一个默认值
+        // ——那会把「一个事实两处」再长一次（口径见票 11 §6 第 7 行）。
+        sources.push({ file: safeName, converted: 'pending' })
         added = true
       }
       state.sources = sources
@@ -308,7 +376,20 @@ async function handleUpload(ctx, req, res) {
       // 补传的那一格是「待转」，不是「已转」——状态得让状态机能接上去（见下面那次 kick）。
       if (resent) state.status = 'running'
     })
-    if (added) appendEvent(project, 'textbook/source-added', { file: safeName, role })
+    if (added) appendEvent(project, 'textbook/source-added', { file: safeName })
+    // ── 票 `confirm-points-redesign-build/09`：**站 1 的「只提示人」那一档** ────────────────────
+    // 材料清单增了一件（＝站 1 原地改清单）：清单是**现读**的，没有可作废的产物 ⇒
+    // ⛔ 不归档、⛔ 不截账本、⛔ 不清 `meta`、⛔ 不把待办指回，只**多打一句**（spec §4.5 的两处例外之一）。
+    // ⚠️ 只在**真的多了一件**时打（重复上传／补传那一支的清单没变，那句话对它们不成立）。
+    if (added) appendEvent(project, 'textbook/hint', { text: STATION_VALUE_EDIT_HINT })
+    // 材料声明那条账（既有通道 `textbook/hint`，⛔ 不新开事件类型）：正文＝用户勾的那句话本身。
+    if (declaredNow) {
+      appendEvent(project, 'textbook/hint', {
+        text: '📋 材料声明已确认：只上传有权使用的材料；造出来的是教学参考，AI 可能讲错，使用前会请老师/家长复核。',
+        declaration: 'material-rights',
+        by: 'user',
+      })
+    }
     if (resent) appendEvent(project, 'textbook/hint', { text: `已补传《${safeName}》，正在重新转换这一份` })
     // 补传要**当场**接上状态机：用户点的是「补传这一份」，点完就该看着它重转，
     // 而不是还得再点一次「开始转换」才动（那就不是一个动作，是两步）。
@@ -317,7 +398,7 @@ async function handleUpload(ctx, req, res) {
     // （烧额度）。「有没有在跑」经 `isRunning` 取（票 `deep-module-scan/10`：原先两处各读一次
     //  `runners.has`、含义只活在各自的注释里；`runners` 本身仍导出，因为删书要清理它）。
     if (resent && ctx !== undefined && isRunning(project) === false) void kick(ctx, project)
-    sendJson(res, 200, { ok: true, project, file: safeName, role, resent })
+    sendJson(res, 200, { ok: true, project, file: safeName, resent })
   } catch (error) {
     const tooLarge = error?.code === BODY_TOO_LARGE
     sendJson(res, tooLarge ? 413 : 500, {
@@ -439,14 +520,22 @@ function handleDownload(req, res) {
   }
   try {
     assertSessionOwned(project, sessionId)
-    const target = resolve(projectDir(project), rel)
     const root = resolve(projectDir(project))
+    const target = resolve(root, rel)
     if (!isWithin(root, target)) {
       sendJson(res, 403, { ok: false, error: '路径越界' })
       return
     }
     if (!existsSync(target) || statSync(target).isDirectory()) {
       sendJson(res, 404, { ok: false, error: '文件不存在' })
+      return
+    }
+    // `rel` 来自 query（用户可造）而下面要 `readFileSync(target)`（读盘）⇒ 按落点协议必须第二道：
+    // 第一道只看名字，链接可以挂到书夹外；这条路由又没有 `productOpenMode` 白名单，
+    // 书夹里任何一件都能被读走，所以同一枚链接在这里的暴露面比 `/textbook/file` 更宽。
+    // ⚠️ 必须排在 `existsSync` 之后：target 已存在，`realpathSync` 才不抛。
+    if (!isWithin(realpathSync(root), realpathSync(target))) {
+      sendJson(res, 403, { ok: false, error: '路径越界' })
       return
     }
     // 下载文件名用「人定的书名」（如《初中数学·有理数》.md），保留用户敲定的命名。
@@ -473,20 +562,24 @@ function handleDownload(req, res) {
  * 渲染的是 `dsh-tool-ask-user`（工具名 `ask_user_question`）的 schema。答案**本来留痕了**，
  * 只留在宿主会话档案里；书账本里查不到，那才是这一票要补的通路。
  *
- * **为什么是新端点而不是新动作**：契约面动作目录（`src/contract-actions.js`）的 45 个规范动作里
+ * **为什么是新端点而不是新动作**：契约面动作目录（`src/contract-actions.js`）的 <!--r:catalog.canonical-->53<!--/r--> 个规范动作里
  * 没有任何一个的语义是「记下用户答了什么」——硬套 `intervene`（留言）会让账本说「稍后处理」，
  * 而用户答完那一刻 AI 正在等这个答案，说法就是假的。动作身份归目录，目录不归本票改。
  *
- * **为什么复用 `textbook/hint` 这个事件类型**：新增事件类型要同时动 `EVENT_TYPES`、
- * `EVENT_META` 与 `logEntryText` 三处，后两处在 `src/domain-rules.js` 与 `src/workflow/engine.js`
- * 上，不在本票可改面内；而 `hint` 正是仓里登记的「碎语」通道（docs/协作模型.md §2.8 表 B 多处复用），
- * 语义就是「随手记一句、不产出文件」。结构化的 `question` / `answers` 一并写进 data，
- * 机器产物 `timeline.jsonl` 里查得到——**不靠人读文本还原那次选择**。
+ * **为什么作答那一档复用 `textbook/hint` 这个事件类型**：`hint` 正是仓里登记的「碎语」通道
+ * （docs/协作模型.md §2.8 表 B 多处复用），语义就是「随手记一句、不产出文件」。结构化的
+ * `question` / `answers` 一并写进 data，机器产物 `timeline.jsonl` 里查得到——**不靠人读文本
+ * 还原那次选择**。
+ *
+ * ⚠️ **「读不到答案」是另一档、另一条事件**（票 `dsh-contract-drift/09`）：body 带
+ * `unread: true` 时客户端已确认那张卡结算了，只是按 `callId` 从读面回读读不到——这一档落
+ * `textbook/question-unrecorded`（正文写明「需要重新问用户」），⛔ **不落 hint**；否则账本上
+ * 会多一笔「（没有勾选）」的假话。
  *
  * ⚠️ 发生时刻由 `appendEvent` 打在事件上（服务端时间）：浏览器不另带一个自己的时刻来，
  * 与「新鲜度是服务端事实」同一条纪律。
  *
- * POST /textbook/question?session=&project= （body: { key, questions, answers }）
+ * POST /textbook/question?session=&project= （body: { key, questions, answers, unread? }）
  */
 async function handleQuestion(req, res) {
   let body
@@ -527,6 +620,21 @@ async function handleQuestion(req, res) {
     const asked = questions
       .map((item) => (typeof item?.header === 'string' && item.header.trim() !== '' ? item.header.trim() : item?.question))
       .filter((text) => typeof text === 'string' && text.trim() !== '')
+    // 票 `dsh-contract-drift/09`：「读不到答案」与「一次作答」是**两档**，账上不许混。
+    // `unread === true` 时客户端已确认那张卡结算了、只是按 `callId` 从读面回读读不到——
+    // 这一档**不落 hint**（否则账本上多一笔「（没有勾选）」的假话），落它自己那条
+    // `textbook/question-unrecorded`，正文写明「需要重新问用户」。
+    if (body.unread === true) {
+      const key = typeof body.key === 'string' ? body.key : ''
+      appendEvent(project, 'textbook/question-unrecorded', {
+        text: questionUnrecordedText(asked),
+        question: asked,
+        key,
+        source: 'ask_user_question',
+      })
+      sendJson(res, 200, { ok: true, project })
+      return
+    }
     const picked = answers.flatMap((answer) => [
       ...(Array.isArray(answer?.selected) ? answer.selected : []),
       ...(typeof answer?.custom === 'string' && answer.custom.trim() !== '' ? [answer.custom] : []),
@@ -576,6 +684,26 @@ const HANDLER_OF_FAMILY = new Map([
 const ACTION_FAMILY_OF = buildActionFamilyTable(HANDLER_OF_FAMILY)
 
 
+/**
+ * **会落拍板结论**的动作（票 `decision-provenance/01` D3=A）：只有这几个动作需要先落一条
+ * 「人工动作事件」，动作族才知道「这一下是不是人点的」。
+ *
+ * ⚠️ 名单**不在这里第二个地方手抄**：唯一声明面是 `src/contract-actions.js` 里那几行
+ * `writesStationDecision: true`（`listStationDecisionActions()`）。理由不只是「少抄一份」——
+ * 收口票把本票合进 main 时，原先这里手写的那五个名字当场让
+ * `test-contract-action-catalog.mjs` 的「整个 src/ 里没有第二份动作名清单」变红（票 05 的闸）；
+ * 而那张手写表与目录一旦分家，表现是「新加一条会落结论件的动作却忘了登记 ⇒ 人点被降级成 machine」
+ * ——⛔ 不许靠「记得两处同改」。
+ */
+const STATION_DECISION_ACTIONS = new Set(listStationDecisionActions())
+
+/** 需要落「人工动作证据」的动作：站结论动作 ＋ `rollback`。
+ *  票 `flow-audit-2026-10/06`：回退不是站结论（不写 `决策/NN.json`），但它同样是人的动作，
+ *  账上要能记「谁点的」⇒ 给它同一份 `textbook/hint` 证据（`machine:'human-action'`），
+ *  ⛔ 不因此伪造一份结论件。 */
+const HUMAN_ACTION_EVIDENCE_ACTIONS = new Set([...STATION_DECISION_ACTIONS, 'rollback'])
+
+
 /** POST /textbook/action 动作分发 —— **HTTP adapter**（读流、限体、写响应）。
  *  判据全在下面那个 `dispatchAction` 里，这里只负责传输那一层。 */
 async function handleAction(ctx, req, res) {
@@ -593,7 +721,21 @@ async function handleAction(ctx, req, res) {
   // （`test-material-gap-stance.mjs` 直接 import flushMeta 7 处，那条路径不经 HTTP）。
   // ⚠️ `reply === undefined`＝这个族没有这个动作的 case：照旧什么都不写
   // （今天 handler 掉出 switch、socket 挂着；改成回 400 是行为变化）。
-  const reply = await dispatchAction(ctx, body)
+  // ── 票 `decision-provenance/01` D3=A：**工作台通道**发来的「会落结论件」的动作，先落一条
+  // 人工动作事件，再把它的 eventId／at 交给动作族。⛔ 这条证据只由本 adapter 产（AI 的
+  // `agent-tool` 不走这里），所以「谁拍的」第一次在账上分得开。
+  // ⚠️ 证据落账失败**不许**拖垮动作本身（结论件仍会落，但如实降级成 machine）。
+  let humanEvent = null
+  const humanSession = sessionOf(body?.session)
+  if (req.headers?.['x-textbook-actor'] === 'human'
+    && humanSession !== null
+    && typeof body?.action === 'string'
+    && HUMAN_ACTION_EVIDENCE_ACTIONS.has(body.action)
+    && typeof body?.project === 'string'
+    && PROJECT_ID_RE.test(body.project)) {
+    try { humanEvent = appendHumanActionEvent(body.project, body.action, humanSession) } catch { humanEvent = null }
+  }
+  const reply = await dispatchAction(ctx, body, humanEvent)
   // 「实际有什么」那一份：**机器每次动作扫盘写回**登记（票 `context-budget/10`）。
   // ⚠️ 写在动作漏斗这一层而不是读通道：工作台 2 秒轮询一次 `/textbook/process`，
   // 放读通道等于每两秒写一次盘。⚠️ 只在有书且动作真落过盘时才扫；被拒的请求（400/409）
@@ -625,9 +767,11 @@ async function handleAction(ctx, req, res) {
  *
  * @param {object} ctx 宿主上下文（与 `apply(ctx)` 收的是同一个形状）。
  * @param {{action:string, session?:string, project?:string}} request 解析后的请求体本体。
+ * @param {{eventId:string, at:string}|null} [humanEvent] 本 adapter 刚落下的人工动作事件
+ *   （票 `decision-provenance/01`；只有工作台通道会带，AI 通道恒为 null）。
  * @returns {Promise<{status:number, json:object}|undefined>}
  */
-async function dispatchAction(ctx, request) {
+async function dispatchAction(ctx, request, humanEvent = null) {
   const body = request ?? {}
   const { action, project } = body
   const sessionId = sessionOf(body.session)
@@ -642,7 +786,7 @@ async function dispatchAction(ctx, request) {
     return { status: 400, json: { ok: false, error: `未知动作: ${action}` } }
   }
   try {
-    const reply = await runAction(family, { ctx, action, sessionId, project, body })
+    const reply = await runAction(family, { ctx, action, sessionId, project, body, humanEvent })
     // 与 handleAction 同一句：没有这个 case 就照旧什么都不写（这里返回 undefined）。
     return reply
   } catch (error) {
@@ -694,6 +838,15 @@ function handleEvents(req, res) {
       goldMeasuredChapter,
       goldMeasuredHanzi,
       canEditTargetWords: canEditTargetWords(meta),
+      // 站 8／9 由**账本折出**（票 `confirm-points-redesign-build/08`，照关卡 `foldGate` 那一档
+      // 先例）：⛔ **不加新的 `awaiting-*` 值**——`awaiting-gold` 照旧一个值覆盖两站，
+      // 「这一稿行不行拍过没有／体量拍过没有」只由 `工作区/决策/08.json`／`09.json` 在不在 ＋
+      // 它的 `approved` 说话（唯一写点＝`decision-record.recordStationDecision`）。
+      // ⚠️ 形状**落在 `metaView` 里**（不是 payload 顶层）是**有意的**：payload 顶层多一个键会
+      // 改动 `workbench-projection` 的 core 形状，而画廊形状闸逐份夹具比那一份键集——
+      // 加顶层键＝几十份夹具一次性漂（而夹具只许在主树上由人重录）。`metaView` 里
+      // `canEditTargetWords` 正是同一条路的既有先例（同样是派生事实）。
+      stationDecisions: stationDecisionsOf(project),
     }
     // 章节状态：每章写好/自查好的徽章（UI 与 AI 都用）。
     // 票 14（界面数字同源）：`done` 直接问**闸门那一份判据**（engine 的 chapterDone：两份产物在
@@ -703,12 +856,19 @@ function handleEvents(req, res) {
     const chapterStatus = chapters.map((chapter, index) => {
       const n = index + 1
       const { chapterPath, auditPath } = chapterArtifacts(project, n)
+      const written = existsSync(chapterPath)
+      // 票 `word-budget-ineffective/02`：章节面板要显示「兜底/实际」。
+      // 读数由 `engine.chapterWordReading` 单点给出（与交工闸门、交付清单同一份实现）：
+      // 兜底没填过 ⇒ `null`（不凭空造 6000），正文不在 ⇒ `actualHanzi: null`（不写 0）。
+      // 超了不判、不涂红——预算的语义是「至少要有这么多」，不是上限。
+      const wordReading = chapterWordReading(project, n, meta)
       return {
         n, title: chapter.title ?? `第${n}章`,
         source: chapter.source ?? '', targetWords: chapter.targetWords ?? null,
+        wordsFloor: wordReading.wordsFloor, actualHanzi: wordReading.actualHanzi,
         // written/audited 保留为「产物在不在」的原义（界面用它区分「执笔中 / 写好了审计中 / AI 复核中」）；
         // done 才是闸门口径的「这一章算完成了」（客户端改用 done 后，两个数字必然一致）。
-        written: existsSync(chapterPath), audited: existsSync(auditPath),
+        written, audited: existsSync(auditPath),
         done: chapterDone(project, n),
       }
     })
@@ -717,11 +877,20 @@ function handleEvents(req, res) {
     // 知识地图原文：机器产物，但人读形态是**卡片内联**折叠清单（ADR-0010 决策 2 / 票 05），
     // 故随事件一起下发，不再让前端走 /textbook/file——那条路由按「给人读的产物」收窄后
     // 拒绝机器产物（票 04）。文件不在/读不到时为 null（前端回退成一句可读说明）。
+    //
+    // ⚠️ 票 `graph-read-one-answer/04`：原文与那三格读数出自**同一次**读，读侧只问
+    // `readMergedMap`（票 01 的窄出口）——⛔ 这里不再自己 `readFileSync ＋ JSON.parse`
+    // （这一处是候选卡片 `files` 清单漏掉的第六份手搓读盘）。口径随窄出口：
+    // **严格 JSON 对象，否则算没有**。
+    // ⚠️ **行为修正**（不是重构）：盘上是 `[]`／`42` 时窄出口答 `map === null` ⇒
+    // `exploreSummary` 也是 `null`，界面走「读不到」那一支；今天 `JSON.parse` 会成功、
+    // `Array.isArray(km.knowledgePoints)` 是 false ⇒ 界面看到一张「0 个知识点」的假图。
     let knowledgeMap = null
-    try {
-      const kmText = readFileSync(workFile(project, 'knowledge-map.json'), 'utf8')
-      knowledgeMap = kmText
-      const km = JSON.parse(kmText)
+    // 原文那一格**逐字**照抄盘上（⛔ 不顺手 `JSON.stringify` 重排一遍）；件不在 ⇒ `null`。
+    const mergedMap = readMergedMap(project)
+    knowledgeMap = mergedMap.text
+    if (mergedMap.map !== null) {
+      const km = mergedMap.map
       const converted = (meta.sources ?? []).filter((source) => convertedState(source) === 'ok').length
       exploreSummary = {
         sources: converted,
@@ -729,7 +898,7 @@ function handleEvents(req, res) {
         chapterSuggestion: Array.isArray(km.chapterSuggestion) ? km.chapterSuggestion.length : 0,
         teachingFocus: Array.isArray(km.teachingFocus) ? km.teachingFocus.slice(0, 5) : [],
       }
-    } catch { exploreSummary = null }
+    }
     // 章节安排原文（`工作区/outline.md`）：**内容是机器 JSON**，判 `'inline'` 不开右栏
     // （票 pipeline-wiring-gaps/09），人读形态是阶段页第 3 阶段那张就地折叠清单
     // （`machine-product-folds.foldOutline`）。同知识地图：随事件一起下发，文件读不到时为 null。
@@ -737,6 +906,24 @@ function handleEvents(req, res) {
     try {
       outlineText = readFileSync(workFile(project, 'outline.md'), 'utf8')
     } catch { outlineText = null }
+    // 那份**人的裁决产物**（`工作区/knowledge-map-exclusions.json`，票 `knowledge-graph-build/09`）的原文：
+    // 「图上划掉的那些卡」的唯一归属处。⚠️ 它不经 `/textbook/file`——那条路由只放行
+    // `productOpenMode === 'preview'` 的产物，而这份件**不在任何产物族里**（它是一件人的裁决记录，
+    // 见 `domain-rules.SWEEP_EXCLUDED` 那一条）⇒ 与 knowledgeMap／outline 同一条路：随 payload 下发，
+    // 界面（两张确认卡）据此把「留下的集合」算出来。文件不在／读不到时为 null（＝这本书上还没有裁决）。
+    let knowledgeMapExclusions = null
+    try {
+      knowledgeMapExclusions = readFileSync(workFile(project, KNOWLEDGE_MAP_EXCLUSIONS_FILE_NAME), 'utf8')
+    } catch { knowledgeMapExclusions = null }
+    // 票 `reader-cognition-boundary-build/09`：书夹里那份**回卷原件**（`工作区/读者情况回卷.md`）的原文，
+    // 与上面那一份同一条路下发（不经 `/textbook/file`——那条路由只放行 `productOpenMode === 'preview'`，
+    // 而这份件按人的输入原样躺着，判 `machine`）。它是站 2 那一栏「缺口」的**唯一新输入**：
+    // 缺口读数从它 ＋ 合并件的 `readerSlices` ＋ 剔除记录**现算**（⛔ 不落第二份、⛔ 不落 `meta` 键）。
+    // 文件不在／读不到时为 `null` ＝「这本书还没有回卷」——那时那一栏整块不渲染（没有可报的缺口）。
+    let readerQuestionnaireReturn = null
+    try {
+      readerQuestionnaireReturn = readFileSync(workFile(project, READER_QUESTIONNAIRE_RETURNED_FILE_NAME), 'utf8')
+    } catch { readerQuestionnaireReturn = null }
     // 当前范例章的**检查记录原文**（`工作区/audit-NN.md`）：同样是「机器产物但有人读」——
     // 内容是**严格 JSON**，`productOpenMode` 判 `'machine'`（ADR-0010 决策 2），所以
     // `/textbook/file` 对它是**明确 403**（那条路由只放行 `'preview'`）。
@@ -750,27 +937,13 @@ function handleEvents(req, res) {
     // ⚠️ 文件名形状与 `:901`／`:928` 那两处逐字同款（`audit` 族同一个补两位序号契约）。
     let goldAudit = null
     try {
-      goldAudit = readFileSync(workFile(project, `audit-${String(goldMeasuredChapter).padStart(2, '0')}.md`), 'utf8')
+      goldAudit = readFileSync(workFile(project, auditName(goldMeasuredChapter)), 'utf8')
     } catch { goldAudit = null }
     // 金标准稿版本（谈判桌页签数据）：_旧版产物 里按时间戳升序的旧稿；当前稿号 = 旧稿数 + 1。
-    let goldDrafts = []
-    try {
-      const archiveDir = join(workDir(project), '_旧版产物')
-      if (existsSync(archiveDir)) {
-        // 归档旧稿的文件名是**基名**加时间戳后缀（`chapter-NN.md.<stamp>`）⇒ 序号取 `chapterName`。
-        // ⚠️ **两处形状陷阱**，都踩过（改这一行前先读）：
-        //   ① `chapterName` 返回的是**文件名**、不是正则片段——里面那个 `.` 不转义的话，
-        //      `chapter-07Xmd.abc` 也会被认成一份旧稿（原来手写模板里的 `\\.` 正是这个转义）；
-        //   ② 它**已经含 `.md`**，所以后面只能接 `\\.` + 时间戳，再写一次 `\\.md` 会变成
-        //      `chapter-07\.md\.md\.…`，于是**一份旧稿都认不出来**（`_旧版产物` 整族静默失效）。
-        // `String.replace` 只换第一处，而 `chapter-NN.md` 里恰好只有一个 `.`——改形状时要重新核这一句。
-        const goldRe = new RegExp(`^${chapterName(goldN(meta)).replace('.', '\\.')}\\.([0-9a-z]+)$`)
-        goldDrafts = readdirSync(archiveDir)
-          .flatMap((name) => { const m = goldRe.exec(name); return m === null ? [] : [{ name, at: parseInt(m[1], 36) }] })
-          .sort((a, b) => a.at - b.at)
-          .map((d, i) => ({ version: i + 1, path: `工作区/_旧版产物/${d.name}`, at: d.at }))
-      }
-    } catch { goldDrafts = [] }
+    // ⚠️ 票 `confirm-points-redesign-build/08`：这一段（连同下面那个正则的两条陷阱）收进
+    // `engine.goldDraftVersionOf`——站 8 的结论件要写同一个「第几稿」，⛔ 不许有第二份实现。
+    const goldDrafts = goldDraftsOf(project, meta)
+    const goldDraftVersion = goldDraftVersionOf(project, meta)
     sendJson(res, 200, {
       ok: true, project, after, events, meta: metaView,
       dir: projectDir(project),
@@ -787,6 +960,8 @@ function handleEvents(req, res) {
       goldDraftVersion: goldDrafts.length + 1,
       exploreSummary,
       knowledgeMap,
+      knowledgeMapExclusions,
+      readerQuestionnaireReturn,
       outline: outlineText,
       goldAudit,
     })
@@ -795,6 +970,65 @@ function handleEvents(req, res) {
   }
 }
 
+
+/**
+ * 站 8／9 的**账本折出**（票 `confirm-points-redesign-build/08`）：`工作区/决策/NN.json`
+ * 在不在 ＋ 它的 `approved` —— 界面据此判断「这一稿行不行拍过没有」（站 8）与「体量拍过没有」
+ * （站 9）。⛔ 没有那份件就**不长这个键**（不是填 `null`：`in` 一测就知道「没拍过」）。
+ *
+ * ⚠️ **我的枚举面比现实窄在哪里**：只折**这两站**（站 8／9 是这张票的射程）；
+ * 站 2／3 的结论件今天还没有生产写点，等它们落地时这张表要跟着扩——
+ * 界面上「没这个键」一律读成「没拍过板」，所以漏一站的表现是**那一站永远不会被认为拍过**，
+ * 不会误判成拍过（宁可拦着，也不放行）。
+ */
+function stationDecisionsOf(projectId) {
+  const out = {}
+  for (const station of [8, 9]) {
+    // 票 `decision-provenance/01` D2=A：展示口径**先 apply 纠偏**（原文件字节不动）。
+    const record = readEffectiveStationDecision(projectId, station)
+    if (record === null) continue
+    out[station] = {
+      approved: decisionApproved(record),
+      version: Number.isFinite(record.version) ? Number(record.version) : 1,
+      decidedAt: typeof record.decidedAt === 'string' ? record.decidedAt : '',
+      // 票 `decision-provenance/01` D1=A：界面逐站显示「谁拍的」（人／机／纠偏）。
+      decidedBy: record.decidedBy === 'human' ? 'human' : 'machine',
+      autoSkipped: record.autoSkipped === true,
+      skipReason: typeof record.skipReason === 'string' ? record.skipReason : '',
+      provenanceCorrected: record.provenanceCorrected === true,
+      provenanceText: stationProvenanceText(record),
+    }
+  }
+  return out
+}
+
+/**
+ * 一条结论件的**人读出处**（票 `decision-provenance/01`）：界面只拿这一个字符串，⛔ 不自己
+ * 从 `decidedBy`／`autoSkipped` 再拼第二套说法（那会让「纠偏」的展示口径与服务端分家）。
+ *
+ * ⚠️ 只服务站 8／9（`stationDecisionsOf` 今天折的这两站）；站 2／3／4 没有回放面板，
+ * 它们的出处仍只在 `工作区/决策/NN.json` 与纠偏文件里可查。
+ */
+function stationProvenanceText(record) {
+  if (record?.provenanceCorrected === true) {
+    const reason = record.provenanceFix?.reason
+    // 纠偏的目标值可能是 human 也可能是 machine（`corrected` 是显式给的），⛔ 不把两种都写成
+    // 「机器自动跳过」——那句只在 corrected==='machine' 时成立。
+    const corrected = record.decidedBy === 'human' ? '人拍' : '机器自动跳过'
+    return `本站被纠偏：${corrected}${typeof reason === 'string' && reason !== '' ? `（${reason}）` : ''}`
+  }
+  if (record?.decidedBy === 'human') {
+    return typeof record.eventId === 'string' && record.eventId !== ''
+      ? `本站由人拍板（事件 ${record.eventId}）`
+      : '本站由人拍板'
+  }
+  if (record?.autoSkipped === true) {
+    return typeof record.skipReason === 'string' && record.skipReason !== ''
+      ? `本站由机器自动跳过（${record.skipReason}）`
+      : '本站由机器自动跳过'
+  }
+  return '本站由机器记录'
+}
 
 /**
  * 盘上产物事实：与 artifacts 并行下发，stat 失败只省掉这一份事实。
@@ -913,8 +1147,9 @@ function buildProcessMap(projectId) {
     status: goldDone ? 'done' : (meta.status === 'awaiting-gold' ? 'waiting-user' : (phase >= 4 ? 'active' : 'pending')),
     // ⚠️ 产物清单里的路径是**书夹相对路径**（`existsRel` 自己 join 书夹根），所以取 `chapterRel`
     // 而不是 `chapterName`——后者是基名，喂进去 `existsRel` 会去书夹根找 `chapter-NN.md`。
-    // `工作区/audit-NN.md` 是 `audit` 族的同款契约（同一个补两位序号），本票只收本章正文那一族。
-    artifacts: ['工作区/style-spec.md', chapterRel(goldNn), `工作区/audit-${String(goldNn).padStart(2, '0')}.md`].filter(existsRel),
+    // `工作区/audit-NN.md` 是 `audit` 族的同款契约（同一个补两位序号）⇒ 取 `auditRel`，
+    // 与上面 `chapterRel` 是同一条纪律（票 `context-budget/18` 复核 findings ⑥ 收掉这里的手拼）。
+    artifacts: ['工作区/style-spec.md', chapterRel(goldNn), auditRel(goldNn)].filter(existsRel),
     decision: meta.goldSealed == null ? undefined : { version: meta.goldSealed.version, approved: true, note: '已定稿为最佳范例章' },
     redoNote: meta.goldRedoNote ?? null,
   })
@@ -941,7 +1176,7 @@ function buildProcessMap(projectId) {
       stage: stageN,
       // 票 nav-vs-preview/01：只随过程图谱给人读摘要；原始机器 JSON 仍不开右栏。
       auditSummary: readChapterAuditSummary(projectId, n),
-      artifacts: [chapterRel(n), `工作区/audit-${String(n).padStart(2, '0')}.md`].filter(existsRel),
+      artifacts: [chapterRel(n), auditRel(n)].filter(existsRel),
     })
   })
   push({
@@ -965,13 +1200,19 @@ function buildProcessMap(projectId) {
     artifacts: existsRel('工作区/book.md') ? ['工作区/book.md'] : [],
   })
   // 影响预告数据：每段的深改影响范围（下游段 keys / 会被归档的现存产物 / 是否可深改）。
-  // demo 书不开放定点修改（canDeepModify=false，走旧全自动通道）。
+  // ⚠️ 票 `demo-channel-full/17`（维护者 2026-10-15 拍板「入口可见 ＋ 点了给明确告知」）：
+  // 这一行**原先还带着** `&& meta?.demo !== true`——演示书上「定点修改」整颗键不出，用户在演示通道里
+  // 看不见本方法最重的那件他能动的事。现在**入口这一半不再分叉**：演示书与真书同一处（同一张卡、
+  // 同一个 `modify` 目标）渲染那颗键。
+  // ⛔ 别把这一格读成「演示书也能深改」：`canDeepModify` 说的是「这一步在这本书上**够得着**」，
+  // 真去重做下游仍然只有动作层说了算——演示书那一条 409 一个字没放宽（`actions/deep-modify.js`，
+  // 文案已改成人话）。要分辨「这书是不是演示书」看 `meta.demo`，⛔ 不看这一格。
   for (const seg of segments) {
     seg.artifactFacts = buildArtifactFacts(projectId, seg.artifacts)
     const affected = deepAffected(projectId, meta, seg.key)
     seg.downstream = affected === null ? [] : affected.downstream
     seg.redoFiles = affected === null ? [] : affected.files.filter((rel) => existsSync(join(projectDir(projectId), rel)))
-    seg.canDeepModify = affected !== null && meta?.demo !== true
+    seg.canDeepModify = affected !== null
   }
   return segments
 }
@@ -1008,7 +1249,19 @@ async function handleProcess(ctx, req, res) {
     // 而兼容层把「少东西」藏起来比不兼容更坏。空数组是常态（不是新书一律老书），恒定在场。
     let legacyDirs = []
     try { legacyDirs = legacyDirConflicts(project) } catch { /* 派生事实读不出就当没有 */ }
-    sendJson(res, 200, { ok: true, project, segments: buildProcessMap(project), shape, legacyDirs })
+    sendJson(res, 200, {
+      ok: true,
+      project,
+      segments: buildProcessMap(project),
+      // 票 `flow-audit-2026-10/06`：回退必须在 `/textbook/process` 这一屏也读得到——不只是账本与
+      // 《过程记录.md》。这一段是**只读投影**（`{...data, seq, at}`），界面今天不消费它，但
+      // 「曾写到第五章又退回去」这件事在这一屏有了机器可读的位置。
+      rollbacks: readEvents(project)
+        .filter((event) => event?.type === 'textbook/rollback')
+        .map((event) => ({ ...(event.data ?? {}), seq: event.seq, at: event.time })),
+      shape,
+      legacyDirs,
+    })
   } catch (error) {
     sendJson(res, 500, { ok: false, error: String(error instanceof Error ? error.message : error) })
   }
@@ -1028,7 +1281,12 @@ function handleProjects(req, res) {
 
 
 /**
- * GET /textbook/settings —— 全局设置快照（客户端只用它渲染 Token 卡与**上传前那道预检**）。
+ * GET /textbook/settings —— 全局设置快照（客户端用它渲染 Token 卡与**上传前那道预检**）。
+ *
+ * 票 `token-banner/01`（D③=A）：`mineruTokenSet` **不再只读 settings 文件**——它问
+ * `mineruTokenStatus()`，与 `resolveMineruToken` 同一条读序（settings → env → credentials）。
+ * 同时下发 `mineruTokenSource`（`settings` / `env` / `credentials`）与 `mineruTokenMasked`
+ * （脱敏值，⛔ 不明文），界面据此说「来源：设置 / 环境变量」。
  *
  * 票 10：`autoSplitAvailable` 是**本机的事实**（有没有 Python + PyMuPDF），由 `mineru-lib` 的
  * 探针真探一次给出；**探针是惰性缓存的**，所以第一次要付一次子进程的开销（最坏 15 秒超时），
@@ -1037,11 +1295,13 @@ function handleProjects(req, res) {
  */
 async function handleSettings(_req, res) {
   try {
-    const settings = readSettings()
+    const token = mineruTokenStatus()
     sendJson(res, 200, {
       ok: true,
       settings: {
-        mineruTokenSet: typeof settings.mineruToken === 'string' && settings.mineruToken !== '',
+        mineruTokenSet: token.configured,
+        mineruTokenSource: token.source,
+        mineruTokenMasked: token.masked,
         autoSplitAvailable: await autoSplitAvailable(),
       },
     })
@@ -1068,7 +1328,7 @@ function allProjectIds() {
  *  三步顺序属于领域知识；apply 只保留延迟时机策略（setTimeout），测试可直接调用本函数直测。 */
 export function startupRecovery(ctx) {
   backfillProcessLogs()
-  processRedoMarks()
+  processRedoMarks(ctx)
   resumeRunning(ctx)
 }
 
@@ -1135,8 +1395,18 @@ function backfillProcessLogs() {
 }
 
 
-/** 重做标记：书夹里存在 .redo 时，重启后先重置（清产物 → 回源探查）再续跑。 */
-function processRedoMarks() {
+/**
+ * 重做标记：书夹里存在 .redo 时，重启后先重置（清产物 → 回源探查）再续跑。
+ *
+ * ⚠️ 票 `depth-review-2026-10/04`：这一步原先也是「尽力归档 ＋ 静默 catch」——**第 5 条静默点**
+ * （票面完全没列，由维护者 2026-10-06 签字纳入射程）。旧产物搬不走时，下面照样把 `phase` 打回 2、
+ * 清掉 `outline`、并把 `.redo` 标记移走：用户看到的是一本被「重置」过的书，而 `工作区/explore.md`
+ * 原封不动躺在原位 ⇒ 下一轮 `runPhase2` 见到产物还在直接短路 ⇒ **「重启一次就悄悄放过」**。
+ * 现在它走与另外五条路径**同一个**判据（`archiveWorkArtifacts`）：任一件没搬走就**整本跳过**
+ * ——状态一个字不改、`.redo` 标记也留着（下次启动再试一次），并在宿主日志里点名是哪几件。
+ * 这一条没有 HTTP 回包可回 409，「响」＝不推进 ＋ 标记滞留 ＋ 日志点名（用户可见的是书没被悄悄重置）。
+ */
+function processRedoMarks(ctx) {
   // trash 目录真实部署里由首次删书（trashProject）创建；全新安装从未删书时不存在，
   // 不先建目录则 moveAcrossDevices 的 renameSync 对缺失父目录抛 ENOENT（非 EXDEV 不降级），
   // 被外层 catch 静默吞掉 → .redo 滞留书夹，下次重启再触发一次全量重置（workflow-seams/02）。
@@ -1150,15 +1420,15 @@ function processRedoMarks() {
       if (!existsSync(mark)) continue
       const workDirPath = workDir(id)
       if (existsSync(workDirPath)) {
-        const archive = join(workDirPath, '_旧版产物')
-        mkdirSync(archive, { recursive: true })
-        const stamp = Date.now().toString(36)
-        for (const name of readdirSync(workDirPath)) {
-          if (name === '_旧版产物') continue
-          if (name === 'explore.md' || /^chapter-\d+\.md$/.test(name) || /^audit-\d+\.md$/.test(name)
-              || name === 'book.md' || name === 'style-spec.md' || name === 'outline.md') {
-            try { renameSync(join(workDirPath, name), join(archive, `${name}.${stamp}`)) } catch { /* 尽力归档 */ }
-          }
+        // 名单是**现场枚举**出来的（与另外五条路径写死名单不同：这一步要清的正是「盘上这一堆」），
+        // 归档与保留策略都交给 engine 那一份原语——本文件不再内联任何 renameSync。
+        const names = readdirSync(workDirPath).filter((name) =>
+          name === 'explore.md' || /^chapter-\d+\.md$/.test(name) || /^audit-\d+\.md$/.test(name)
+          || name === 'book.md' || name === 'style-spec.md' || name === 'outline.md')
+        const archived = archiveWorkArtifacts(id, names)
+        if (archived.misses.length > 0) {
+          ctx.logger.warn(`[textbook-workflow] 重置重做没有生效（${id}）：${archived.misses.join('、')} 没能归档、还留在原位；状态与 .redo 标记都保持原样，下次启动再试一次`)
+          continue
         }
       }
       const meta = readMeta(id)

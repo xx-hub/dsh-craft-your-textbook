@@ -11,6 +11,54 @@ export function formatTime(time) {
 	return new Date(time).toLocaleTimeString("zh-CN", { hour12: false });
 }
 
+// ── 兜底出口 `fallbackWord`（票 `ui-systematic-fixes/02` · spec 实现决策 §1·3、§2）──────────
+//
+// 每一张「机器值 → 人话」的表都要回答同一个问题：**表里没有这个值时说什么**？在此之前这个
+// 答案被抄了 7 遍（意见 kind 6 处、意见状态 1 处），一律是 `表[值] ?? 值`——而那一条恰恰是错的：
+// 它把**闭集里漏登记**的值原样印到屏上。同一个未登记的 kind 甚至两条相反取向并存
+// （章节卡整格不出、谈判桌原样露机器词），矛盾就长在这 7 份副本里（spec §2 的判据）。
+//
+// 处置：兜底方向**只在这里决定**，按「这个值是谁产的」分两条路（spec §2）：
+//   · `FALLBACK_CLOSED`（缺省）＝**闭集**（`status`／`outcome`／`kind`／`gate.status`，值由本仓
+//     代码产生）未登记 ⇒ **不印**（返回 `null`）。表漏了是 bug、不是「猜不出来」，由
+//     `test-wording-invariants.mjs` 的 G3 逐表报红（票 `ui-systematic-fixes/02`）。
+//   · `FALLBACK_FREE`＝**自由文本**（AI 拼的 label、旧账本里的标签）译不出 ⇒ **原样返回**；
+//     既有裁定「宁可露出机器词，也不猜错」一个字不动（`stageLabelHuman`／`stageHuman`／
+//     `eventHuman`／`checkHuman` 这一档都走它，行为保持）。
+//
+// ⚠️ **「唯一形态」这句话的边界**：本函数让「查表 → 表里没有」这件事只剩一处（不写
+// `表[值] ?? 值`，改用 `Object.hasOwn` 判定）；判据扫的是 `src/ui/**` 里那一个形态 ＋ 一张
+// **带理由**的豁免表（回放域那份有意措辞不同的短动词表）。**不是**「所有兜底都只有一份」：
+// 兜底值不是原值的那些（`PHASE_UI[n] ?? ""`、`分段标题 ?? segmentHuman(seg)`）各有自己的语义，
+// 不在这个接缝上。
+
+/** 闭集（值由本仓代码产生）：未登记 ⇒ **不印**（`null`）。缺省方向。 */
+export const FALLBACK_CLOSED = "closed";
+/** 自由文本（AI 拼的 label、旧账本标签）：未登记 ⇒ **原样返回**。 */
+export const FALLBACK_FREE = "free";
+
+/**
+ * 兜底出口：查 `表[机器值]`，查不到时按**兜底方向**回。
+ *
+ * 只认**自有键**（`Object.hasOwn`）：原型链上的 `constructor`／`toString` 不算「登记过」，
+ * 否则一个未登记的值会从表上漏一个函数到屏上。
+ *
+ * @param {Record<string, string>} map 机器值 → 人话（表里只许登记本仓代码真会产生的值）
+ * @param {unknown} value 机器值
+ * @param {string} [orientation] 兜底方向（缺省 `FALLBACK_CLOSED`；自由文本传 `FALLBACK_FREE`）
+ * @returns {string|null|undefined} 句子 ／ 闭集未登记时的 `null` ／ 自由文本未登记时的原值
+ */
+export function fallbackWord(map, value, orientation = FALLBACK_CLOSED) {
+	const registered =
+		map !== null &&
+		typeof map === "object" &&
+		value !== null &&
+		value !== undefined &&
+		Object.hasOwn(map, value);
+	if (registered) return map[value];
+	return orientation === FALLBACK_FREE ? value : null;
+}
+
 // ── 「多久没动静」的共用判定（票 stale-detection/01）──────────────────────────
 //
 // 拍板（`.scratch/stale-detection/issues/01-卡住误报.md`）：判定喂**三路**、门槛**统一 5 分钟**、
@@ -264,19 +312,27 @@ export function hasPendingReview(pendingReviews, n) {
 // 用户看得见这一章写到哪；**说一件没人做的事则收不回来**。
 // 返回 null 时调用方**整颗徽章不渲染**——不是渲染一颗空徽章，也不是拿别的词顶上。
 const CHAPTER_OPERATION = Object.freeze({
-	writing: { icon: "⏳", tone: "#e3b341", text: "执笔", agent: "写作小助手" },
-	auditing: { icon: "🔍", tone: "#0969da", text: "检查", agent: "检查小助手" },
-	audited: { icon: "🔎", tone: "#0969da", text: "等复核", agent: "复核小助手" },
-	finalizing: { icon: "👁", tone: "#57606a", text: "复核", agent: "复核小助手" },
+	writing: { icon: "⏳", tone: "var(--dsw-alias-state-warn-label)", text: "执笔", agent: "写作小助手" },
+	auditing: { icon: "🔍", tone: "var(--dsw-alias-state-business-primary)", text: "检查", agent: "检查小助手" },
+	audited: { icon: "🔎", tone: "var(--dsw-alias-state-business-primary)", text: "等复核", agent: "复核小助手" },
+	finalizing: { icon: "👁", tone: "var(--dsw-alias-label-secondary)", text: "复核", agent: "复核小助手" },
 });
 
 /** 归属栏那一份图标与色：与徽章**故意不同**——它是次要信息，不与状态抢眼睛。 */
 const CHAPTER_ATTRIBUTION_ICON = "🛠️";
-const CHAPTER_ATTRIBUTION_TONE = "#57606a";
+const CHAPTER_ATTRIBUTION_TONE = "var(--dsw-alias-label-secondary)";
 
 /**
  * 章级徽章。`claimed` 认不认这一章（「有没有在跑的小助手认领它」，判据在 `view-rules`）。
  *
+ * 票 `audit-state-regression/01`：第 7 个入参 `serverDone` 是**服务端 `chapterStatus[].done`**
+ * （与「已完成 N/M 章」、交付闸同一份派生）。传了它就**以它为准**：`false` 时徽章不许再说
+ * 「已完成 · 审过」——否则同一屏会出现「计数说 1/2，徽章说那一章已完成」的自相矛盾。
+ * 不传（`null`）时逐字退回本票之前的本地判据（老服务端／样张）。
+ *
+ * @param {boolean} auditStale 检查记录是否比正文旧（`view-rules.chapterAuditIsStale`）
+ * @param {boolean} claimed 这一章此刻有没有在跑的小助手认领它
+ * @param {boolean|null} serverDone 服务端 `chapterStatus[].done`；`null` ＝没下发
  * @returns {{icon: string, text: string, tone: string} | null} **null ＝这一章此刻没有状态可报**
  */
 export function chapterBadge(
@@ -286,35 +342,43 @@ export function chapterBadge(
 	pipelineStage,
 	auditStale = false,
 	claimed = false,
+	serverDone = null,
 ) {
 	const hasReview = hasPendingReview(pendingReviews, row.n);
 	// 「该章已完成」的两个来源（doneSet 交工事件 / 主 AI 上报 done）走同一句。
 	const settled = () =>
 		hasReview
-			? { icon: "📝", text: "轮到你 · 有意见待修订", tone: "#cf222e" }
+			? { icon: "📝", text: "轮到你：有意见待修订", tone: "var(--dsw-alias-state-error-primary)" }
 			: auditStale
-				? { icon: "⚠️", text: "轮到你 · 还没审过", tone: "#bf8700" }
-				: { icon: "🛡️", text: "已完成 · 审过", tone: "#1a7f37" };
+				? { icon: "⚠️", text: "轮到你：还没审过", tone: "var(--dsw-alias-state-warn-label)" }
+				: serverDone === false
+					? { icon: "⚠️", text: "轮到你：还没完成", tone: "var(--dsw-alias-state-warn-label)" }
+					: { icon: "🛡️", text: "已完成，审过", tone: "var(--dsw-alias-state-success-primary)" };
+	// 服务端说这一章完成了 ⇒ 徽章照它说（与计数、交付闸同一份）。新鲜度/意见两项仍优先。
+	if (serverDone === true) return settled();
 	// 票 22：新鲜度先于任何「说它完了」的来源（交工事件 / 有检查记录这一事实）。
 	// 后两者说的是**过去某一刻**发生过什么，这一条说的是**此刻这份正文**有没有被审过。
-	if (auditStale && (doneSet.has(row.n) || row.audited === true)) {
-		return settled();
+	if (auditStale && (doneSet.has(row.n) || row.audited === true)) return settled();
+	if (doneSet.has(row.n)) {
+		// 票 `audit-state-regression/01`：服务端说**还没完成**时，账本里的旧交工事件不许把它
+		// 洗成「已完成 · 审过」；但**有人认领**时也不许盖掉「我正在做」——那一章正在被返工，
+		// 说「轮到你」同样是在说一件没发生的事，所以让下面那一支照实说「我在写」。
+		if (serverDone !== false || !claimed) return settled();
 	}
-	if (doneSet.has(row.n)) return settled();
 	// ⚠️ 票 `premature-announce/04`（2026-10-10 裁决）：**「已完成 · 审过」只认机器事实**——就是上面
 	// 那一支（账本里机器记下的章级交工；过目闸门与「已完成 X/Y 章」用的是同一份判据）。此前 **AI 自报**
 	// `chapterPipeline.stage === 'done'` 也能单独说出这句话，而服务端只校验那个枚举、**不验产物**
 	// ⇒「自报 done 而这一章其实还没交工」时，徽章替机器说了一句它没说过的话（「早宣告」在宣告面上的第三处）。
 	// ⇒ 自报 `done` 现在**只**撑得起「轮到你」那一支（有未处置意见／正文还没被审过）；
 	// 其余情况落回认领那一支：有人认领说「我正在做」，没人认领整颗不出声。⛔ 自报不是结论。
-	if (pipelineStage === "done" && (hasReview || auditStale)) return settled();
+	if (pipelineStage === "done" && (hasReview || auditStale || serverDone === false)) return settled();
 	// 票 20：**只有被认领的章才说「我正在做」**。工序取自 AI 自报的流水线阶段；
 	// 说不出是哪一道工序（没上报 / 不认识的态）就只说状态词那半截，**不猜**。
 	if (claimed) {
 		const operation = CHAPTER_OPERATION[pipelineStage];
 		return operation === undefined
-			? { icon: "⏳", text: "我正在做", tone: "#e3b341" }
-			: { icon: operation.icon, text: `我正在做 · ${operation.text}`, tone: operation.tone };
+			? { icon: "⏳", text: "我正在做", tone: "var(--dsw-alias-state-warn-label)" }
+			: { icon: operation.icon, text: `我正在做：${operation.text}`, tone: operation.tone };
 	}
 	// 没人在写它：这一格整颗不出声（票面 :98/:104「实跑 1 章时只该有 1 行我正在做」）。
 	return null;
@@ -373,6 +437,35 @@ export function deriveDoneSet(events, goldChapter) {
 }
 
 /**
+ * 「这一章算不算完成」——**界面侧只此一份判据**（票 `audit-state-regression/01`）。
+ *
+ * 两个出口读它：章节卡的「已完成 X/Y 章」（`chapters-map.js`）与阶段五状态卡的同一个计数
+ * （`event-cards.js` 的 `StatusCard`）。两处各写一份时，「服务端说这一章还没审过／正文在检查之后
+ * 又改过」与「按账本里的交工事件数出来」会各说各话——第 8 章正文被重写后仍显示十章的假信号
+ * 正是这么来的。
+ *
+ * 判据的**主来源是服务端下发的 `chapterStatus[].done`**：它由 `engine.chapterDone` 算出，
+ * 覆盖「两份产物在 ＋ 检查记录审的是当前这份正文 ＋ 机器记下的章级交工 ＋ 无未处置意见」
+ * （`chapterGateMiss` 那四项，过目闸门认的也是它）。有它就照它，两个数字必然一致。
+ *
+ * ⚠️ **`typeof done === "boolean"` 那一支是给老服务端／样张的**（没下发这一格）：退回本地能算的
+ * 那一半「章级交工事件 ＋ 无未处置意见」。它**不是**完整口径——产物在不在、检查记录新不新
+ * 客户端不读盘，所以这两项在旧服务端上退回本票之前的行为。⛔ 不许把它当成第二份判据的授权：
+ * 新代码只要服务端有 `done` 就必须走它（否则正文返工后的新鲜度在界面上就丢了）。
+ *
+ * @param {unknown} chapterStatus `/textbook/events` 下发的逐章进度（可缺）
+ * @param {Set<number>} doneSet 账本里章级交工通过的章号（`deriveDoneSet` 的产出）
+ * @param {unknown[]} pendingReviews 未处置意见表（`meta.pendingReviews`）
+ * @param {number} n 1 起的章号
+ * @returns {boolean}
+ */
+export function chapterIsDone(chapterStatus, doneSet, pendingReviews, n) {
+	const found = (chapterStatus ?? []).find((r) => Number(r?.n) === Number(n));
+	if (typeof found?.done === "boolean") return found.done;
+	return doneSet.has(Number(n)) && !hasPendingReview(pendingReviews, n);
+}
+
+/**
  * 段落级意见（带 kind）在界面上的**唯一一份正名**（票 02）。
  *
  * 出口只有这一处：章节卡的 `reviewText` 与谈判桌意见单（`gold-table.js`）同取这一份。
@@ -424,7 +517,7 @@ export function reviewState(review) {
 		const how = typeof review.how === "string" ? review.how.trim() : "";
 		return {
 			key: "applied",
-			text: how === "" ? "已处置（AI 没写说明）" : `已处置 · ${how}`,
+			text: how === "" ? "已处置（AI 没写说明）" : `已处置：${how}`,
 			revocable: true,
 		};
 	}
@@ -433,7 +526,7 @@ export function reviewState(review) {
 	if (review?.status === "pending")
 		return {
 			key: "pending",
-			text: "还没处置 · 这一章交工前要先处置它",
+			text: "还没处置：这一章交工前要先处置它",
 			// 票 09：还没处置的意见也能**撤回**（`gold-opinion-revoke` 置 `revoked`）。原先这里
 			// 是 false，于是这一态在界面上**一个按钮都没有**——唯一那条反悔路是「重置重做」，
 			// 代价是整本书推倒重来（而那时这一章已经被 AI 改完了）。
@@ -618,8 +711,10 @@ function isRoundedOpaqueBox(box) {
 // ⚠️ 票 20 那一半**曾经**的解法是「再给一颗同一动作的键」（焦点区吸底决策条），那条已按
 // `walkthrough-fixes/18` 的裁决**整条删掉**——同一屏里那颗键渲染了两次（用户原话「满意的那行位置不对」）。
 // ⇒ 记这一句是因为它当年被拿来当「探索/大纲/定稿/交工那四张为什么不自动滚」的**理由**：
-// 那四张至今**不滚**，而那条理由（底对齐会把正在读报告的用户一把拽到几千字下面）本身仍然成立；
-// 失效的只是「探索有第二出口」那一半，见 `view-rules.autoScrollCardKey` 与票 20 的 `## Comments`。
+// 那四张至今**不滚**，而那条理由（底对齐会把正在读报告的用户一把拽到几千字下面）本身仍然成立。
+// 探索那一屏的高度另按票 20 的 2026-10-06 裁决治——「读材料报告默认折叠」（落在
+// `confirm-cards.js` 那张卡自己身上）⇒ 推进键回首屏；与「这几张不滚」是两件事，见
+// `view-rules.autoScrollCardKey` 与票 20 的 `## Comments`。
 //
 // 三条口径：
 //   ① **量不到不猜，且量不到就不算数**：页签没激活／还没布局（`clientHeight === 0`）、卡还没
@@ -687,9 +782,16 @@ export function decisionCardScroll(input) {
 // 「阶段片亮了 ⚡、内容区却是空的」比没有提示更让人发毛（用户的原话是「页面有问题」）。
 // 空白与「还没画完」在人眼前分不开，所以**宁可多一句**：工作台那一屏该给内容而没有时，
 // 焦点区必须**有一句人话**说明并给出路（刷新），而不是留一大片白。
-// ⚠️ 这句话是判定线① 的出口，字只此一份；**唯一的调用点**是 `client-entry.js` 里那个
-// 「读不到书、又不加载」的窗口——**仓内唯一一处真的能把整块渲染成空的地方**。
-// 「现在」主卡那一格**刻意没有**这道兜底：`focusCardKey` 是全函数（九个返回值每一个都有卡），
+// ⚠️ 这句话是判定线① 的出口，字只此一份。票 `ui-display-redesign/21`（spec §2.20 第 5 块）
+// 起**生产上不再有调用点**：非造书会话、又没有可画的书那一支（`src/ui/surface.js` 的 bare 支）
+// 换成了专用人话「这个会话没有在造书，也没有正在读的书。」——那一句说的是**这个会话本来就不是
+// 在造书**，而不是「该有卡却没画出来」，借用兜底句会把处境说错。
+// ⛔ 本常量与 `blankFocusText` 的**语义一个字不动**：它仍是「焦点区该有卡却没有」这条判定线，
+// 判定它的那几条判据（`test-layout-anchors.mjs`）照旧逐字咬它；哪天又有真能触发它的渲染点，
+// 仍走这一个出口（⛔ 不许在渲染处抄第二份字）。
+// 「现在」主卡那一格**刻意没有**这道兜底：`focusCardKey` 是全函数（十个返回值每一个都有卡
+// ——表上 `routedBy` 非 null 的 10 行；取样：
+// `node --input-type=module -e "import {focusCardKey} from './src/ui/view-rules.js'; import {focusCardKeysOf} from './scripts/source-scan-base.mjs'; console.log(new Set(focusCardKeysOf(focusCardKey)).size)"`），
 // 挂一个今天走不到的分支只会造出一条「形状断言冒充行为断言」的假绿（2026-09-30 双轴 review
 // 的判断，已按它改：把那处分支与它的纯函数一起删掉，兜底只留真能触发的那一个）。
 
@@ -784,7 +886,7 @@ export function contextOccupancySentence(percent) {
 // 「多格式兼容」的诉求，但**不许让用户以为每一个都是验过的**——所以未标定的那几种
 // 在界面上要点名出来，而不是只在代码注释里说一句。
 
-import { MATERIAL_FORMATS } from "../domain-rules.js";
+import { MATERIAL_FORMATS, MATERIAL_FORMAT_OFF_CHANNEL } from "../domain-rules.js";
 
 /** 上传区那一行：支持哪些形状（按 family 归并，顺序取自名单；单一扩展名不套括号）。 */
 export function materialFormatHint() {
@@ -801,10 +903,25 @@ export function materialFormatHint() {
 		.join("、")}`;
 }
 
-/** 未标定那一句：哪几种**没有**成功记录（点名，不含糊）。全部标定时返回空串（不占一行）。 */
-export function materialFormatCalibrationNote() {
-	const done = MATERIAL_FORMATS.filter((f) => f.calibrated).map((f) => `.${f.ext}`);
-	const rest = MATERIAL_FORMATS.filter((f) => !f.calibrated).length;
-	if (rest === 0) return "";
-	return `已实测可用：${done.join("、")}；其余 ${rest} 种是「未标定」——官方声明支持，本仓还没有成功记录。`;
+/**
+ * 上传区「支持格式」下面另起的那一行：**云端通道不收、但有出路**的那几档（票 `upload-formats/01`）。
+ *
+ * 为什么必须常显、不能只在选到它时才说：文件选择器的 `accept` **本来就列不出** `.epub`
+ * （那是云端通道的事实，不能为了提示去放开选择面）——只靠「选到才提示」，用户连选都选不到，
+ * 提示等于永远不出现。而票面「现象」那一句说的正是「只列白名单让人自己猜」。
+ *
+ * ⚠️ 句子**逐字取自** `MATERIAL_FORMAT_OFF_CHANNEL[].hint`（不在这里另写一份）：那一行短、
+ * 只说「要转换、转成什么」；完整的两条出路（含命令）是 `guidance`，由**选到它时**那条红字说。
+ * 两处都从表里取，只是各取一格——各写一份就会一处改了另一处没改，用户会在两个时刻读到两句
+ * 不一样的话。
+ */
+export function offChannelMaterialFormatNote() {
+	// 空格分隔：表是**设计成会变长**的（日后 md/txt 也可能登记成通道外），`join("")` 会把两句
+	// 中文粘成一句。
+	return MATERIAL_FORMAT_OFF_CHANNEL.map((one) => one.hint).join(" ");
 }
+
+// 票 `ui-display-redesign/17`（收口 review S8）：`materialFormatCalibrationNote()` **已退役**——
+// spec §2.2 第 8 块写的是「已删」（票 02 只做到不上屏）；留着实现函数＋那条「函数出口不许被删空」
+// 的断言，等于把「已删」说成「没删」。屏上「未标定／已实测可用」零出现那一条闸保留在
+// `test/test-material-format.mjs`。

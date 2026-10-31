@@ -9,6 +9,10 @@ import { createElement, useEffect, useRef } from "react";
 import { deriveChatDeskNodes } from "./chat-source.js";
 import { S } from "./styles.js";
 
+// 「漏账催办」那颗键的文案**唯一出口**（`auto-walkthrough/07` 的负判据要从这里 import，
+// ⛔ 不在判据里手抄第二份原文——收了出口才不会两边各漂各的）。
+export const CHAT_NUDGE_LABEL = "⏰ 提醒 AI 记下来";
+
 function blockText(block) {
 	if (block === null || block === undefined) return "";
 	if (typeof block.text === "string") return block.text;
@@ -66,7 +70,7 @@ function bubble(side, text, extraStyle) {
 // 工具行一句话：正在跑 / 已完成 / 出错（工具细节压成一行，避免刷屏）。
 // 形状照契约快照 §3：`ToolChatData.root` 是 `ToolCallBlock` = `RunningToolCall | ToolResultNode`
 // ——正在跑的带 `name`；定稿的带 `call.name` 与 `content`（`ContentBlock[]`）。原来读的
-// `root.result.text` 在契约里**不存在**（真实节点只会渲染成「🔧 工具 · 完成」），随本票的
+// `root.result.text` 在契约里**不存在**（真实节点只会渲染成「🔧 工具 完成」），随本票的
 // 契约形状桩一并改对。
 function toolLine(root) {
 	const name = root?.name ?? root?.call?.name ?? "工具";
@@ -74,9 +78,9 @@ function toolLine(root) {
 		const text = contentBlocksText(root?.content)
 			.replace(/\s+/g, " ")
 			.slice(0, 120);
-		return `🔧 ${name} · ${root?.isError === true ? "出错" : "完成"}${text !== "" ? `：${text}` : ""}`;
+		return `🔧 ${name} ${root?.isError === true ? "出错" : "完成"}${text !== "" ? `：${text}` : ""}`;
 	}
-	return `🔧 ${name} · 执行中…`;
+	return `🔧 ${name} 执行中…`;
 }
 
 // 灰字小行（重试/命令/压缩等系统提示，不打扰主对话）。
@@ -86,7 +90,7 @@ function muted(text) {
 		{
 			style: {
 				margin: "3px 0",
-				fontSize: "11px",
+				fontSize: "12px",
 				opacity: 0.55,
 				whiteSpace: "pre-wrap",
 				wordBreak: "break-word",
@@ -102,7 +106,9 @@ function muted(text) {
 const RECEIPT_TEXT = {
 	"textbook/style-note": (d) =>
 		`✓ 已记入风格线${d?.styleNote?.text ? `：${String(d.styleNote.text).slice(0, 20)}…` : ""}`,
-	"textbook/intervention": () => "✓ 已记入留言（下个停靠点处理）",
+	// 票 `walkthrough-fixes/21`（2026-10-06 裁决「甲」）：原来是「（下个停靠点处理）」——与机器行为相反
+	// （实测主 AI 当轮就转达给了正在写的那一章）。回执只说两态事实，不承诺时机。
+	"textbook/intervention": () => "✓ 已记入留言（有 AI 在跑时当轮转达；没有 AI 在跑时等到下一站）",
 	"textbook/intervention-done": () => "✓ 留言已处理",
 	"textbook/pause": () => "✓ 已暂停",
 	"textbook/resume": () => "✓ 已继续",
@@ -122,7 +128,7 @@ function badgeSpan(text) {
 		{
 			style: {
 				margin: "2px 0 6px 12px",
-				fontSize: "11px",
+				fontSize: "12px",
 				color: "var(--dsw-alias-state-success-primary)",
 				lineHeight: 1.5,
 				whiteSpace: "pre-wrap",
@@ -373,7 +379,7 @@ export function ChatDesk(props) {
 							"工作台还没跟上，请把刚才答应的事落账（比如风格线、进度）",
 						),
 				},
-				"⏰ 提醒 AI 记下来",
+				CHAT_NUDGE_LABEL,
 			),
 		),
 	);

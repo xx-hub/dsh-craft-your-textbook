@@ -11,11 +11,39 @@
  * 异步面：refresh() 与两种 selectProject(...) 语义都返回 Promise<snapshot>；transport/http/
  * malformed 属预期 source 结果（resolve 并提交结构化错误），not-found/not-owned 属预期身份
  * 失效（在 clear commit 之后 resolve，不显示读取错误），非法参数属 programmer error（throw）。
+ *
+ * ## 票 `ui-systematic-fixes/06` 的两件事
+ *
+ * 1. **身份失效有个出口**（用户故事 24）。not-found/not-owned 那条路按 ADR-0021 决策 13/16
+ *    清身份、重新发现、**不留读取错误**——于是界面上从前一个字都没有。这里加一个**注入回调**
+ *    `onIdentityLost(info | null)`：失效时把 `{ projectId, kind, message }` 送出去，重新读回
+ *    任何一本书（或调用方显式发起一次 refresh/selectProject）时送 `null`。
+ *    ⛔ **不进 snapshot**：`test-ui-state-gallery-shape.mjs` 逐字段比夹具录下的顶层键集，
+ *    多一个键会让每一份**录制基线**当场过期，而重录是人的动作、共享基线只在主树上改
+ *    （`docs/agents/effort-orchestration.md`）。⛔ 也不加第 7 个公开方法（interface 是六方法）。
+ *    ⛔ 文案不在这一层：`ADR-0021` 决策 16 把用户可见等级留给接线层（壳）——这里只送**事实**。
+ *
+ * 2. **一次挂死不许永久堵住轮询**（用户故事 22/23）。两条：
+ *    · **读请求有上限**（`readTimeoutMs`，默认 10 秒）：到点**放弃这一份回包**并落一条结构化
+ *      `timeout` 失败 ⇒ 那一轮轮询一定会 settle，下一轮 2 秒后照常起飞；宿主恢复后自然自愈。
+ *      ⚠️ **超时不是中止**：`fetch` 的 `init` 形状被链上那张生产 source 的判据逐字钉着
+ *      （`test-workbench-projection.mjs` 的 `assert.deepEqual(call.options, { headers: … })` 不在
+ *      本票射程内），加 `AbortController` 的 `signal` 会当场把它判红。所以这里只放弃回包、
+ *      **不真断连接**——迟到的那一份由 epoch 挡住，写不进新身份（决策 10）。这是**有意的降级**，
+ *      窄处写在票 06 的 `## Answer` 与 `docs/测试信任边界.md`。
+ *    · **在飞的轮询有上限**（`POLL_STUCK_MS`）：一轮超过 60 秒还没落地（注入的 source 不理会上限、
+ *      或环境里根本没有定时器）⇒ 视为挂死，下一轮照常起飞；旧的那一轮由 epoch 挡住。
+ *      **单飞照旧**（决策 10）：没超上限时第二个 tick 仍然直接返回。
+ *    `now` 可注入（默认 `Date.now`）：判据拿它把 60 秒那一格走到，⛔ 不真等。
  */
 
 const POLL_INTERVAL_MS = 2000
 /** 预期身份失效：当前书被删或不再属于本会话，两类走同一条失效路径（ADR-0021 决策 13/16）。 */
 const IDENTITY_FAILURE_KINDS = new Set(['not-found', 'not-owned'])
+/** 单条读请求的上限：到点放弃这一份回包（**不真断连接**，理由见文件头）。 */
+const READ_TIMEOUT_MS = 10_000
+/** 一轮轮询的上限：超过它仍在飞 ⇒ 视为挂死，允许下一轮重新起飞（旧回包由 epoch 挡住）。 */
+const POLL_STUCK_MS = 60_000
 
 const UNKNOWN_RESOURCE = Object.freeze({
   status: 'unknown',
@@ -143,6 +171,22 @@ function normalizeCore(payload, { base = null, delta = false } = {}) {
     throw malformed('events 响应的 knowledgeMap 必须是字符串')
   }
   if (
+    payload.knowledgeMapExclusions !== undefined &&
+    payload.knowledgeMapExclusions !== null &&
+    typeof payload.knowledgeMapExclusions !== 'string'
+  ) {
+    throw malformed('events 响应的 knowledgeMapExclusions 必须是字符串')
+  }
+  // 票 `reader-cognition-boundary-build/09`：回卷原件的原文（站 2 那一栏缺口的唯一新输入）。
+  // 与 `knowledgeMapExclusions` 同一条路、同一档形状检查（⛔ 不静默把坏形状读成「没有回卷」）。
+  if (
+    payload.readerQuestionnaireReturn !== undefined &&
+    payload.readerQuestionnaireReturn !== null &&
+    typeof payload.readerQuestionnaireReturn !== 'string'
+  ) {
+    throw malformed('events 响应的 readerQuestionnaireReturn 必须是字符串')
+  }
+  if (
     payload.outline !== undefined &&
     payload.outline !== null &&
     typeof payload.outline !== 'string'
@@ -180,6 +224,15 @@ function normalizeCore(payload, { base = null, delta = false } = {}) {
       reviews: listOrEmpty(payload, 'pendingReviews', 'events.pendingReviews'),
     },
     knowledgeMap: typeof payload.knowledgeMap === 'string' ? payload.knowledgeMap : null,
+    // 那份**人的裁决产物**原文（`工作区/knowledge-map-exclusions.json`，票 `knowledge-graph-build/09`）：
+    // 与 `knowledgeMap` 同一条路（不经 `/textbook/file`），null ＝「这本书上还没有裁决」。
+    knowledgeMapExclusions:
+      typeof payload.knowledgeMapExclusions === 'string' ? payload.knowledgeMapExclusions : null,
+    // 书夹里那份**回卷原件**的原文（`工作区/读者情况回卷.md`，票 `reader-cognition-boundary-build/09`）：
+    // 与上面那份同一条路（不经 `/textbook/file`），null ＝「这本书还没有回卷」——
+    // 站 2 那一栏「缺口」据它 ＋ 合并件的 `readerSlices` ＋ 剔除记录**现算**（⛔ 不落第二份）。
+    readerQuestionnaireReturn:
+      typeof payload.readerQuestionnaireReturn === 'string' ? payload.readerQuestionnaireReturn : null,
     // 章节安排原文（`工作区/outline.md`，内容是机器 JSON）：与 knowledgeMap 同一条路——
     // 不经 /textbook/file（那条路由按 'preview' 收窄），人读形态由阶段页就地折叠。
     outline: typeof payload.outline === 'string' ? payload.outline : null,
@@ -226,7 +279,12 @@ function normalizeProcess(payload) {
   if (!isRecord(payload) || !Array.isArray(payload.segments)) {
     throw malformed('process 响应形状不合法')
   }
-  return { segments: payload.segments }
+  // 票 `demo-channel-full/05`：`/textbook/process` 早就随这一路下发 `shape`（两份表的对账视图：
+  // 「应当有什么」的清单行数 ／「实际有什么」的登记行数 ／ 缺件与多件逐条），而壳那一侧
+  // **一个字都没读它**——于是「这本书缺了哪几件产物」在界面上没有出口。
+  // ⚠️ 这里**只做形状归一、不做判定**：不是对象就归一成 `null`（老书没有清单、或读侧兜底返回
+  // `null` 时都走这一格），判定（缺件怎么算）仍在 `domain-rules.reconcileManifestRows` 那一处。
+  return { segments: payload.segments, shape: isRecord(payload.shape) ? payload.shape : null }
 }
 
 function classifyHttpFailure(status, message) {
@@ -242,7 +300,37 @@ function classifyHttpFailure(status, message) {
   return projectionFailure('http', message, status)
 }
 
-async function requestBookJson(pathname, params) {
+/**
+ * 给一条读请求加一个上限：**到点就放弃这一份回包**（不真断连接，理由见文件头那一节）。
+ * 放弃之后这次读按 `timeout` 失败落账；迟到的那份回包由 epoch 挡住，写不进新身份。
+ * ⚠️ node 的定时器要 `unref()`：判据里「某个请求永不回来」是常态，不能让它吊着测试进程。
+ */
+function withReadTimeout(promise, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise
+  if (typeof globalThis.setTimeout !== 'function') return promise
+  return new Promise((resolve, reject) => {
+    // 那句话要像句话：生产是 10 秒，判据里注入的是毫秒级（5ms）——两档各自读得通。
+    const waited = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} 秒` : `${timeoutMs} 毫秒`
+    const handle = globalThis.setTimeout(() => {
+      reject(projectionFailure('timeout', `这次读没回来（超过 ${waited}）`))
+    }, timeoutMs)
+    if (handle !== null && typeof handle === 'object' && typeof handle.unref === 'function') {
+      handle.unref()
+    }
+    promise.then(
+      (value) => {
+        if (typeof globalThis.clearTimeout === 'function') globalThis.clearTimeout(handle)
+        resolve(value)
+      },
+      (error) => {
+        if (typeof globalThis.clearTimeout === 'function') globalThis.clearTimeout(handle)
+        reject(error)
+      },
+    )
+  })
+}
+
+async function requestBookJson(pathname, params, timeoutMs = READ_TIMEOUT_MS) {
   // 每次请求现取 globalThis.fetch；不在 module 初始化或 source 创建时捕获测试替身。
   const fetchNow = globalThis.fetch
   if (typeof fetchNow !== 'function') {
@@ -251,7 +339,12 @@ async function requestBookJson(pathname, params) {
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) search.set(key, value)
   const url = `${pathname}?${search.toString()}`
+  // 上限包住**整个读**（fetch ＋ 读正文）：半开连接上 `response.json()` 一样会永远吊着，
+  // 只包 fetch 那一半等于把「挂死」原样留给下一层。
+  return withReadTimeout(readJsonResponse(fetchNow, url, pathname), timeoutMs)
+}
 
+async function readJsonResponse(fetchNow, url, pathname) {
   let response
   try {
     response = await fetchNow.call(globalThis, url, {
@@ -283,22 +376,22 @@ async function requestBookJson(pathname, params) {
   return payload
 }
 
-function createProductionBookSource() {
+function createProductionBookSource({ timeoutMs = READ_TIMEOUT_MS } = {}) {
   return {
     projects(sessionId) {
-      return requestBookJson('/textbook/projects', { session: sessionId })
+      return requestBookJson('/textbook/projects', { session: sessionId }, timeoutMs)
     },
     // `after` 为 null 时是全量读取（不带该参数）；带数字时是沿用现有 cursor 口径的增量轮询。
     events(sessionId, projectId, after) {
       const params = { session: sessionId, project: projectId }
       if (Number.isSafeInteger(after)) params.after = after
-      return requestBookJson('/textbook/events', params)
+      return requestBookJson('/textbook/events', params, timeoutMs)
     },
     work(sessionId, projectId) {
-      return requestBookJson('/textbook/work', { session: sessionId, project: projectId })
+      return requestBookJson('/textbook/work', { session: sessionId, project: projectId }, timeoutMs)
     },
     process(sessionId, projectId) {
-      return requestBookJson('/textbook/process', { session: sessionId, project: projectId })
+      return requestBookJson('/textbook/process', { session: sessionId, project: projectId }, timeoutMs)
     },
   }
 }
@@ -321,13 +414,19 @@ function createBrowserScheduler() {
 
 export function createBookProjection({
   sessionId,
-  source = createProductionBookSource(),
+  source,
   scheduler = createBrowserScheduler(),
+  now = () => Date.now(),
+  readTimeoutMs = READ_TIMEOUT_MS,
+  onIdentityLost = null,
 }) {
   if (typeof sessionId !== 'string' || sessionId === '') {
     throw new TypeError('createBookProjection 需要 sessionId')
   }
-  if (source === null || typeof source !== 'object') {
+  // `source` 只有**显式传 undefined** 才建生产那一条；传 `null` 仍然当场抛（programmer error）。
+  const bookSource =
+    source === undefined ? createProductionBookSource({ timeoutMs: readTimeoutMs }) : source
+  if (bookSource === null || typeof bookSource !== 'object') {
     throw new TypeError('createBookProjection 需要内部 source adapter')
   }
   if (
@@ -337,6 +436,15 @@ export function createBookProjection({
     typeof scheduler.clearInterval !== 'function'
   ) {
     throw new TypeError('createBookProjection 需要内部 scheduler adapter')
+  }
+  if (typeof now !== 'function') {
+    throw new TypeError('createBookProjection 的 now 必须是函数（默认 Date.now）')
+  }
+  if (!Number.isFinite(readTimeoutMs) || readTimeoutMs <= 0) {
+    throw new TypeError('createBookProjection 的 readTimeoutMs 必须是正数')
+  }
+  if (onIdentityLost !== null && typeof onIdentityLost !== 'function') {
+    throw new TypeError('createBookProjection 的 onIdentityLost 必须是函数或 null')
   }
 
   // instance 的 sessionId 构造后不变：切会话靠卸载旧 instance、建新 instance（决策 2）。
@@ -358,6 +466,34 @@ export function createBookProjection({
   let pollHandle = null
   let pollInFlight = 0
   let pollSeq = 0
+  /** 这一轮轮询是什么时候起飞的（`now()` 的读数）：超过 `POLL_STUCK_MS` 视为挂死。 */
+  let pollStartedAt = 0
+  /** 身份失效的**信号**（不进 snapshot，见文件头）：`null` 或 `{ projectId, kind, message }`。 */
+  let identityLost = null
+
+  /**
+   * 把身份失效信号送出去（⛔ 不进 snapshot）。`null` ＝ 身份又落定了（读回了任何一本，
+   * 或调用方显式发起 refresh/selectProject）。内容没变就不重复通知（与 listener 同一口径）。
+   */
+  function reportIdentityLost(next) {
+    if (onIdentityLost === null) return
+    if (next === identityLost) return
+    if (
+      next !== null &&
+      identityLost !== null &&
+      next.projectId === identityLost.projectId &&
+      next.kind === identityLost.kind &&
+      next.message === identityLost.message
+    ) {
+      return
+    }
+    identityLost = next
+    try {
+      onIdentityLost(next)
+    } catch {
+      /* 回调自己的问题不归 module 管（与 listener 同一条口径） */
+    }
+  }
 
   function capture() {
     return {
@@ -478,8 +614,17 @@ export function createBookProjection({
     const kind =
       typeof error?.projectionKind === 'string' ? error.projectionKind : 'transport'
     if (channel !== 'projects' && IDENTITY_FAILURE_KINDS.has(kind)) {
+      // 先把「哪一本、为什么」记下来再清身份：清完之后 `projectId` 就没了，而壳那一侧要能说
+      // 出一句人话（票 06 第 2 条：今天这里一个字都没有）。
+      const lost = Object.freeze({
+        projectId: token.guard.projectId,
+        kind,
+        message: error instanceof Error ? error.message : String(error),
+      })
       clearBookState()
       publish()
+      // 信号在 clear 那一帧**之后**送出：壳看到的是「身份已经没了」＋「为什么没的」，同一帧之后。
+      reportIdentityLost(lost)
       // 重新发现：同一会话若还有另一本书就按既有顺序接管并读它，没有就回空态。
       void discoverAndReadCore(exclude)
       return
@@ -499,7 +644,7 @@ export function createBookProjection({
     const token = startRequest('projects')
     let list = null
     try {
-      list = normalizeProjects(await source.projects(sessionId))
+      list = normalizeProjects(await bookSource.projects(sessionId))
     } catch (error) {
       handleFailure('projects', token, error)
       return false
@@ -524,7 +669,7 @@ export function createBookProjection({
     const delta = mode === 'delta' && base !== null
     let payload = null
     try {
-      payload = await source.events(sessionId, projectId, delta ? base.cursor : null)
+      payload = await bookSource.events(sessionId, projectId, delta ? base.cursor : null)
     } catch (error) {
       handleFailure('core', token, error, { exclude: projectId })
       return false
@@ -538,6 +683,8 @@ export function createBookProjection({
       return false
     }
     commit({ core: readyResource(data) })
+    // 读回了这一本 ⇒ 身份又落定了：把「刚才那本打不开」那句告知撤掉（票 06）。
+    reportIdentityLost(null)
     return true
   }
 
@@ -547,7 +694,7 @@ export function createBookProjection({
     if (projectId === null) return
     let payload = null
     try {
-      payload = await source[channel](sessionId, projectId)
+      payload = await bookSource[channel](sessionId, projectId)
     } catch (error) {
       handleFailure(channel, token, error, { exclude: projectId })
       return
@@ -577,6 +724,9 @@ export function createBookProjection({
   }
 
   async function refresh() {
+    // 显式再读一次：先把「刚才那本打不开」那句告知撤掉（真读不回来时下面会再报一次，
+    // 于是「重试 → 仍失败」不会卡在一个永远撤不掉的告知上）。
+    reportIdentityLost(null)
     let needsCore = state.projectId !== null
     if (!needsCore) needsCore = await readProjects({ discover: true })
     // 无当前书时 projects 发现完成即 core 完成；有当前书时 core commit 即完成点。
@@ -594,6 +744,8 @@ export function createBookProjection({
     if (nextProjectId === null) {
       clearBookState()
       publish()
+      // 显式清空（删书/换台）：那句「刚才那本打不开」跟着退场（票 06）。
+      reportIdentityLost(null)
       // clear 立即 resolve：不等待重新发现，随后 refresh() 才重新发现。
       return Promise.resolve(snapshotRef)
     }
@@ -611,9 +763,13 @@ export function createBookProjection({
   }
 
   function pollTick() {
-    if (pollInFlight !== 0) return
+    // 单飞照旧（决策 10）：一轮在飞时，后续 tick 直接返回。
+    // ⚠️ 但**不许永久**返回（票 06）：上一轮超过 `POLL_STUCK_MS` 还没落地 ⇒ 它已经挂死了，
+    // 这一轮照常起飞；旧那一轮的回包由 epoch 挡住（决策 10），落地也写不进任何 resource。
+    if (pollInFlight !== 0 && now() - pollStartedAt < POLL_STUCK_MS) return
     const seq = (pollSeq += 1)
     pollInFlight = seq
+    pollStartedAt = now()
     void runPoll().finally(() => {
       if (pollInFlight === seq) pollInFlight = 0
     })
@@ -642,6 +798,7 @@ export function createBookProjection({
   function teardown() {
     stopScheduler()
     pollInFlight = 0
+    pollStartedAt = 0
     state.generation += 1
     publish()
   }

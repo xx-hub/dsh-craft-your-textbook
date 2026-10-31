@@ -185,9 +185,15 @@ export function classifyLayer({ packageName, version } = {}) {
  * ## 为什么拆成 label / hint 两半
  *
  * 徽记摆在焦点区底部那条「之前的过程」小条的**右端**，那儿的宽度是按一行小字留的；
- * 一句四十来字的话放进去会折成三五行，那不是提示是噪声。所以上屏的只有包身份那几���字，
+ * 一句四十来字的话放进去会折成三五行，那不是提示是噪声。所以上屏的只有包身份那几个字，
  * **「你验的不是用户装到的那一份」这句解释进 `title`（悬浮才看）**——它是对那句话的
  * 注解，不该按字宽占着现场。
+ *
+ * ⚠️ **2026-10-12 上屏那半多了一句「改仓里立刻生效」**：短签原样只有包身份，而这一档
+ * （`not-published`＝跑的不是发布版）**真正的操作含义**恰恰是「这一份是活的」——
+ * `docs/dsh-模式改进手册.md` 那句「Junction 部署是活的（改仓里立刻见效）」就是它，
+ * 而 `node scripts/dsh-layer.mjs status` 只在仓外回答同一件事。短签上写明它，
+ * 省掉的就是「刷新没反应时先怀疑哪一层」那一步（票 `preset-declaration-row/02` 的验收点）。
  *
  * ## 为什么发布版自己那一份不显示
  *
@@ -202,7 +208,7 @@ export function layerBadge(layer) {
 	if (layer?.state !== "not-published") return null;
 	const version = layer.version === null ? "" : ` v${layer.version}`;
 	return Object.freeze({
-		label: `🧪 开发版${version}`,
+		label: `🧪 开发版${version}，改仓里立刻生效`,
 		hint: `你验的不是用户装到的那一份发布版（${layer.packageName}${layer.version === null ? "" : ` v${layer.version}`}）。`,
 		packageName: layer.packageName,
 	});

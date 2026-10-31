@@ -18,11 +18,11 @@
 import {
   assertSessionOwned,
   goldN,
+  paragraphOpinion,
   paragraphReviewText,
   readMeta,
   updateMeta,
   appendEvent,
-  workDir,
   workFile,
   sealGoldStandard,
   wakeMainAI,
@@ -34,6 +34,15 @@ import {
   // 以及范例章那一段的**就绪判据**（放行那一跳过它）。
   countRunningSubagents,
   goldArtifactProblems,
+  // 票 `depth-review-2026-10/04`：「驳回→重做」的归档判据收进 engine 一处（三档结局 ＋ 保留策略），
+  // 本文件三处归档循环换成它，不再各写一遍「尽力归档 ＋ 静默 catch」。
+  archiveWorkArtifacts,
+// 票 `confirm-points-redesign-build/08`：范例章「现在是第几稿」的唯一出处（站 8 结论件的
+// `proposal.version` 写它）。
+goldDraftVersionOf,
+// 票 `demo-channel-full/26`（清仓）：修订与整版重写那两条 hint 的两个取值（真书／演示书）。
+goldReviseHint,
+goldRewriteAnnounce,
 } from '../engine.js'
 import { familyOf, reject, accept } from '../action-runner.js'
 // payload 字段词汇层（票 `deep-module-scan/18` 层一）。⚠️ 本文件三处 `note` 的上限**各不相同**
@@ -47,20 +56,42 @@ import {
   GOLD_REVISE_NOTE_MAX,
   CHAPTER_SIDE_REASON_MAX,
 } from './payload-fields.js'
-import { mkdirSync, existsSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { chapterName } from '../../domain-rules.js'
+import { rmSync, writeFileSync } from 'node:fs'
+import { chapterName, auditName, chapterRel } from '../../domain-rules.js'
+// 票 `confirm-points-redesign-build/08`：站 8／9 的结论件走**统一写点**（票 01 的地基）
+// ——⛔ 不在这里另写一份 `工作区/决策/NN.json` 的拼路径与写盘。
+// 第三轮（维护者 2026-10-16 授权）：`gold-approve` 那道「站 9 已拍板」的前置读的是同一条读侧的
+// `decisionApproved()`——⛔ 不再写第二份「站 9 拍没拍」的判定。
+import { recordStationDecision, readStationDecision, decisionApproved } from '../decision-record.js'
+
+
+/**
+ * 「站 9 还没拍板」那条 409 的**报错原文**。
+ *
+ * ⚠️ 它**原样上屏**（工作台那条错误条）⇒ 它是本仓判定线①③ 的一个出口，所以**单独导出**：
+ * 好让它进 `test/test-wording-invariants.mjs` 那一段用词判据（避免词 ＋ 「第 N 关」第二套编号）。
+ * ⛔ 导出**不是**为了让别的调用点复用它——这一句话只属于 `gold-approve` 这一跳的前置。
+ *
+ * 文案要点（spec §244／§535）：① 点名**前置＝站 9 已拍板**；② 说清**该怎么补**——
+ * 先去站 9 点那颗「💾 保存各章字数」（＝`gold-target-words-set`，它落 `工作区/决策/09.json`）。
+ * ⚠️ 票 `ui-display-redesign/07`（续）：这颗键由「💾 写回章节安排」改名 ⇒ 这句**原样上屏**的文案
+ * 必须跟着引新键名（否则界面与报错各说各的键）。断言那一侧不再抄字面量，改为**引界面出口**
+ * `gold-table.GOLD_WRITE_TARGETS_LABEL`（见 `test/test-wording-invariants.mjs`），从结构上防再漂。
+ */
+export const GOLD_APPROVE_NEEDS_STATION9 =
+  '⛔ 现在还不能动这一稿：这一跳的前置＝站 9 已拍板，而站 9 那一屏的「💾 保存各章字数」还没点过（`工作区/决策/09.json` 不在）。先去站 9 点一次「💾 保存各章字数」，把逐章目标写回 `工作区/outline.md`，再回来定稿或整版重写。'
 
 
 /**
  * 范例章重写/改选时归档的三份文件（**基名**：`workFile` 自己拼 `工作区/`，归档时也是把
  * `${name}.${stamp}` 拼成 `chapter-NN.md.<stamp>` 放进 `_旧版产物/`——那边认的是基名）。
  *
- * ⚠️ 这一族由 `chapterName` 单点；`audit-NN.md` 那一份属 audit 族（见 `gold-audit-prompt.md`），
- * 本票不收。三处归档循环（改稿 / 改选 / 整版重写）共用这一个函数，别各拼一遍。
+ * ⚠️ 这一族由 `chapterName` 单点；`audit-NN.md` 那一份属 audit 族、由 `auditName` 单点
+ * （见 `gold-audit-prompt.md`；票 `context-budget/18` 复核 findings ⑥ 收掉这处手拼）。
+ * 三处归档循环（改稿 / 改选 / 整版重写）共用这一个函数，别各拼一遍。
  */
 function goldArchiveNames(gn) {
-  return [chapterName(gn), 'style-spec.md', `audit-${String(gn).padStart(2, '0')}.md`]
+  return [chapterName(gn), 'style-spec.md', auditName(gn)]
 }
 
 
@@ -70,7 +101,7 @@ export function canEditTargetWords(meta) {
 }
 
 /** 动作族 · 金标准：意见/修订/改选/逐章目标写回/定稿。 */
-export const actGold = familyOf('gold', async ({ ctx: ctx, action: action, sessionId: sessionId, project: project, body: body }) => {
+export const actGold = familyOf('gold', async ({ ctx: ctx, action: action, sessionId: sessionId, project: project, body: body, humanEvent: humanEvent }) => {
   switch (action) {
     case 'gold-opinion': {
       assertSessionOwned(project, sessionId)
@@ -89,10 +120,7 @@ export const actGold = familyOf('gold', async ({ ctx: ctx, action: action, sessi
         const target = Number.isSafeInteger(body.para) || typeof body.hint === 'string'
           ? { para: Number.isSafeInteger(body.para) ? body.para : null, hint: textFieldRaw(body.hint, GOLD_HINT_MAX) }
           : null
-        const opinion = {
-          id: `pr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-          at: Date.now(), chapter, target, kind, wish, status: 'pending',
-        }
+        const opinion = paragraphOpinion({ id: `pr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, at: Date.now(), chapter, target, kind, wish })
         // 过目态下提段落意见：与整章意见同路径——状态改在改法里（当场新读），转 running 交办修订
         // （改完回来继续过目）。原先「改在手里那份旧状态上再整份写回」会把账高带回旧值（票 02）。
         const inChaptersReview = meta.status === 'awaiting-chapters-review'
@@ -171,13 +199,14 @@ export const actGold = familyOf('gold', async ({ ctx: ctx, action: action, sessi
         return reject(409, '当前没有等待确认的最佳范例章')
       }
       const pending = (meta.goldOpinions ?? []).filter((o) => o.status === 'pending')
-      const archive = join(workDir(project), '_旧版产物')
-      mkdirSync(archive, { recursive: true })
-      const stamp = Date.now().toString(36)
       const gn = goldN(meta)
-      for (const name of goldArchiveNames(gn)) {
-        const target = workFile(project, name)
-        if (existsSync(target)) { try { renameSync(target, join(archive, `${name}.${stamp}`)) } catch { /* 尽力归档 */ } }
+      // ── 票 `depth-review-2026-10/04`：**归档先于记账** ───────────────────────────────────
+      // 原先这里是「尽力归档 ＋ 静默 catch」：旧稿搬不走时下面照样把待处理意见标成 `sent`、
+      // 写下 `goldRedoNote`、记「已把你的意见带给 AI」——而 AI 那边拿到的是原封不动的旧稿。
+      // 现在搬不走就当场 409，且这一支一个字节的状态都不改（意见没被消费）。
+      const archived = archiveWorkArtifacts(project, goldArchiveNames(gn))
+      if (archived.misses.length > 0) {
+        return reject(409, `最佳范例章的旧稿没能归档（${archived.misses.join('、')}），这次修订没有生效：旧稿还留在原位，直接重做会拿它当新结果。请关掉占用这些文件的程序后重试。`)
       }
       const reviseNote = textField(body.note, GOLD_REVISE_NOTE_MAX)
       const redoNote = pending.length > 0
@@ -191,7 +220,9 @@ export const actGold = familyOf('gold', async ({ ctx: ctx, action: action, sessi
         state.pendingStage = null
         state.pendingGate = null
       })
-      appendEvent(project, 'textbook/hint', { text: '✍️ 已把你的意见带给 AI，它正在照着修订最佳范例章，改完再请你过目。' })
+      // 票 `demo-channel-full/26`：这一句的两个取值（演示支**真**把意见织进新稿，
+      // 只是没有 AI——读数见 `engine.goldReviseHint` 的注释）。
+      appendEvent(project, 'textbook/hint', { text: goldReviseHint(meta) })
       handoffAndDrive(ctx, project, 'gold')
       return accept({ project, redoNote })
     }
@@ -213,14 +244,12 @@ export const actGold = familyOf('gold', async ({ ctx: ctx, action: action, sessi
         return reject(409, '我正在做；等交工或先暂停，再改最佳范例章')
       }
       const gn = goldN(meta)
-      const archive = join(workDir(project), '_旧版产物')
-      mkdirSync(archive, { recursive: true })
-      const stamp = Date.now().toString(36)
-      let archived = 0
-      for (const name of goldArchiveNames(gn)) {
-        const target = workFile(project, name)
-        if (existsSync(target)) { try { renameSync(target, join(archive, `${name}.${stamp}`)); archived += 1 } catch { /* 尽力归档 */ } }
+      // 票 `depth-review-2026-10/04`：归档先于记账——旧稿搬不走就当场 409，`goldChapter` 一个字不改。
+      const outcome = archiveWorkArtifacts(project, goldArchiveNames(gn))
+      if (outcome.misses.length > 0) {
+        return reject(409, `最佳范例章的旧稿没能归档（${outcome.misses.join('、')}），这次改选没有生效：旧稿还留在原位，直接重写会拿它当新结果。请关掉占用这些文件的程序后重试。`)
       }
+      const archived = outcome.items.filter((item) => item.outcome === 'deleted').length
       // 改选落账走单一入口（当场新读）：原先拿请求开头那份旧状态整份写回（票 02 的形状）。
       updateMeta(project, (state) => {
         state.goldChapter = pick
@@ -230,15 +259,76 @@ export const actGold = familyOf('gold', async ({ ctx: ctx, action: action, sessi
       })
       appendEvent(project, 'textbook/gold-chapter', { chapter: pick, reason: textCoerced(body.reason, CHAPTER_SIDE_REASON_MAX), archived })
       appendEvent(project, 'textbook/hint', { text: `📐 最佳范例章改为第 ${pick} 章${archived > 0 ? '（旧的最佳范例章已留档，正在重写）' : ''}。` })
-      // ⚠️ 票 depth-review-2026-10/07：**逐字保留**的既成双 kick，不许在本票顺手"清理"。
-      // 对一本 demo 书，当 archived===0 && phase<4 时（走 else 那支）它今天被 kick **两趟**：
-      // else 一次、下面那条 demo 判定再一次。`kick` 不幂等（`runners` 是覆盖式 Map，两次 = 两个
-      // runLoop 并行），所以「两次」与「一次」可观察地不同。本票**不裁决**这是历史手误还是无害，
-      // 只许原样搬。要改成一次属行为变更，须人裁决后另开票，并同步删掉
-      // test-flow-transitions-chapters.mjs G5 里那一条登记豁免（票 `test-chain-latency/04` 之前它在 test-flow-transitions.mjs 里）。
+      // ── 票 `flow-audit-2026-10/05`：这里原先**逐字保留**的「双 kick」已收成一次 ──────────────
+      // 旧形状：`else { void kick(...); if (meta.demo === true) void kick(...) }`。`kick` 不幂等
+      // （`runners` 是覆盖式 Map，两次 = 两个 runLoop 并行），演示书在这条路上会起两趟。
+      // 现在这一行只留一次；真正的「不重入」在拍板入口：`gate-decide` 只有在没有等在
+      // `runGate` 的那一趟时才 `kick`（见 `actions/gates.js` 的 `resolveGateDecision` 那一行）。
+      // ⚠️ 改这里是**行为变更**，由票 `flow-audit-2026-10/05` 裁决；`demo-exemptions.js` 的
+      // `demo-self-drive` 锚点同批改成这一行。
       if (archived > 0 || meta.phase >= 4) handoffAndDrive(ctx, project, 'gold')
-      else { void kick(ctx, project); if (meta.demo === true) void kick(ctx, project) }
+      else { void kick(ctx, project) }
       return accept({ project, goldChapter: pick })
+    }
+    case 'gold-draft-approve': {
+      // ── 站 8「这一稿行不行」的两颗键（票 `confirm-points-redesign-build/08`，口径出处＝
+      //    规划票 `confirm-points-redesign/07` 的 `## Answer` §3）────────────────────────
+      // ① `approved:true`「✅ 就用这一稿」⇒ **只落 `工作区/决策/08.json`**：⛔ 不推进阶段、
+      //    ⛔ 不盖范例章印（那些是站 9 之后那一下，`gold-approve` 一个字没动）。
+      // ② `approved:false`「🔁 不满意，重写这一章」⇒ **同一支的负向出口**：「驳回也留」
+      //    （04 §1）＋ 今天那颗「整版重写」的行为原样（归档旧稿 → 记 goldRedoNote → kick）。
+      // ③ 中间那条**修订回路**（写意见 →「让 AI 改」→ 出下一稿 → 再看）**不落结论件**——
+      //    它走 `gold-revise`，一个字节都不经这里。
+      // ⚠️ `version`（结论件自己的「这一站第几次拍板」）由 `recordStationDecision` 从盘上
+      //    上一份 ＋1 现读——重写一次就是站 8 内部再拍一次，⛔ 不新开确认点、⛔ 不新增
+      //    `awaiting-*` 值。`proposal.version` 另有一义＝**第几稿**（`goldDraftVersionOf`）。
+      assertSessionOwned(project, sessionId)
+      const { approved } = body
+      if (typeof approved !== 'boolean') {
+        return reject(400, 'gold-draft-approve 需要 approved: true/false')
+      }
+      const meta = readMeta(project)
+      if (meta === null || meta.status !== 'awaiting-gold') {
+        return reject(409, '当前没有等待确认的最佳范例章')
+      }
+      const gn = goldN(meta)
+      const draftVersion = goldDraftVersionOf(project, meta)
+      if (approved === false) {
+        // ── 票 `premature-announce/01`：重做前先看还有几个小助手在写（与 `gold-approve`
+        //    反向那一支同一个病、同一条处置——归档会把它们正在写的三件一起搬走）。
+        const running = await countRunningSubagents(ctx, sessionId)
+        if (running !== null && running > 0) {
+          // ⚠️ 单行调用是**有意的**（同 `gold-approve` 那一支）：账本产物字段对账表的锚点
+          // 按源码子串登记、一格一行。
+          const redoHint = `⛔ 现在还不能重写这一章：还有 ${running} 个小助手在写范例章这一段的产物。等它们回来再点；想马上重写，先在对话里让 AI 停掉它们。`
+          appendEvent(project, 'textbook/hint', { text: redoHint })
+          return reject(409, `还有 ${running} 个小助手在写范例章这一段的产物，现在归档会把它们正在写的东西一起搬走——等它们回来再重写。`)
+        }
+        // 归档先于记账（票 `depth-review-2026-10/04`）：搬不走就当场 409，
+        // `goldRedoNote` 一个字不写、结论件也不落（这一次拍板没有生效）。
+        const archived = archiveWorkArtifacts(project, goldArchiveNames(gn))
+        if (archived.misses.length > 0) {
+          return reject(409, `最佳范例章的旧稿没能归档（${archived.misses.join('、')}），这次重写没有生效：旧稿还留在原位，直接重写会拿它当新结果。请关掉占用这些文件的程序后重试。`)
+        }
+        updateMeta(project, (state) => {
+          state.goldRedoNote = '整版重写：不参考上一稿的结构与表述，按学习目标与材料全新生成；用户意见仅作为方向参考。'
+          state.status = 'running'
+        })
+        appendEvent(project, 'textbook/hint', { text: goldRewriteAnnounce(meta) })
+      }
+      // ⚠️ **驳回也留**：不落这一份，界面就无从知道「用户已经对稿子表态了」（站 8／9 的
+      // 区分全靠这份件，⛔ 不靠新状态值）。
+      recordStationDecision(project, 8, {
+        approved,
+        decidedBy: 'human',
+        humanEvent,
+        proposal: { file: chapterRel(gn), version: draftVersion },
+        reasons: approved === true
+          ? [`第 ${draftVersion} 稿通过`]
+          : [`第 ${draftVersion} 稿不满意，已归档重写`],
+      })
+      if (approved === false) void kick(ctx, project)
+      return accept({ project, approved, draftVersion })
     }
     case 'gold-target-words-set': {
       assertSessionOwned(project, sessionId)
@@ -286,6 +376,20 @@ export const actGold = familyOf('gold', async ({ ctx: ctx, action: action, sessi
         JSON.stringify({ ...updated.outline, chapters: updated.outline.chapters }, null, 2),
         'utf8',
       )
+      // ── 站 9 的**拍板**（票 `confirm-points-redesign-build/08`，口径出处＝规划票 07 §3）──
+      // 「💾 保存各章字数」（票 `ui-display-redesign/07` 改名；原名「写回章节安排」）这一颗键
+      // **升格**成站 9 的拍板键：一次点击＝① 字数写回
+      // `meta.outline.chapters[].targetWords` ② 当场重写 `工作区/outline.md` ③ 落这份结论件。
+      // ⛔ 前三步今天的样子一个字没改（最佳范例章的原定目标不能改、`canEditTargetWords`
+      // 那一档、不新造字段、不写 `meta.targetWords`）——本票只**加**这第三样。
+      // `version: null` ＝「非方案文档」（票 05 §2 已裁；本件指回的是章节安排，不是一份方案正文）。
+      recordStationDecision(project, 9, {
+        approved: true,
+        decidedBy: 'human',
+        humanEvent,
+        proposal: { file: '工作区/outline.md', version: null },
+        reasons: [`写回 ${[...normalized].length} 章的逐章目标`],
+      })
       return accept({ project,
         targets: [...normalized].map(([n, targetWords]) => ({ n, targetWords })),
         canEditTargetWords: true })
@@ -300,6 +404,21 @@ export const actGold = familyOf('gold', async ({ ctx: ctx, action: action, sessi
       const goldMeta = readMeta(project)
       if (goldMeta === null || goldMeta.status !== 'awaiting-gold') {
         return reject(409, '当前没有等待确认的最佳范例章')
+      }
+      // ── 前置：**站 9 已拍板**（spec §244／§535；维护者 2026-10-16 明确授权这一笔）──────────
+      // 站 8／9 拆两屏之后，站 9 屏末尾那颗「确认，定稿」与它旁边那颗「🔁 整版重写」在界面上
+      // **都**钉在 `!station9Decided` 上（`src/ui/gold-table.js`）；而 AI 那条路（本动作
+      // `agentCallable: true`，见 `src/contract-actions.js`）打的是**同一条 HTTP 动作**
+      // ⇒ 这道前置只做在界面＝AI 那条路可以绕过那颗键直接定稿。
+      // ⇒ 拦在**这一段自己的就绪判据**这里：与下面 `approved:true` 那一支的
+      // `goldArtifactProblems`（「放行那一跳也过一遍这一段自己的就绪判据」）同一条纪律，
+      // ⛔ 不在路由层再抄一份。
+      // ⚠️ **两支同形**：定稿（true）与推翻重写（false）都要过——界面上那两颗键同挂一个条件。
+      // ⚠️ 排在 `body.targetWords` 那段之前是**有意的**：那段会写 meta ＋ 落一笔 hint，
+      // 被拦下的这一跳必须**一分账都不落**。
+      // 「站 9 拍没拍」的读数**只有一处**：`decision-record.js` 的 `decisionApproved()`。
+      if (!decisionApproved(readStationDecision(project, 9))) {
+        return reject(409, GOLD_APPROVE_NEEDS_STATION9)
       }
       if (typeof body.targetWords === 'number' && Number.isFinite(body.targetWords) && body.targetWords >= 500) {
         // 兼容旧单值：仅作未填章的兜底。走单一入口（当场新读）先落账——意见为空时下面 approved 路径
@@ -341,15 +460,11 @@ export const actGold = familyOf('gold', async ({ ctx: ctx, action: action, sessi
           return reject(409, `还有 ${running} 个小助手在写范例章这一段的产物，现在归档会把它们正在写的东西一起搬走——等它们回来再重写。`)
         }
         // 归档范例章产物（rmSync 在部分盘上失效，用移动代替删除）。
-        const archive = join(workDir(project), '_旧版产物')
-        mkdirSync(archive, { recursive: true })
-        const stamp = Date.now().toString(36)
+        // 票 `depth-review-2026-10/04`：归档先于记账——搬不走就当场 409，`goldRedoNote` 一个字不写。
         const gN = goldN(goldMeta)
-        for (const name of goldArchiveNames(gN)) {
-          const target = workFile(project, name)
-          if (existsSync(target)) {
-            try { renameSync(target, join(archive, `${name}.${stamp}`)) } catch { /* 尽力归档 */ }
-          }
+        const archived = archiveWorkArtifacts(project, goldArchiveNames(gN))
+        if (archived.misses.length > 0) {
+          return reject(409, `最佳范例章的旧稿没能归档（${archived.misses.join('、')}），这次整版重写没有生效：旧稿还留在原位，直接重写会拿它当新结果。请关掉占用这些文件的程序后重试。`)
         }
         // 整版重写：明确告知 AI 这不是逐条修订，是推翻重来（意见保留为方向）。
         // 走单一入口（当场新读）：「最后动静时刻」只归「记一笔」所有，改法里不再自己写 updatedAt。
@@ -357,7 +472,7 @@ export const actGold = familyOf('gold', async ({ ctx: ctx, action: action, sessi
           state.goldRedoNote = '整版重写：不参考上一稿的结构与表述，按学习目标与材料全新生成；用户意见仅作为方向参考。'
           state.status = 'running'
         })
-        appendEvent(project, 'textbook/hint', { text: '↩️ 范例章已标记重写，AI 正在重新生成。' })
+        appendEvent(project, 'textbook/hint', { text: goldRewriteAnnounce(goldMeta) })
         void kick(ctx, project)
       }
       return accept({ project, approved })

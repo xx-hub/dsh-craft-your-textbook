@@ -21,11 +21,13 @@ import { familyOf, reject, accept } from '../action-runner.js'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { generateContent } from '../../content-lib.js'
-import { guessRoleFromName } from '../../domain-rules.js'
 
 
-/** 动作族 · 向导与素材识别：'wizard-suggest' / 'suggest-roles'。
- *  ⚠️ 这两族都不需要 `project`（无书的动作），所以签名里**不接**它——
+/** 动作族 · 向导：'wizard-suggest'。
+ *  ⚠️ 票 `pre-gold-build/02`：同族的 `suggest-roles`（上传那一刻的角色识别）整条退役——
+ *  上传屏不再有「角色」这一栏，那路识别只看得到文件名；角色改由探查段开头那一趟
+ *  **书级材料判定**产出（派发档 `material-survey`）。
+ *  ⚠️ 这一族仍不需要 `project`（无书的动作），所以签名里**不接**它——
  *  原先写 `_project: _project` 是票 03 第 2 步留下的死绑定，与 `ActionRequest`
  *  typedef 的 `project` 对不上；用不到就别解构。 */
 export const actWizard = familyOf('wizard', async ({ ctx: ctx, action: action, sessionId: sessionId, body: body }) => {
@@ -70,36 +72,6 @@ export const actWizard = familyOf('wizard', async ({ ctx: ctx, action: action, s
                 { name: `${hint.slice(0, 12)}：从例子到规律`, goal: '能用自己的话讲清楚知识点的来龙去脉，做对配套练习', science: false },
                 { name: `${hint.slice(0, 12)}：查漏补缺版`, goal: '找出最薄弱的两三处并逐一攻克，配套练习正确率达到九成', science: false },
               ],
-        })
-      }
-      return reply
-    }
-    case 'suggest-roles': {
-      // 上传时 AI 识别每本 PDF 的角色，人类只确认；AI 失败按文件名规则兜底。
-      let reply
-      const files = Array.isArray(body.files)
-        ? body.files.filter((f) => typeof f === 'string' && f.trim() !== '').slice(0, 20)
-        : []
-      if (files.length === 0) {
-        return reject(400, '没有可识别的文件')
-      }
-      const wizardId = `wizard-${sessionId.replace(/[^a-z0-9-]/g, '-').slice(0, 40)}`
-      mkdirSync(projectDir(wizardId), { recursive: true })
-      const runtime = {
-        ctx,
-        demo: false,
-        dir: projectsRoot(),
-        project: { name: '材料识别' },
-        getParent: () => getParent(ctx, wizardId, { demo: false }),
-      }
-      try {
-        const result = await generateContent(runtime, 'roles', { files })
-        reply = accept({ roles: result.roles })
-      } catch (error) {
-        ctx.logger.warn(`textbook: suggest-roles LLM 失败，使用文件名规则: ${String(error instanceof Error ? error.message : error)}`)
-        reply = accept({
-          fallback: true,
-          roles: files.map((file) => ({ file, role: guessRoleFromName(file) })),
         })
       }
       return reply

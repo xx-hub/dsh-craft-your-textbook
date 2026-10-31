@@ -7,8 +7,8 @@
  *  3. 轮询 GET /api/v4/extract-results/batch/{batch_id}
  *  4. 下载 zip 结果并解压（full.md + 图片）
  *
- * Token 读取：环境变量 MINERU_TOKEN → $DSH_HOME/.credentials.yaml → $DSH_HOME/.env
- * （步骤5 实现完整工具；当前为占位，确保插件行可加载。）
+ * Token 读取：**不在这里**——真取 Token 的那条路只有 `mineru-lib.js` 的 `resolveMineruToken`
+ * （读序 settings → env → credentials，票 `token-banner/01`）。本文件是占位插件，只保证插件行可加载。
  */
 
 export const name = 'textbook-mineru'

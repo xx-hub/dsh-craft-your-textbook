@@ -32,7 +32,7 @@
  *   · 导航只换屏、不开文件、不发动作（ADR-0010 / 0012）。
  *
  * 依赖方向（单向、无环）：本 module **import** `view-rules` 的展示派生（`stepWord` / `phaseOfSegment` /
- * `openableArtifacts` / `decisionText` / `artifactFactText` / `PHASE_INTRO` / `PHASE_UI` /
+ * `openableArtifacts` / `decisionText` / `artifactFactText` / `phaseIntro` / `PHASE_UI` /
  * `segmentHuman`）与 `domain-rules` 的**机器身份**（`SEGMENT_PHASE`）；`view-rules` **不** import
  * 本 module。`stepWord` 留在 `view-rules`
  * （`materialConversionActivityText` 与两屏共用），`stepIcon` 与 `rowText` 的合成搬进本 module
@@ -46,7 +46,7 @@ import {
 	decisionText,
 	artifactFactText,
 	indexRunningChapterClaims,
-	PHASE_INTRO,
+	phaseIntro,
 	segmentHuman,
 } from "./view-rules.js";
 // ⚠️ 直连 `domain-rules` 的**只剩** `SEGMENT_PHASE` 一个——它是**机器身份**（`seg.phase` 缺值时按
@@ -86,7 +86,7 @@ const GOLD_SOURCE_NOTE = "最佳范例章，第 4 阶段已写";
 const chapterStepKey = (segmentKey, stepKey) => `${segmentKey}:${stepKey}`;
 
 /** 四态图标（票 04：全览条清单与阶段页共用的那一份；没登记的态退回「还没到」的圈，不猜）。 */
-const STEP_ICON = Object.freeze({ done: "·", "waiting-user": "⚡", active: "▶", pending: "○" });
+const STEP_ICON = Object.freeze({ done: "✓", "waiting-user": "⚡", active: "▶", pending: "○" });
 const stepIcon = (state) => STEP_ICON[state] ?? STEP_ICON.pending;
 
 /** 四态行的可见文字：`图标 步名（状态词）`。全览条与阶段页都吃行上算好的 `rowText`，不再各拼。 */
@@ -358,7 +358,7 @@ function deriveSteps(meta, segments, chapterClaims) {
 			const step = {
 				key: chapterStepKey(segmentKey, CHAPTER_STEPS[i].key),
 				no: 0,
-				title: `第 ${n} 章 · ${CHAPTER_STEPS[i].name}`,
+				title: `第 ${n} 章 ${CHAPTER_STEPS[i].name}`,
 				phase: chapterStepPhase(seg),
 				status: statuses[i],
 				// 票 24（P17）：这一档的说法由「产物在不在盘上」决定，不让 UI 自己猜。
@@ -497,10 +497,10 @@ function groupRows(overviewRows) {
 function projectOverview(snapshot) {
 	const { counts } = snapshot;
 	const headline = counts.chaptersPlanned
-		? `全书 ${counts.total} 步 · ${counts.remaining === 0 ? "已全部完成" : `还剩 ${counts.remaining} 步`}`
-		: `已知 ${counts.known} 步 · 章节排定后补齐`;
+		? `全书 ${counts.total} 步，${counts.remaining === 0 ? "已全部完成" : `还剩 ${counts.remaining} 步`}`
+		: `已知 ${counts.known} 步，章节排定后补齐`;
 	const currentPhase = Number.isInteger(snapshot.meta?.phase) ? snapshot.meta.phase : 1;
-	const currentPhaseText = `现在在第 ${currentPhase} 阶段 · ${PHASE_UI[currentPhase] ?? ""}`;
+	const currentPhaseText = `现在在第 ${currentPhase} 阶段：${PHASE_UI[currentPhase] ?? ""}`;
 	return {
 		kind: "overview",
 		headline,
@@ -564,7 +564,10 @@ function projectPhase(snapshot, request) {
 		kind: "phase",
 		phase,
 		name: PHASE_UI[phase] ?? String(phase),
-		intro: PHASE_INTRO[phase] ?? "",
+		// ⚠️ 抬头那一句**带生效条件**（票 `pre-gold-build/08` 的承诺面②）：阶段 5 的「每章机器检查过」
+		// 在演示书与勾过 `audit-skip` 豁免的书上**零判据**，`phaseIntro` 在那两支换一句实话。
+		// 唯一出口就是这里——阶段页只摆 `page.intro`，⛔ 别处不许自己拼这句。
+		intro: phaseIntro(phase, snapshot.meta),
 		rows,
 		focusedStepKey,
 		doneCount,

@@ -24,6 +24,7 @@ import {
   sanitizeFolderName,
   freeBookDir,
   readMeta,
+  updateMeta,
   createMeta,
   appendEvent,
   listProjects,
@@ -34,11 +35,16 @@ import {
   workFile,
   goldN,
   kick,
+  // 票 `demo-channel-full/10`：演示书建档时注进它自带的那几条协作信号（一条示例留言 ＋ 三条示例风格线）。
+  seedDemoCollabSignals,
 } from '../engine.js'
 import { familyOf, reject, accept } from '../action-runner.js'
+// 票 `demo-channel-full/05`：演示书那一份「应当有什么」（清单）与「实际有什么」（登记）
+// ——两件都走**生产那一条实现**，⛔ 不手写 JSON（`book-create` 那边也是这两件）。
+import { refreshArtifactRegistry, writeArtifactManifest } from '../book-shape.js'
 import { mkdirSync, writeFileSync, appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { join, basename } from 'node:path'
-import { readSettings, writeSettings } from '../../mineru-lib.js'
+import { readSettings, writeSettings, mineruTokenStatus } from '../../mineru-lib.js'
 import { generateContent } from '../../content-lib.js'
 import { countHanzi, chapterName } from '../../domain-rules.js'
 
@@ -179,7 +185,17 @@ export const actPatternsOps = familyOf('patterns-ops', async ({ ctx: ctx, action
         settings.mineruToken = trimmed
       }
       writeSettings(settings)
-      return accept({ settings: { mineruTokenSet: typeof settings.mineruToken === 'string' && settings.mineruToken !== '' } })
+      // 票 `token-banner/01`：回包与 GET 用**同一份判据**（`mineruTokenStatus`），并把来源与
+      // 脱敏值一起交给界面——保存后不刷新页面也要立刻知道「现在用的是设置」。
+      // ⚠️ 明文 Token 只进 settings.json（0600），⛔ 不进回包、不进日志、不进事件流。
+      const token = mineruTokenStatus()
+      return accept({
+        settings: {
+          mineruTokenSet: token.configured,
+          mineruTokenSource: token.source,
+          mineruTokenMasked: token.masked,
+        },
+      })
     }
     case 'demo-run': {
       // ── 阶段一（材料准备）在演示书里**为什么不真做**（票 `demo-flow-fidelity` 的 01 Q4，
@@ -188,13 +204,49 @@ export const actPatternsOps = familyOf('patterns-ops', async ({ ctx: ctx, action
       //    见下面 `createMeta`），盘上压根没有 `sources/` 目录，也没有任何可转换的真文件。
       // ② 真跑一次转换要 MinerU Token、要时间，还要处理失败态与重试——这与演示入口的语义
       //    （不花模型额度、几步走完给人看流程）正面冲突。
-      // ③ 所以阶段一在演示书里是「已完成」的**展示态**，不是「没做」：下面补写的
-      //    `phase-start`／`phase-end` 两条事件让阶段片显示为已完成，用户点开阶段片仍能看到
-      //    材料行与那张已完成卡。这条豁免登记在 `src/demo-exemptions.js` 的
-      //    `phase1-no-real-conversion`（声明面只是登记，不放行任何东西）。
+      // ③ 所以阶段一在演示书里是「已完成」的**展示态**，不是「没做」：`phase-start(1)` ＋
+      //    `phase-end(1)` 两条事件让阶段片显示为已完成，用户点开阶段片仍能看到材料行与那张已完成卡。
+      //    这条豁免登记在 `src/demo-exemptions.js` 的 `phase1-no-real-conversion`
+      //    （声明面只是登记，不放行任何东西）。
       //
-      // 开发/演示：创建演示书并全流程跑一遍（demo 模式，产出明确标注）
-      // 会话唯一书守卫：一个会话至多一本（和 book-create 同一套约束），
+      // ── 两个模式（票 `demo-channel-full/02`）──────────────────────────────────────────
+      // **本票之前**这里建完书就写满三条事件、`phase: 2`、直接 `kick` ⇒ 用户点「先建一本演示书
+      // 试试」**永远看不到材料准备那一屏**（`dev/gallery/README.md` 的「已知缺口」第 1 条就是它）。
+      // 现在拆成两个模式，**共用同一个守卫**（一个会话至多一本书）：
+      //   · **不带参数**（默认）＝**建书并停在阶段一**：只写 `phase-start(1)`，`phase: 1`／`status: 'active'`，
+      //     ⛔ 不 `kick`——那一屏就是给用户看的（`src/ui/event-cards.js` 的 `UploadArea` 在演示书 ＋
+      //     阶段一上多一颗「▶ 开始演示」）。
+      //   · **`mode: 'next'`** ＝**继续**：把**本会话那本停在阶段一的演示书**推进到阶段二
+      //     （补 `phase-end(1)` ＋ `phase-start(2)`、置 `phase: 2, status: 'running'`、`kick`）。
+      //     前置不成立时 409，并**说清是哪一条**（没有书／不是演示书／已经过了阶段一）。
+      // ⛔ 不加第三个模式：要停的只有阶段一这一处；⛔ 也不另开一个动作——`demo-run` 已在冻结契约表里
+      //   （`src/contract-actions.js` 的 `['demo-run', 'patterns-ops', 'no-book', …]`），另开动作会动那份
+      //   计数与三处散文，而语义仍是同一件事（**开演示书 / 让它往下走**）。
+      const demoMode = body?.mode === 'next' ? 'next' : 'create'
+
+      if (demoMode === 'next') {
+        // 继续：只认「本会话那本停在阶段一的演示书」。⛔ 不碰别的书——那不是「继续」，是别的事。
+        // ⚠️ `listProjects()` 回的是**meta 对象**（不是 id；见 `engine.js` 那个函数的注释），
+        // 所以这里直接读它，⛔ 别拿它当 id 再 `readMeta` 一次（那会把整份 meta 当 id 传下去）。
+        const heldMeta = listProjects(sessionId).find((meta) => meta !== null && meta.demo === true)
+        if (heldMeta === undefined) {
+          return reject(409, '这个会话里没有停在阶段一的演示书可以继续：先建一本演示书（或者它已经往下跑了）')
+        }
+        const heldId = heldMeta.id
+        if (heldMeta.phase !== 1) {
+          return reject(409, `这本演示书已经过了阶段一（现在在阶段 ${heldMeta.phase}）——「继续」只在材料准备那一屏有意义`)
+        }
+        appendEvent(heldId, 'textbook/phase-end', { phase: 1, label: PHASE_LABELS[1] })
+        appendEvent(heldId, 'textbook/phase-start', { phase: 2, label: PHASE_LABELS[2] })
+        updateMeta(heldId, (state) => {
+          state.phase = 2
+          state.status = 'running'
+        })
+        void kick(ctx, heldId)
+        return accept({ project: heldId, demo: true, continued: true })
+      }
+
+      // 建书：会话唯一书守卫（一个会话至多一本，和 book-create 同一套约束），
       // 防止界面入口在同会话连开两本演示书。
       if (listProjects(sessionId).length > 0) {
         return reject(409, '这个会话已经有一本书了：先完成它、删除它，或者新建一个会话再开演示书')
@@ -210,15 +262,31 @@ export const actPatternsOps = familyOf('patterns-ops', async ({ ctx: ctx, action
         route: 'blueprint', science: false, demo: true, session: sessionId,
         folder: basename(dir),
         sources: [{ file: '示例教材.pdf', role: '学生用书', converted: 'ok' }],
-        phase: 2, status: 'running',
+        // 停在阶段一（展示态）：`status: 'active'` 与 `book-create` 建出来的新书同一档，
+        // 于是这一屏走的是**同一个** `focusCardKey`（`phase === 1` ⇒ `upload` 卡）。
+        phase: 1, status: 'active',
         createdAt: Date.now(), updatedAt: Date.now(), eventCount: 0,
       }
       createMeta(meta)
+      // ── 票 `demo-channel-full/10`：演示书自带的那几条**协作信号**（一条示例留言 ＋ 三条示例风格线）──
+      // 在**建档那一刻**注入 ⇒ 顶栏那两颗键（`📮 留言(N)`／`🎨 风格线(N)`，只在有数据时渲染）从**第一帧**
+      // 起就在，用户不用等到铺章才看得见这一族；它们由演示支的终检那一趟按真书契约处置（销号 ＋ 逐条交代去向）。
+      // ⚠️ 注入是**幂等**的（只补缺的 id）；风格线镜像 `工作区/style-line.md` 由生产那一份现推（⛔ 不手写）。
+      // ⚠️ 失败一律吞：派生件写不进去不等于建书失败（与上面那两件同一条口径）。
+      try { seedDemoCollabSignals(id) } catch { /* 派生件写不进去不等于建书失败 */ }
+      // ── 票 `demo-channel-full/05`：演示书也要有「应当有什么」那一份 ─────────────────────────
+      // 与 `book-create` **同一处两件**（`writeArtifactManifest` ＋ `refreshArtifactRegistry`）：
+      // 在此之前演示书**没有** `工作区/产物清单.json` ⇒ `/textbook/process` 的 `shape` 恒 `null`
+      // ⇒ 「这本书缺了哪几件产物」在演示通道里既没有数据、也没有出口（票面「病」那一节）。
+      // ⚠️ 清单是**静态件**（建档时探形状写一次），登记是**派生件**（每次动作后由
+      // `workflow.js` 的动作漏斗重扫）——所以这里只负责把两份都建起来，⛔ 不在这里逐件补行。
+      // 失败一律吞：形状件是派生的，写不进去不等于建书失败（与 `books.js` 同一条口径）。
+      try {
+        writeArtifactManifest(id, meta)
+        refreshArtifactRegistry(id)
+      } catch { /* 形状件是派生的，写不进去不等于建书失败 */ }
       appendEvent(id, 'textbook/phase-start', { phase: 1, label: PHASE_LABELS[1] })
-      appendEvent(id, 'textbook/phase-end', { phase: 1, label: PHASE_LABELS[1] })
-      appendEvent(id, 'textbook/phase-start', { phase: 2, label: PHASE_LABELS[2] })
-      void kick(ctx, id)
-      return accept({ project: id, demo: true })
+      return accept({ project: id, demo: true, heldAtPhase1: true })
     }
     case 'debug-spawn': {
       // 临时调试动作：最小子代理派发，返回完整结果（验证后移除）。

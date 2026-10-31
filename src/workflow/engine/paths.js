@@ -1,5 +1,5 @@
 /**
- * 造书工作台 · 书夹位置注册表（engine 内部子模块 2/3，票 `depth-review-2026-10/10`）
+ * 造书工作台 · 书夹位置注册表（engine 内部子模块 2/4，票 `depth-review-2026-10/10`）
  *
  * 本簇是**位置**：DSH home、项目根目录、注册表（旧书不动、仍记在默认目录；回收站里的书也记录新位置）、
  * 每本书的账本／状态／过程记录三个固定路径，以及给书名找空位。
@@ -18,6 +18,7 @@ import { join, resolve } from 'node:path'
 import { mkdirSync, readFileSync, existsSync, writeFileSync, statSync } from 'node:fs'
 
 import { PROJECT_ID_RE } from './labels.js'
+import { isWithin } from '../../path-guard.js'
 import {
   WORK_DIR_NAME,
   PROPOSAL_DIR_NAME,
@@ -30,6 +31,8 @@ import {
   DETAIL_DIR_NAME,
   REPORT_DIR_NAME,
   CHAPTER_SHARD_DIR_NAME,
+  chapterName,
+  auditName,
   LEGACY_WORK_DIR_NAME,
   LEGACY_PROPOSAL_DIR_NAME,
   LEGACY_ARCHIVE_DIR_NAME,
@@ -169,7 +172,8 @@ export function processLogPath(projectId) { return join(projectDir(projectId), '
 // **写侧永远用新名；读侧新名优先、老名兜底。** 判法**只此一份**（{@link existingBookDir}）：
 // **新名目录存在 ⇒ 用它；不存在而老名目录存在 ⇒ 用老名那个（只读）；都没有 ⇒ 建新名。**
 //
-// **本文件的解析函数一共 9 个**（`test-book-dir-rename.mjs` 逐个点名它们都在这个文件里）：
+// **本文件里参与老名兜底判法的解析函数一共 4 个**（`test-book-dir-rename.mjs` 逐个点名它们
+// 都在这个文件里）：
 // · **走老名兜底判法的 4 个**——`workDir`（`工作区/`）、`proposalDir`（`工作区/方案/`）、
 //   `archiveDir`（`过程/存档/`）、`convertedDir`（`材料/转换稿/`）；
 // · **结构上不参与的 5 个**——`processDir`／`materialDir`／`detailDir`／`reportDir`／
@@ -234,6 +238,45 @@ export function workDir(projectId) {
   if (hit !== null) return hit
   mkdirSync(current, { recursive: true })
   return current
+}
+
+/**
+ * 工作区里的一个文件（`工作区/<name>`）——**绝对落点的唯一守卫点**（票 `stage-state-facts/01` 从
+ * `engine.js` 搬来；`workFile` 的 55 个调用点一行未改，engine 仍再导出它）。
+ *
+ * ⚠️ `name` 是**基名**，不是书夹相对路径：`workFile(p, 'chapter-01.md')` ⇒ `工作区/chapter-01.md`
+ * （给成 `工作区/chapter-01.md` 会拼成 `工作区/工作区/…`）。
+ * ⚠️ 越界守卫只此一处（`docs/测试信任边界.md`；`src/path-guard.js` 的落点表第 4 行）。
+ *
+ * @param {string} projectId
+ * @param {string} name 工作区下的基名
+ * @returns {string} 绝对路径
+ */
+export function workFile(projectId, name) {
+  const dir = workDir(projectId)
+  const target = resolve(dir, name)
+  if (!isWithin(dir, target)) {
+    throw new Error(`非法文件路径: ${name}`)
+  }
+  return target
+}
+
+/**
+ * 某章的两份产物路径（正文＋同号检查件）——**章级那条路唯一的路径解析**（票
+ * `stage-state-facts/01` 从 `engine.js` 搬来，engine 仍再导出；6 个调用点一行未改）。
+ *
+ * ⚠️ `file`／`audit` 是**基名**（喂给 `workFile`），不是书夹相对路径：给成 `chapterRel` 会读成
+ * `工作区/工作区/chapter-NN.md`（票 `depth-review-2026-10/05` 的实撞）。
+ * ⚠️ 审计族的基名出口在 `domain-rules.auditName`，本函数不手拼第二份。
+ *
+ * @param {string} projectId
+ * @param {number} n 1 起的章号
+ * @returns {{file: string, audit: string, chapterPath: string, auditPath: string}}
+ */
+export function chapterArtifacts(projectId, n) {
+  const file = chapterName(n)
+  const audit = auditName(n)
+  return { file, audit, chapterPath: workFile(projectId, file), auditPath: workFile(projectId, audit) }
 }
 
 /**

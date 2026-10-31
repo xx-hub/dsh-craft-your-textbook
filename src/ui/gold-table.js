@@ -8,6 +8,10 @@
 import { createElement, useEffect, useState } from "react";
 import { defineCardView } from "./card-view.js";
 import { S } from "./styles.js";
+// 票 `ui-display-redesign/07`：两屏的卡头问句＋派生事实句复用票 01 落的共用卡头行小件。
+// ⚠️ 问句那一行必须在本文件里用 `<strong>` 字面量构造好再传进去（理由见 `card-head.js` 文件头：
+// `test-context-vocabulary` 的焦点区卡标题取证面只认卡片自己文件里的 `<strong>` 字面量）。
+import { CardHead, CARD_HEAD_QUESTION_STYLE } from "./card-head.js";
 import {
 	splitParagraphs,
 	paragraphHint,
@@ -16,13 +20,28 @@ import {
 	// 票 02：意见 kind 词的**唯一一份**正名在 `rules.js`——谈判桌与章节卡说同一件事，不各写一份
 	// （此前这里逐字抄了一份，与 `rules.js` 的 `REVIEW_KIND_TEXT` 恒等）。
 	REVIEW_KIND_TEXT,
+	// 票 `ui-systematic-fixes/02`：兜底方向只在一处决定（spec §2）——意见 kind／状态两张表都走它。
+	fallbackWord,
 } from "./rules.js";
 import { chapterRel, goldChapterNo } from "../domain-rules.js";
+// 票 `audit-gate-semantics/01`：审计结论的**唯一计算**（issues 的 level＋status 现算）。
+// 徽章与卡头事实句都读它，⛔ 不在这里再判一次 `audit.passed`（那份自报值机器不采信）。
+import { auditVerdict } from "../audit-semantics.js";
 import { READER_PARA_STYLE, renderInline } from "./md-render.js";
+// 票 `demo-channel-full/25`：段落三键确认层那句「这一下会发生什么」的**两个取值**收在 view-rules
+// （唯一出口），本文件只渲染它、⛔ 不自己拼措辞。`GoldReader` 因此要吃 `meta`（两个宿主
+// ——谈判桌 `GoldTable` 与过目态章节卡 `ChaptersCard`——手上都有 `meta`，各传一次）。
+import { paraMarkConfirmNote, goldRewriteHint, goldRewriteConfirmNote } from "./view-rules.js";
 
 // ── 谈判桌·意见单 ───────────────────────────────────────────────────────────
 
-const OPINION_STATUS_TEXT = {
+/**
+ * 意见状态 → 界面词（**唯一一份**）。键＝机器状态值（`pending`／`sent`／`applied`／`revoked`，
+ * 由本仓代码产生 ⇒ **闭集**）；未登记的一档**不印**（`fallbackWord` 的缺省方向，spec §2）。
+ *
+ * 导出只为判据（G3 逐表枚举）能直调这张表——⛔ 不是给调用点绕过 `opinionStatusText` 的入口。
+ */
+export const OPINION_STATUS_TEXT = {
 	pending: "待处理",
 	sent: "AI 修订中",
 	applied: "AI 已改",
@@ -60,7 +79,8 @@ export const DELIVERED_AWAITING_SEAL_TEXT = "已交付·待定稿";
  */
 export function opinionStatusText(status, { draftLanded = false } = {}) {
 	if (status === "sent" && draftLanded === true) return DELIVERED_AWAITING_SEAL_TEXT;
-	return OPINION_STATUS_TEXT[status] ?? status;
+	// 票 `ui-systematic-fixes/02`：闭集未登记 ⇒ `null`＝不印（不再是 `?? status` 那种原样露值）。
+	return fallbackWord(OPINION_STATUS_TEXT, status);
 }
 
 /**
@@ -78,6 +98,35 @@ export function opinionStatusText(status, { draftLanded = false } = {}) {
  */
 export const DISPLAY_PERIOD_PENDING_HINT =
 	"记下了；这一轮检查不会读这些意见，等检查收工就能点这颗键让 AI 照它们改";
+
+/**
+ * 意见全是 `applied` 时那句提示（票 `pre-gold-build/08` 的承诺面③）——**唯一出口**。
+ *
+ * ── 病（依据 `.scratch/pre-gold-processes/spec.md` 债-25，弱候选）──────────────────
+ * **承诺面**：界面文案（给用户）。原句是「这些意见这一稿**都改过了**」。
+ * **实现面今天判什么**：这一屏的 `applied` 只有**一个**机器写入点——`stage-submit gold` 那一刻把
+ * 本轮交办出去的那批**整批翻转**（`actions/chapters.js`：`for (const o of state.goldOpinions)
+ * if (o.status === 'sent') o.status = 'applied'`；演示通道同形在 `engine.js` 的 gold 分支）。
+ * 它**不读**这条意见是**怎么**被处置的，也**不验「改没改到」**——机器人根本不看正文与意见的对应。
+ * ⚠️ 收窄一档说清：spec 债-25 引的那条「主笔交工时**逐条点名处置**过」（`handledReviews` 的
+ * `{id, how}`，一条不点名 400 打回）走的是**章级抽查意见**那条路（`meta.pendingReviews`，屏在章节卡），
+ * **不是这一屏**（`meta.goldOpinions`，且 gold 意见条目**不带 `how` 字段**）⇒ 这一屏的机器判据比
+ * 债-25 写的还弱：连「逐条点名」都没有。
+ *
+ * ── 口径（票面完成判据第 3 条要求写进注释）──────────────────────────────────────
+ * **给了可核的原话 ≠ 有判据**。判据＝**机器拦**（收口票 10 裁的口径）：一条意见满足什么条件会被
+ * 机器打回／不推进，才叫判据。屏上给一句「AI 怎么改的」原话，只是让**用户能自己核**——它**只降低
+ * 严重度**，不改变「承诺面说『改到了』、机器判的是『状态被翻过了』」这个落差。这一屏连那句原话都
+ * 没有（`how` 不在 gold 意见上），所以连「降低严重度」都不成立 ⇒ 句子必须降到机器真判得到的强度。
+ *
+ * ── 处置（票面二选一：收敛文案／补足机制）＝收敛文案 ────────────────────────────
+ * 补足机制要真的验「这一稿有没有改到这条意见上」（读正文与 `target` 的对应），那是**另一件事、
+ * 另一个 effort 的面**（票 08 的射程是「承诺面与实现面对齐」，不是新增内容判据）。
+ * ⚠️ 同屏的状态词「AI 已改」（`OPINION_STATUS_TEXT.applied`）**不在本票射程**：它是 `CONTEXT.md`
+ * 「界面用词表」登记在册的**条目状态词**（与「待处理／AI 修订中／已撤回」同一栏），改它＝改一个
+ * 登记过的词，须另一张票裁决；本票只动这一句「这一稿都改过了」。
+ */
+export const APPLIED_HINT_TEXT = "这些意见这一稿都处置过了（AI 交回了新稿；改没改到机器不核）";
 
 /**
  * 意见单旁的**状态提示**（票 gold-revision-flow/01）：按真实状态说话。
@@ -114,7 +163,7 @@ export function opinionActionHint(list, { draftLanded = false, displayPeriod = n
 		return draftLanded === true
 			? "这一稿已经改回来了，还没定稿"
 			: "这一轮已经交给 AI 了，等它改完";
-	if (applied > 0) return "这些意见这一稿都改过了";
+	if (applied > 0) return APPLIED_HINT_TEXT;
 	// 票面 AC 点名的那一支：清单里只剩「已撤回」时**也不许**说「先标记」——屏上明明挂着意见
 	//（划线的那几条），那句话仍像在问用户"你还没标意见"。说清真实状态并指出下一步。
 	if (revoked > 0) return "这些意见都撤回了；要提新的，读到哪标到哪";
@@ -138,6 +187,9 @@ export function GoldOpinionList(props) {
 	}
 	let seq = 0;
 	const rows = list.map((o) => {
+		// 票 `ui-systematic-fixes/02`：意见 kind 的词走兜底出口（spec §2 的**闭集**那一半）——
+		// 未登记 ⇒ `null`＝**不印**（不是原样露机器词）；登记过的一格措辞不变。
+		const kindText = fallbackWord(REVIEW_KIND_TEXT, o.kind);
 		if (o.status === "revoked") {
 			return createElement(
 				"div",
@@ -150,7 +202,7 @@ export function GoldOpinionList(props) {
 						marginBottom: "6px",
 					},
 				},
-				`${REVIEW_REVOKED_TEXT}：${REVIEW_KIND_TEXT[o.kind] ?? o.kind}${o.wish ? ` ${o.wish}` : ""}`,
+				`${REVIEW_REVOKED_TEXT}${kindText === null ? "" : `：${kindText}`}${o.wish ? ` ${o.wish}` : ""}`,
 			);
 		}
 		seq += 1;
@@ -168,7 +220,7 @@ export function GoldOpinionList(props) {
 				createElement(
 					"summary",
 					{ style: { cursor: "pointer", fontSize: "12px", opacity: 0.75 } },
-					`#${seq} ${REVIEW_KIND_TEXT[o.kind] ?? o.kind}${o.wish ? ` · ${o.wish}` : ""} —— AI 已改`,
+					`#${seq}${kindText === null ? "" : ` ${kindText}`}${o.wish ? `，${o.wish}` : ""} —— AI 已改`,
 				),
 				createElement(
 					"div",
@@ -188,7 +240,7 @@ export function GoldOpinionList(props) {
 					),
 					createElement(
 						"button",
-						{ style: S.smallLink, onClick: () => onRevoke(o.id), disabled: busy },
+						{ style: S.disabled(S.smallLink, busy), onClick: () => onRevoke(o.id), disabled: busy },
 						"撤回这条意见",
 					),
 					createElement(
@@ -213,7 +265,7 @@ export function GoldOpinionList(props) {
 					},
 				},
 				createElement("strong", null, `#${seq}`),
-				createElement("span", null, REVIEW_KIND_TEXT[o.kind] ?? o.kind),
+				createElement("span", null, kindText),
 				createElement(
 					"span",
 					{ style: { opacity: 0.75, fontSize: "12px" } },
@@ -234,7 +286,7 @@ export function GoldOpinionList(props) {
 					createElement(
 						"button",
 						{
-							style: S.smallLink,
+							style: S.disabled(S.smallLink, busy),
 							onClick: () => onRevoke(o.id),
 							disabled: busy,
 						},
@@ -256,7 +308,7 @@ export function GoldOpinionList(props) {
 			// 票 gold-revision-flow/01：标题改成如实说法——`meta.goldOpinions` 是**全书累积**、
 			// 不分稿的（`gold-revise` 只追加、不记稿号），写「本稿」是名不副实，
 			// 也正是"最新版还带着上一轮意见单"的直接来源。
-			`📋 历次意见（${activeCount} 条${pendingCount > 0 ? ` · ${pendingCount} 条待处理` : ""}）`,
+			`📋 历次意见（${activeCount} 条${pendingCount > 0 ? `，${pendingCount} 条待处理` : ""}）`,
 		),
 		...rows,
 		onRevise !== undefined
@@ -266,7 +318,7 @@ export function GoldOpinionList(props) {
 					createElement(
 						"button",
 						{
-							style: S.bigBtn(true),
+							style: S.disabled(S.bigBtn(true), busy || pendingCount === 0 || displayPeriod !== null),
 							onClick: onRevise,
 							// 票 gold-display-period/02（展示期的闸）：这一颗**会作废在跑的工作**——
 							// `gold-revise` 先把 `chapter-NN.md`/`style-spec.md`/`audit-NN.md` 三份归档挪走、
@@ -306,9 +358,6 @@ export function GoldOpinionList(props) {
 
 // ── 谈判桌·阅读与标记（段旁三键 + 笼统便签） ───────────────────────────────
 
-// F36（2026-08-20 走查）：首次引导脉冲只在本页会话触发一次（页面刷新后重新计）。
-let goldFirstPulseDone = false;
-
 export function GoldReader(props) {
 	const {
 		text,
@@ -317,6 +366,10 @@ export function GoldReader(props) {
 		onOpinion,
 		readOnly,
 		onRevokeOpinion = () => {},
+		// 票 `demo-channel-full/25`：确认层那句话的取值只看「这是不是演示书」（`view-rules.paraMarkConfirmNote`
+		// 里复用现成的 `isDemoBook`）。缺省 `undefined` ⇒ 按**真书**那一句渲染（本文件与
+		// `smoke-test.mjs` 里那些只喂正文的渲染点照旧说真书的话，一个字未变）。
+		meta,
 	} = props;
 	const [hover, setHover] = useState(null);
 	const [formPara, setFormPara] = useState(null);
@@ -334,22 +387,8 @@ export function GoldReader(props) {
 	// ✏️ change 键**已经有**理由框（`formPara` + `submitWish`），本票不给它再加一层。
 	const [markConfirm, setMarkConfirm] = useState(null);
 	const [markWish, setMarkWish] = useState("");
-	// F36：进入标记态时首段三键闪两下，教用户「这三键可标意见」（本页会话一次）。
-	// pulsePhase: null=未闪 | 'on1' | 'off' | 'on2' | 'done'（done 后不再闪）。
-	const [pulsePhase, setPulsePhase] = useState(null);
-	useEffect(() => {
-		if (readOnly || goldFirstPulseDone) return undefined;
-		goldFirstPulseDone = true;
-		const timers = [
-			setTimeout(() => setPulsePhase("on1"), 250),
-			setTimeout(() => setPulsePhase("off"), 750),
-			setTimeout(() => setPulsePhase("on2"), 1150),
-			setTimeout(() => setPulsePhase("done"), 1650),
-		];
-		return () => {
-			for (const t of timers) clearTimeout(t);
-		};
-	}, [readOnly]);
+	// 判据 7（票 05）：首段三键的首次引导脉冲已删——三键安静常显（悬停才亮），
+	// 不再 setTimeout 闪两下、放大、套 2px 光环。状态靠 hover 与「已选」底色表达。
 	const paras = splitParagraphs(text);
 	// 段号 -> 已挂意见的标签（#N 表情），给人看「这段已标过」。
 	const marked = new Map();
@@ -409,19 +448,12 @@ export function GoldReader(props) {
 		onOpinion(target.kind, markWish.trim(), target.para, target.hint);
 		closeMarkConfirm();
 	};
+	// 票 `ui-systematic-fixes/02`：确认层那句里的 kind 词同走兜底出口（未登记 ⇒ 不印机器值）。
+	const markConfirmKind = markConfirm === null ? null : fallbackWord(REVIEW_KIND_TEXT, markConfirm.kind);
 	// 左右留白：右 68px 给三键浮出腾地方，左 34px 给段号/已标标签的装订线腾地方。
 	return createElement(
 		"div",
 		{ style: { paddingLeft: "34px", paddingRight: "68px" } },
-		!readOnly
-			? createElement(
-					"p",
-					{ style: { margin: "0 0 8px", fontSize: "12px", opacity: 0.75 } },
-					// 票 10（判定四③）：原句 69 字本就在 90 字内，只删了「提完」前那个句号造成的断句
-					// （同一句连着读更省字），信息一条不丢。
-					"标记方法：鼠标停在哪一段，那段右侧就亮出三个键 😕🗑✏️；不指哪段就用最底下「笼统提一条」，提完点意见单里的【让 AI 照这些改】。",
-				)
-			: null,
 		// 票 08：确认层摆在正文**顶部**（不是贴着被点的那一段）——用户读的是一整章，
 		// 刚点的那段可能在第 188 段，贴着它弹等于弹到屏幕外。
 		markConfirm !== null
@@ -437,15 +469,19 @@ export function GoldReader(props) {
 					createElement(
 						"p",
 						{ style: { margin: "0 0 4px", fontWeight: 600 } },
-						`确认：把第 ${markConfirm.para} 段记成「${REVIEW_KIND_TEXT[markConfirm.kind] ?? markConfirm.kind}」？`,
+						`确认：把第 ${markConfirm.para} 段${markConfirmKind === null ? "记一条意见" : `记成「${markConfirmKind}」`}？`,
 					),
 					createElement(
 						"p",
 						{ style: { margin: "0 0 6px", fontSize: "12px", opacity: 0.85 } },
-						// 这两句是**兑现的**、不是承诺（`CONTEXT.md`「承诺过度」那条账）：
-						// AI 真的会照这条改这一章（这段意见随交办任务送给主笔 AI），
-						// 这一章交工前也真的必须先处置它（交工校验会直接拒收没处置的 pending 意见）。
-						"AI 会照这条改这一章；这一章交工前必须先处置它。",
+						// 真书那一句（＝出口里的 `PARA_MARK_CONFIRM_NOTE`）是**兑现的**、不是承诺
+						// （`CONTEXT.md`「承诺过度」那条账）：AI 真的会照这条改这一章（这段意见随交办
+						// 任务送给主笔 AI），这一章交工前也真的必须先处置它（交工校验会直接拒收没处置的
+						// pending 意见）。
+						// ⚠️ 票 `demo-channel-full/25`：**这两句对演示书都不成立**（演示通道零 LLM ＋
+						// 过目态提不出段落意见，读数见那个出口的注释）⇒ 取值改由
+						// `view-rules.paraMarkConfirmNote(meta)` 给，本行不再持有措辞；真书那一句逐字未变。
+						paraMarkConfirmNote(meta),
 					),
 					createElement("textarea", {
 						style: { ...S.input, width: "100%", boxSizing: "border-box" },
@@ -469,12 +505,16 @@ export function GoldReader(props) {
 						// 两个热区各干一件事：提交＝发动作；再想想＝纯收起（不发任何东西）。
 						createElement(
 							"button",
-							{ style: S.bigBtn(true), onClick: submitMark, disabled: busy },
+							{ style: S.disabled(S.bigBtn(true), busy), onClick: submitMark, disabled: busy },
 							"✅ 提交这条",
 						),
 						createElement(
 							"button",
-							{ style: S.smallLink, onClick: closeMarkConfirm, disabled: busy },
+							// 🎯 票 `gold-display-period/05`：这一颗**有意不禁用**（#2 的逐处复核）——
+							// `onClick` 只收起这张表单（`closeMarkConfirm()`＝两个 setState），**不发任何东西**，
+							// 所以 `busy` 里挡住它只会造出一个「看着能点却点不动」的键（先例见 `event-cards.js`
+							// 的「❌ 不满意，让 AI 改」上方）。逐处理由登记在 `D-禁用不给理由.md` 的「票 05 #2」那一节。
+							{ style: S.smallLink, onClick: closeMarkConfirm },
 							"再想想",
 						),
 					),
@@ -483,17 +523,6 @@ export function GoldReader(props) {
 		paras.map((para, idx) => {
 			const n = idx + 1;
 			const marks = marked.get(n) ?? [];
-			// F36：首段三键引导脉冲（on1/on2 亮起、off 熄灭），平时常显淡态 0.3。
-			const pulsing = n === 1 && (pulsePhase === "on1" || pulsePhase === "on2");
-			const pulseBtnStyle = pulsing
-				? {
-						background: "var(--dsw-alias-state-business-tertiary)",
-						borderRadius: "6px",
-						boxShadow: "0 0 0 2px var(--dsw-alias-state-business-primary)",
-						transform: "scale(1.15)",
-						transition: "transform 0.2s, boxShadow 0.2s, background 0.2s",
-					}
-				: null;
 			return createElement(
 				"div",
 				{
@@ -511,12 +540,12 @@ export function GoldReader(props) {
 							position: "absolute",
 							left: "-34px",
 							top: "0",
-							fontSize: "11px",
+							fontSize: "12px",
 							lineHeight: 1.6,
 							whiteSpace: "nowrap",
 							color: "var(--dsw-alias-state-business-primary)",
 							opacity: hover === n ? 1 : 0.35,
-							transition: "opacity 0.15s",
+							transition: "opacity 250ms ease-out",
 						},
 					},
 					String(n),
@@ -553,7 +582,7 @@ export function GoldReader(props) {
 								createElement(
 									"button",
 									{
-										style: S.bigBtn(true),
+										style: S.disabled(S.bigBtn(true), busy),
 										onClick: submitWish,
 										disabled: busy,
 									},
@@ -577,7 +606,7 @@ export function GoldReader(props) {
 						)
 					: null,
 				// 三键浮出（absolute 定在段右上角、不占正文宽度）：F36 常显淡态 0.3（可感知、不占位），
-				// 悬停或首段引导脉冲时全亮；键始终可点（悬停键本身也算悬停该段）。
+				// 悬停时全亮；三键常显淡态 0.55（票 05：删掉首段脉冲，键始终可点）。
 				!readOnly
 					? createElement(
 							"div",
@@ -588,8 +617,8 @@ export function GoldReader(props) {
 									right: "-64px",
 									display: "flex",
 									gap: "2px",
-									opacity: hover === n || pulsing ? 1 : 0.3,
-									transition: "opacity 0.15s",
+									opacity: hover === n ? 1 : 0.55,
+									transition: "opacity 250ms ease-out",
 									pointerEvents: "auto",
 								},
 							},
@@ -620,24 +649,20 @@ export function GoldReader(props) {
 										{
 											key: label,
 											"aria-label": labelText,
-											style: {
+											style: S.disabled({
 												...S.smallLink,
-												fontSize: "15px",
+												fontSize: "13px",
 												padding: "2px 4px",
 												whiteSpace: "nowrap",
-												transition:
-													"transform 0.2s, boxShadow 0.2s, background 0.2s",
 												...(active != null
 													? {
 															background: "var(--dsw-alias-state-business-tertiary)",
 															borderRadius: "6px",
 														}
 													: {}),
-												...(pulseBtnStyle ?? {}),
-											},
+											}, busy),
 											title: labelText,
 											onClick: () => {
-												if (pulsing) setPulsePhase("done");
 												if (active != null) onRevokeOpinion(active.id);
 												else onClick();
 											},
@@ -693,7 +718,7 @@ export function GoldReader(props) {
 							"button",
 							{
 								key: k,
-								style: S.projectBtn(generalKind === k),
+								style: S.disabled(S.projectBtn(generalKind === k), busy),
 								onClick: () => setGeneralKind(k),
 								disabled: busy,
 							},
@@ -711,7 +736,7 @@ export function GoldReader(props) {
 					}),
 					createElement(
 						"button",
-						{ style: S.bigBtn(true), onClick: submitGeneral, disabled: busy },
+						{ style: S.disabled(S.bigBtn(true), busy), onClick: submitGeneral, disabled: busy },
 						"笼统提一条",
 					),
 					generalError !== null
@@ -809,9 +834,62 @@ export function GoldCompare(props) {
 
 // ── 谈判桌·定稿沉淀（字数 + AI 建议 + 定稿/重写确认层） ─────────────────────
 
+/**
+ * 站 9 的**软提示**：站 8 重拍之后，这一屏那份体量结论就旧了（票 `confirm-points-redesign-build/08`
+ * ／规划票 07 §4，Q14 甲）。
+ * ⚠️ **只有这一句**：⛔ 机器不给硬边——不打回、不拦、不把站 9 那份结论删掉。
+ * 「重做上游把下游打回」那一档（Q17 甲）**已裁不做**，所以这里不许长出第二道闸。
+ * 票 `ui-display-redesign/07`：保存键改名后，句子里点名的键名跟着改（否则指向一颗不存在的键）。
+ */
+export const DRAFT_CHANGED_HINT =
+	"这一稿换了，体量得重拍一次（改完字数再点一次「💾 保存各章字数」；不改也走得下去——机器不拦）。";
+
+/**
+ * 定稿键的前置（票 08 逐条落点：从「先写回再定稿」换成「**站 9 已拍板**」）——**只给契约面**。
+ *
+ * 票 `ui-display-redesign/07`（spec §7.7#5）把卡上那句「站 9 还没拍板：先在下面点…」整句删了：
+ * 写回键（现已改名「保存各章字数」）自身可用就是软提示，定稿键灰着不再另给一句。
+ * ⇒ 这句只剩一个消费点：`view-rules.blockedOf` 的 `blocked.reason`（AI 工具面／下一层渲染的输入）。
+ * ⛔ 别把它当成卡上可见文案（`test-component-cards` 反过来钉住它**不在**屏上）。
+ */
+export const GOLD_STATION9_NOT_DECIDED =
+	"定稿的前置是站 9 已拍板：先去站 9 点「💾 保存各章字数」把各章字数定下来。";
+
+// ── 票 `ui-systematic-fixes/11`：谈判桌两站那四颗键的**文案出口**（拍板契约的 `options[].label`／
+// `keysAt` 取这几个绑定）＋ 两站各一句后果说明。⛔ 不在 `view-rules.js` 再抄一份原文。
+export const GOLD_DRAFT_ACCEPT_LABEL = "✅ 就用这一稿";
+export const GOLD_DRAFT_REWRITE_LABEL = "🔁 不满意，重写这一章";
+export const GOLD_SEAL_LABEL = "✅ 就按这章的风格写全书";
+// 票 `ui-display-redesign/07`（spec §2.8 第 8 块）：站 9 的保存键改名——它写的是「各章字数」，
+// 不是抽象地「写回章节安排」；`meta.targetWords` 兜底字段保留、界面不再编辑它。
+export const GOLD_WRITE_TARGETS_LABEL = "💾 保存各章字数";
+// 同一块的提示（唯一出口：卡上那句与 `view-rules` 契约的 effect 都取它）。
+export const GOLD_WRITE_TARGETS_HINT =
+	"手动改动与 AI 建议都先预填；点「保存」才落盘。";
+
+/**
+ * 「✅ 就用这一稿」那颗主键的**后果说明**（票 11 补的六句之一 · 站 8）。
+ *
+ * ⚠️ 与卡上既有那句小字（「「就用这一稿」只表态这一稿行；字数还要在下一屏另拍一次。」）
+ * **不是同一句**：那句讲的是**这一次表态的范围**（哪一半被定了），本句讲的是**点时会发生什么**。
+ * 两句都在，各答一件事——⛔ 不要把两句合成一句（那会删掉卡上那句已经上屏的话）。
+ */
+export const GOLD_DRAFT_PASS_EFFECT =
+	"点了它这一稿就此定下，当全书的最佳范例章；各章字数还要在下一屏另定一次。";
+
+/**
+ * 「✅ 就按这章的风格写全书」那颗主键的**后果说明**（票 11 补的六句之一 · 站 9）。
+ *
+ * ⚠️ 它说的是**这一步**的后果；「之后还能不能改」不在本句（那由定点修改与回退那两张卡各说各的）。
+ */
+export const GOLD_SEAL_EFFECT =
+	"点了它这一章就此定稿，AI 照这一章的风格与体量写完整本。";
+
 export function GoldFinalize(props) {
-	const { meta, opinions, busy, onApprove, onSuggestWords, onWriteTargets, displayPeriod = null } = props;
-	const [targetWords, setTargetWords] = useState(""); // 兼容旧单值：仅未填章兜底
+	const {
+		meta, busy, onApprove, onSuggestWords, onWriteTargets,
+		displayPeriod = null, station9Decided = false, draftChanged = false, onReviewDraft,
+	} = props;
 	const [targetDrafts, setTargetDrafts] = useState(() =>
 		Object.fromEntries(
 			(meta?.outline?.chapters ?? []).map((chapter, index) => [
@@ -824,14 +902,13 @@ export function GoldFinalize(props) {
 	const [writing, setWriting] = useState(false);
 	const [suggestion, setSuggestion] = useState(null);
 	const [error, setError] = useState(null);
-	const [confirming, setConfirming] = useState(null); // 'seal' | 'rewrite' | null
 	const chapters = meta?.outline?.chapters ?? [];
 	const goldNo = goldChapterNo(meta);
 	const canEditTargets = meta?.canEditTargetWords === true;
 	/**
 	 * 不能就地调逐章目标时，**为什么**不能（票 gold-revision-flow/03 的「承诺过度」修法）。
 	 *
-	 * 原式只有一句「写完整本已经开始，逐章目标请到「定点修改 · 章节安排」调整」，可它在
+	 * 原式只有一句「写完整本已经开始，逐章目标请到「定点修改：章节安排」调整」，可它在
 	 * **最佳范例章生成/修订**（阶段 4、铺章根本没开始）与**已定稿**那一瞬也说这句——
 	 * 那是在替一个没发生的事实作证（CONTEXT「承诺过度」）。按真实状态分三句：
 	 *  - 铺章已开始（phase ≥ 5）：原句照旧，那才是真话；
@@ -842,9 +919,9 @@ export function GoldFinalize(props) {
 	const targetEditHint = (() => {
 		if (canEditTargets) return null;
 		const phase = Number(meta?.phase ?? 0);
-		if (phase >= 5) return "写完整本已经开始，逐章目标请到「定点修改 · 章节安排」调整。";
-		if (meta?.goldSealed != null) return "这一章已定稿；逐章目标请到「定点修改 · 章节安排」调整。";
-		return "正在写/改最佳范例章；逐章目标等这一章定稿后再调（或走「定点修改 · 章节安排」）。";
+		if (phase >= 5) return "写完整本已经开始，逐章目标请到「定点修改：章节安排」调整。";
+		if (meta?.goldSealed != null) return "这一章已定稿；逐章目标请到「定点修改：章节安排」调整。";
+		return "正在写/改最佳范例章；逐章目标等这一章定稿后再调（或走「定点修改：章节安排」）。";
 	})();
 	const targetSignature = chapters
 		.map((chapter, index) => `${index + 1}:${chapter.targetWords ?? ""}`)
@@ -854,33 +931,30 @@ export function GoldFinalize(props) {
 	 * 票 31 / ADR-0026（grilling Q2 ＋ Q3）：谈判桌上把「实测」与「逐章目标」点破成
 	 * **独立一整行**的一句话：
 	 *
-	 *   样章实测 10,119 汉字。按这个标定，其余 12 章合计约 149,000 汉字——要调吗？
+	 *   样章实测 10,119 汉字。按样章实测与原定的比例外推，其余 12 章合计约 149,000 汉字——要调吗？
 	 *
-	 * 「按这个标定」＝把最佳范例章的**实测/原定之比**乘到其余各章的现有目标上：
+	 * 「按样章实测与原定的比例外推」＝把最佳范例章的**实测/原定之比**乘到其余各章的现有目标上：
 	 * 母版章实际写了多少，其余章就照这个比例算——这样那个 +69% 的超标基准第一次被摆到台面上。
 	 * 字数一律标「汉字」口径（CONTEXT.md「字数」词条，grilling Q3）。
+	 *
+	 * ⚠️ 票 31 的代理判读（2026-10-12，第 3 条）补的那半句：原句只写「按这个标定」，
+	 * **没说按什么推**——读者看不出这个数是外推的、更看不出推的是哪两个数的比。
+	 * 所以「按这个标定」改成逐字点明两个操作数的「按样章实测与原定的比例外推」；
+	 * ⛔ 别把它写回「实测」二字（2026-10-12 读数：其余 11 章口径低报 ≈19.7%／全书口径 ≈17.8%，
+	 * 说成实测就是编数）。
 	 *
 	 * 读不到标定所需的数据时（`goldMeasuredHanzi` 不可用、母版章原定未定、只有母版章一章）
 	 * **退回旧两行**（母版行里「原定 · 实测」那个既有形状）：不要空句，
 	 * 旧形状不需要新词表，也少一处「界面上凭空少了一句话」说不清的差异。
+	 *
+	 * ⚠️ 票 `ui-display-redesign/17`（收口 review S2）：派生**只此一处**——本行与卡头事实句都调
+	 * {@link goldRestProjection}（`实测 / 母版原定 × 其余原定`），⛔ 不许任一处在本地再算一份
+	 * （修前事实句拿「当前目标之和」冒充，同屏两个「合计约」打架）。
 	 */
 	const calibratedLine = (() => {
-		const measured = Number(meta?.goldMeasuredHanzi);
-		if (!Number.isFinite(measured)) return null;
-		const goldRow = chapters[goldNo - 1];
-		const goldOriginal = Number(goldRow?.targetWords);
-		const rest = chapters.filter((_, index) => index + 1 !== goldNo);
-		if (!Number.isFinite(goldOriginal) || goldOriginal <= 0 || rest.length === 0)
-			return null;
-		const fallback = Number.isFinite(meta?.targetWords) ? Number(meta.targetWords) : 0;
-		const restOriginal = rest.reduce(
-			(sum, chapter) =>
-				sum + (Number.isFinite(chapter?.targetWords) ? chapter.targetWords : fallback),
-			0,
-		);
-		if (restOriginal <= 0) return null;
-		const projected = Math.round((restOriginal * measured) / goldOriginal);
-		return `样章实测 ${measured} 汉字。按这个标定，其余 ${rest.length} 章合计约 ${projected} 汉字——要调吗？`;
+		const projection = goldRestProjection(meta);
+		if (projection === null) return null;
+		return `最佳范例章实测 ${projection.measured} 汉字。按最佳范例章实测与原定的比例外推，其余 ${projection.restCount} 章合计约 ${projection.projected} 汉字——要调吗？`;
 	})();
 	useEffect(() => {
 		setTargetDrafts(
@@ -961,17 +1035,9 @@ export function GoldFinalize(props) {
 			.catch((err) => setError(String(err instanceof Error ? err.message : err)))
 			.finally(() => setWriting(false));
 	};
-	const wordsRaw = String(targetWords ?? "").trim();
-	const wordsEmpty = wordsRaw === "";
-	const words = Number(wordsRaw);
-	const wordsOk =
-		wordsEmpty || (Number.isFinite(words) && words >= 500 && words <= 50000);
-	const targetToSend = wordsEmpty
-		? null
-		: Number.isFinite(words) && words >= 500 && words <= 50000
-			? Math.round(words)
-			: null;
-	const live = (opinions ?? []).filter((o) => o.status !== "revoked");
+	// 票 `ui-display-redesign/07`（spec §2.8 第 9 块）：兜底统一值那一整块删除——只用逐章目标。
+	// `meta.targetWords` 字段**保留**（旧书仍可用：标定行与卡头事实句对未填章沿用它的值），
+	// 但界面不再编辑、不再单独显示那一行、也不再随定稿一起发出去。
 	return createElement(
 		"div",
 		{ style: S.card },
@@ -979,8 +1045,26 @@ export function GoldFinalize(props) {
 			"p",
 			{ style: { margin: "0 0 6px", fontWeight: 600 } },
 			// 票 10（判定一 #4）：「样板」是界面词表外的第三套叫法，统一成「最佳范例章」。
-			"✅ 满意了就定稿（这一章就是全书的最佳范例章）",
+			// 票 `confirm-points-redesign-build/08`：抬头从「满意了就定稿」改成**站 9** 的名字——
+			// 「这一稿行不行」已经在上一屏拍过（`GoldDraftStage`），这一屏只管**体量**。
+			"📐 定体量（这一章就是全书的最佳范例章）",
 		),
+		createElement(
+			"div",
+			{ style: { display: "flex", gap: "8px", alignItems: "center", margin: "0 0 6px", flexWrap: "wrap" } },
+			// 票 07 §2：站 9 屏**不放全文**；要看正文走这个入口——它点开的就是站 8 那一套
+			// 读／对比区（⛔ 不复制正文，一个入口而已）。
+			createElement("button", { style: S.smallLink, onClick: onReviewDraft }, "📖 回看这一稿"),
+		),
+		draftChanged
+			? createElement(
+					"p",
+					{ style: { ...S.hint, margin: "0 0 6px" } },
+					// ⚠️ **软提示，机器不给硬边**（票 07 §4，Q14 甲）：站 8 重拍之后站 9 那份结论
+					// 在界面上只是提醒重拍一次，⛔ 不打回、不拦（「重做上游把下游打回」那一档已裁不做）。
+					DRAFT_CHANGED_HINT,
+				)
+			: null,
 		createElement(
 			"div",
 			{ style: { margin: "6px 0" } },
@@ -1020,8 +1104,8 @@ export function GoldFinalize(props) {
 					calibratedLine !== null
 						? ""
 						: Number.isFinite(meta?.goldMeasuredHanzi)
-							? ` · 实测 ${meta.goldMeasuredHanzi} 汉字`
-							: " · 实测暂不可用";
+							? `，实测 ${meta.goldMeasuredHanzi} 汉字`
+							: "，实测暂不可用";
 				return createElement(
 					"div",
 					{
@@ -1047,7 +1131,7 @@ export function GoldFinalize(props) {
 									"input",
 									{
 										"aria-label": `第 ${n} 章目标汉字数`,
-										style: { ...S.input, width: "92px" },
+										style: S.disabled({ ...S.input, width: "92px" }, busy || writing),
 										type: "number",
 										min: 500,
 										max: 50000,
@@ -1079,23 +1163,42 @@ export function GoldFinalize(props) {
 						: null,
 				);
 			}),
+			// 票 `ui-display-redesign/07`（spec §2.8 第 8 块）：**保存各章字数**（由「写回章节安排」
+			// 改名）＋ **AI 建议挪到它旁边**（原先住在兜底区）＋「点『保存』才落盘」一行提示。
 			canEditTargets && onWriteTargets !== undefined
 				? createElement(
 						"div",
-						{ style: { display: "flex", gap: "8px", alignItems: "center", marginTop: "6px" } },
+						{
+							style: {
+								display: "flex",
+								gap: "8px",
+								alignItems: "center",
+								marginTop: "6px",
+								flexWrap: "wrap",
+							},
+						},
 						createElement(
 							"button",
 							{
-								style: { ...S.bigBtn(true), padding: "6px 12px" },
+								style: S.disabled({ ...S.bigBtn(true), padding: "6px 12px" }, busy || writing || !targetRowsOk || targetsToWrite.length === 0),
 								onClick: writeTargets,
 								disabled: busy || writing || !targetRowsOk || targetsToWrite.length === 0,
 							},
-							writing ? "正在写回…" : "💾 写回章节安排",
+							writing ? "正在保存…" : GOLD_WRITE_TARGETS_LABEL,
+						),
+						createElement(
+							"button",
+							{
+								style: S.disabled({ ...S.bigBtn(true), padding: "6px 12px" }, suggesting || writing || busy),
+								onClick: requestSuggestion,
+								disabled: suggesting || writing || busy,
+							},
+							suggesting ? "AI 思考中…" : "✨ AI 建议",
 						),
 						createElement(
 							"span",
-							{ style: { fontSize: "11px", opacity: 0.65 } },
-							"手动改动与 AI 建议都先预填；点「写回」才落盘。",
+							{ style: { fontSize: "12px", opacity: 0.65 } },
+							GOLD_WRITE_TARGETS_HINT,
 						),
 					)
 				: createElement(
@@ -1105,117 +1208,55 @@ export function GoldFinalize(props) {
 						// 一律说成「写完整本已经开始」——阶段 4 改稿、刚定稿那几态铺章都还没开始。
 						targetEditHint,
 					),
-			Number.isFinite(meta?.targetWords)
+			// 票 `ui-display-redesign/07`（spec §2.8 第 8 块）：建议结果〔折〕——它只是预填的
+			// 依据，不该把主键推走；`<details>` 默认不展开。
+			suggestion !== null
+				? createElement(
+						"details",
+						{ style: { margin: "6px 0 0" } },
+						createElement(
+							"summary",
+							{ style: { cursor: "pointer", fontSize: "12px", opacity: 0.8 } },
+							// 建议结果〔折〕的折叠口文案（票 07 新写）。
+							"🤖 AI 建议结果（还没保存）",
+						),
+						createElement(
+							"div",
+							{ style: { margin: "4px 0 0", fontSize: "12px", opacity: 0.8 } },
+							createElement(
+								"p",
+								{ style: { margin: "0 0 4px" } },
+								`🤖 AI 建议已预填，还没保存：整体每章约 ${suggestion.suggested} 汉字（${suggestion.range ?? ""}）。${suggestion.reason ?? ""}`,
+							),
+							(suggestion.perChapter ?? []).length > 0
+								? createElement(
+										"div",
+										null,
+										(suggestion.perChapter ?? []).map((item) =>
+											createElement(
+												"div",
+												{ key: item.n, style: { margin: "1px 0" } },
+												`${item.n}. ${item.title ?? ""}：${Number.isFinite(item.words) ? `约 ${item.words} 汉字` : "未定，AI 写整本时自定"}${item.reason ? `（${item.reason}）` : ""}`,
+											),
+										),
+									)
+								: null,
+						),
+					)
+				: null,
+			// 票 `ui-display-redesign/07`（spec §2.8 第 10 块 −1 句）：兜底那句校验随兜底块删除。
+			!targetRowsOk
 				? createElement(
 						"p",
-						{ style: { margin: "4px 0 0", fontSize: "12px", opacity: 0.6 } },
-						`兜底统一值：${meta.targetWords} 汉字（仅未填章使用）`,
+						{ style: S.error },
+						"逐章目标请填 500-50000 汉字，或留空沿用未定。",
 					)
 				: null,
 		),
-		createElement(
-			"div",
-			{
-				style: {
-					display: "flex",
-					gap: "6px",
-					alignItems: "center",
-					flexWrap: "wrap",
-				},
-			},
-			createElement(
-				"label",
-				{ style: S.label },
-				"兜底统一目标（汉字，可选，仅未填章使用）",
-			),
-			createElement("input", {
-				style: { ...S.input, width: "110px" },
-				type: "number",
-				min: 500,
-				max: 50000,
-				step: 500,
-				value: targetWords,
-				onChange: (e) => {
-					setTargetWords(e.target.value);
-					setSuggestion(null);
-				},
-			}),
-			createElement(
-				"button",
-				{
-					style: { ...S.bigBtn(true), padding: "6px 14px" },
-					onClick: requestSuggestion,
-					disabled: suggesting || writing || busy,
-				},
-				suggesting ? "AI 思考中…" : "✨ AI 建议",
-			),
-		),
-		suggestion !== null
-			? createElement(
-					"div",
-					{ style: { margin: "4px 0", fontSize: "12px", opacity: 0.8 } },
-					createElement(
-						"p",
-						{ style: { margin: "0 0 4px" } },
-						`🤖 AI 建议已预填，尚未写回：整体每章约 ${suggestion.suggested} 汉字（${suggestion.range ?? ""}）。${suggestion.reason ?? ""}`,
-					),
-					(suggestion.perChapter ?? []).length > 0
-						? createElement(
-								"div",
-								null,
-								(suggestion.perChapter ?? []).map((item) =>
-									createElement(
-										"div",
-										{ key: item.n, style: { margin: "1px 0" } },
-										`${item.n}. ${item.title ?? ""}：${Number.isFinite(item.words) ? `约 ${item.words} 汉字` : "未定，AI 写整本时自定"}${item.reason ? `（${item.reason}）` : ""}`,
-									),
-								),
-							)
-						: null,
-				)
-			: null,
-		!wordsEmpty && !wordsOk
-			? createElement(
-					"p",
-					{ style: S.error },
-					"兜底目标请填 500-50000 汉字，或留空只用逐章目标",
-				)
-			: null,
-		!targetRowsOk
-			? createElement(
-					"p",
-					{ style: S.error },
-					"逐章目标请填 500-50000 汉字，或留空沿用未定。",
-				)
-			: null,
-		targetsDirty
-			? createElement(
-					"p",
-					{ style: { ...S.hint, margin: "4px 0" } },
-					"逐章目标有未写回改动；先点「写回章节安排」再定稿。",
-				)
-			: null,
+		// 票 `ui-display-redesign/07`（spec §2.8 第 11 块）：未拍板提示整句删除——写回键自身可用
+		// 就是软提示（设计稿 §7.7#5）。`GOLD_STATION9_NOT_DECIDED` 只给契约面（`blocked.reason`）。
 		error !== null
 			? createElement("p", { style: S.error }, `⚠️ ${error}`)
-			: null,
-		// 票 walkthrough-2026-10/04（裁决甲）：「暂不可定稿」落在**这颗键的能力**上——
-		// 禁用 ＋ 把理由写在它旁边（⛔ 不许亮着点了无效）。
-		// 票 gold-display-period/02 把「这一版整个不要，重写」也并进这一档：它**同样会作废
-		// 在跑的工作**（归档这一稿三份 ＋ 重开一轮 gold，且对在跑的检查小助手没有任何
-		// `interrupt`）——理由与定稿那颗**分开写**，见 `goldDisplayPeriod.rewriteReason`。
-		displayPeriod !== null
-			? createElement(
-					"p",
-					{ style: { ...S.hint, margin: "8px 0 0" } },
-					displayPeriod.finalizeReason,
-				)
-			: null,
-		displayPeriod !== null
-			? createElement(
-					"p",
-					{ style: { ...S.hint, margin: "2px 0 0" } },
-					displayPeriod.rewriteReason,
-				)
 			: null,
 		createElement(
 			"div",
@@ -1230,168 +1271,19 @@ export function GoldFinalize(props) {
 			createElement(
 				"button",
 				{
-					style: S.bigBtn(true),
-					onClick: () => {
-						if (live.length > 0) setConfirming("seal");
-						else onApprove(true, targetToSend);
-					},
-					disabled: busy || writing || !wordsOk || !targetRowsOk || targetsDirty || displayPeriod !== null,
+					// 前置＝**站 9 已拍板**（那颗「💾 保存各章字数」落 `决策/09.json`），
+					// 外加同一条路的安全网「没有未保存的改动」。
+					// 票 `ui-display-redesign/07`（spec §2.8 第 14 块）：**定稿键直接生效**——
+					// 不再弹确认层（代价已由设计稿 §7.6#6 登记：有未处置意见时那句预告不再出现）。
+					style: S.disabled(S.bigBtn(true), busy || writing || !targetRowsOk || targetsDirty || !station9Decided),
+					onClick: () => onApprove(true, null),
+					disabled: busy || writing || !targetRowsOk || targetsDirty || !station9Decided,
+					// 票 `auto-walkthrough/04`：关键键的语义钩子（站 9 定稿／六闸门之一）。
+					"data-gold-seal": "1",
 				},
-				"✅ 就按这章的风格写全书",
-			),
-			createElement(
-				"button",
-				{
-					style: {
-						...S.bigBtn(true),
-						background: "transparent",
-						color: "var(--dsw-alias-state-error-primary)",
-						padding: "8px 10px",
-					},
-					onClick: () => setConfirming("rewrite"),
-					// 票 gold-display-period/02：与上面那颗同一件事实、同一个理由（`rewriteReason`）。
-					disabled: busy || writing || !wordsOk || !targetRowsOk || targetsDirty || displayPeriod !== null,
-				},
-				"❌ 这版整个不要，重写",
+				GOLD_SEAL_LABEL,
 			),
 		),
-		createElement(
-			"p",
-			{ style: S.hint },
-			// 票 14（承诺账 A2）：机制只透出 `pending`/`sent` 的意见（engine.js 的 gold 分支）——
-			// 已经点过「让 AI 照这些改」的那批不再随整版重写下发，所以限定成「还没处理的意见」。
-			"从头重写这一章；还没处理的意见会一并带给 AI 当方向",
-		),
-		confirming === "seal"
-			? createElement(
-					"div",
-					{
-						style: {
-							...S.card,
-							borderColor: "var(--dsw-alias-state-business-primary)",
-							marginTop: "8px",
-						},
-					},
-					createElement(
-						"p",
-						{ style: { margin: "0 0 4px", fontWeight: 600 } },
-						// 票 14（承诺账 A2）：「永久生效」与机制自相矛盾——风格线可被收回
-						// （collab-signals 的 style-note-revoke 置 superseded，界面自己也渲染「·（已收回）」）。
-						// 改成「会生效」＋把收回的路说给用户（收回入口在对话侧，界面没有）。
-						"定稿前确认：下面这些会生效（想收回，可以在对话里跟 AI 说）",
-					),
-					// 票 gold-revision-flow/01：定稿确认层**分两组**——原式把「本稿已照它改过的」与
-					// 「会变成全书风格线的」平铺成一条，一条早就改过的意见会再次以"会生效"的姿态出现。
-					// 取数口径**不变**（未撤回＝会生效），只改展示分组。
-					createElement(
-						"p",
-						{ style: { margin: "0 0 4px", fontSize: "12px", opacity: 0.85 } },
-						"① 你的意见转成「风格线」，后面每一章都照此执行：",
-					),
-					live
-						.filter((o) => o.status !== "applied")
-						.map((o, i) =>
-							createElement(
-								"p",
-								{
-									key: o.id,
-									style: { margin: "0 2px 2px 12px", fontSize: "12px" },
-								},
-								`#${i + 1} ${REVIEW_KIND_TEXT[o.kind] ?? o.kind}${o.wish ? `：${o.wish}` : ""}${
-									o.status === "pending" || o.status === "sent"
-										? "（这一稿还没改到，AI 写全书时按它办）"
-										: ""
-								}`,
-							),
-						),
-					live.some((o) => o.status === "applied")
-						? createElement(
-								"p",
-								{ style: { margin: "6px 0 2px", fontSize: "12px", opacity: 0.85 } },
-								"（下面这些这一稿已经照它改过了，一并沉淀为风格线：）",
-							)
-						: null,
-					live
-						.filter((o) => o.status === "applied")
-						.map((o) =>
-							createElement(
-								"p",
-								{
-									key: o.id,
-									style: { margin: "0 2px 2px 12px", fontSize: "12px", opacity: 0.6 },
-								},
-								`${REVIEW_KIND_TEXT[o.kind] ?? o.kind}${o.wish ? `：${o.wish}` : ""} —— 本稿已改`,
-							),
-						),
-					createElement(
-						"p",
-						{ style: { margin: "4px 0", fontSize: "12px", opacity: 0.85 } },
-						// 票 10（判定一 #4）：同上，「样板」→「最佳范例章」。
-						"② 这一稿定下来当最佳范例章，AI 写整本时都照着它。",
-					),
-					createElement(
-						"div",
-						{ style: { display: "flex", gap: "8px", marginTop: "6px" } },
-						createElement(
-							"button",
-							{
-								style: S.bigBtn(true),
-								onClick: () => onApprove(true, targetToSend),
-								disabled: busy || writing || !wordsOk || !targetRowsOk || targetsDirty || displayPeriod !== null,
-							},
-							"确认，定稿",
-						),
-						createElement(
-							"button",
-							{ style: S.smallLink, onClick: () => setConfirming(null) },
-							"再想想",
-						),
-					),
-				)
-			: null,
-		confirming === "rewrite"
-			? createElement(
-					"div",
-					{
-						style: {
-							...S.card,
-							borderColor: "var(--dsw-alias-state-error-primary)",
-							marginTop: "8px",
-						},
-					},
-					createElement(
-						"p",
-						{ style: { margin: "0 0 6px" } },
-						// 票 14（承诺账 A2）：归档是「尽力」语义（gold.js 的 `try { renameSync } catch {}`），
-						// 「不丢」是全集承诺——收掉。
-						"整稿丢弃重写：这一稿会归档留底，AI 从头再写一版。",
-					),
-					createElement(
-						"div",
-						{ style: { display: "flex", gap: "8px" } },
-						createElement(
-							"button",
-							{
-								style: {
-									...S.bigBtn(true),
-									background: "transparent",
-									color: "var(--dsw-alias-state-error-primary)",
-								},
-								onClick: () => onApprove(false, targetToSend),
-								// 票 gold-display-period/02：确认层里这颗与外面那颗同一件事实——
-								// 展示期整个确认路径都不许走（理由同样写在脸上，`rewriteReason`）。
-								disabled: busy || writing || !wordsOk || !targetRowsOk || targetsDirty || displayPeriod !== null,
-							},
-							"确认重写",
-						),
-						createElement(
-							"button",
-							{ style: S.smallLink, onClick: () => setConfirming(null) },
-							"再想想",
-						),
-					),
-				)
-			: null,
 	);
 }
 
@@ -1405,19 +1297,163 @@ export function auditBadgeText(auditText) {
 	// 都不上人眼。文件仍是 `工作区/audit-NN.md`（机器身份词，不改）。
 	// 票 gold-display-period/01：这一格说的是**本卡**在拉这个文件，不是「检查小助手正在读」——
 	// 原句「正在读这一稿的检查记录」紧挨着顶栏那句「🔎 N 个小助手在跑」，读者只会读成后者。
-	// 视角收回本卡（「记录读取中…」），与「这一稿还没有检查记录」并列时才是两种可分辨的事实。
-	if (auditText === undefined) return "🧪 检查：记录读取中…";
-	if (auditText === null) return "🧪 检查：这一稿还没有检查记录";
+	// 2026-10-12 代理判读（3 个独立观察者 **3/3**）把 2026-10-08 那版「记录读取中…」也否了——
+	// 判据逐字指着三样：**进行时动词 ＋ 无主语 ＋ 省略号**。
+	// 2026-10-25 第二轮代理判读又咬出两处，都是**词法歧义**，不是口味：
+	//   ① 动词留在 `检查：` 标签**后面** ⇒ 3 个观察者里 1 个读成「**检查**还在读」（标签在左、
+	//      动词在右，读者分不出谁是主语）；
+	//   ② 去掉动词后写「`检查：记录未知`」⇒ 另一个观察者把 **`记录` 读成了动词**（「检查正在记录」）——
+	//      「记录」在中文里名动同形，紧跟在一个标签后面时动词读法更顺手。
+	// ⇒ 两处一起治：**标签用词表里的复合名词**（`CONTEXT.md`「界面用词表」：`审计文件` → **检查记录**），
+	// 于是「检查记录：」整体是名词、后面紧跟的 `未知` 只能是状态词，没有动词可挂。
+	// 用「未知」这一档而不是「未到/还没有」——后两种都带「在等它来」的意思，而本仓已经有一族
+	// 同形的读数（`book-readings.js` 的「字数未知」「知识点数未知」：读不到就停在未知，⛔ 不写 0）。
+	// 与下一格（`null` ＝「这一稿还没有检查记录」）仍是两种可分辨的事实：
+	// 这一格是「还不知道有没有」，那一格是「这一稿没有」——⛔ 不许合并（合并＝替文件下断言）。
+	switch (auditDisplayState(auditText)) {
+		case "unknown": return "🧪 检查记录：未知";
+		case "missing": return "🧪 检查：这一稿还没有检查记录";
+		case "passed": return "🧪 检查：通过（没有待完善项）";
+		case "issues": return "🧪 检查：有几处待完善（可以让 AI 改）";
+		default: return "🧪 检查：记录格式待完善";
+	}
+}
+
+/**
+ * 审计记录 → 界面那五档**唯一判据**（徽章 `auditBadgeText` 与卡头事实句 `goldDraftHeadFacts` 共用）。
+ *
+ * 票 `audit-gate-semantics/01`：**不再读 `audit.passed` 自报值**——它由 `auditVerdict` 从 issues
+ * （level＋status）现算；缺 status／accepted-risk 缺理由的旧记录归 `malformed`（说「记录格式待完善」，
+ * ⛔ 不许说「通过」）。五档：`unknown`（还没读到）／`missing`（没有记录）／`malformed`（格式待完善）／
+ * `passed`／`issues`（现算未通过）。
+ *
+ * @param {string|undefined|null} auditText
+ * @returns {'unknown'|'missing'|'malformed'|'passed'|'issues'}
+ */
+function auditDisplayState(auditText) {
+	if (auditText === undefined) return "unknown";
+	if (auditText === null) return "missing";
+	if (typeof auditText !== "string") return "malformed";
 	try {
 		const audit = JSON.parse(auditText);
-		return typeof audit.passed === "boolean"
-			? audit.passed === true
-				? "🧪 检查：通过（没有待完善项）"
-				: "🧪 检查：有几处待完善（可以让 AI 改）"
-			: "🧪 检查：记录格式待完善";
+		if (audit === null || typeof audit !== "object" || Array.isArray(audit)) return "malformed";
+		if (typeof audit.passed !== "boolean" || !Array.isArray(audit.issues)) return "malformed";
+		const verdict = auditVerdict(audit);
+		if (verdict.problems.length > 0) return "malformed";
+		return verdict.passed === true ? "passed" : "issues";
 	} catch {
-		return "🧪 检查：记录格式待完善";
+		return "malformed";
 	}
+}
+
+// ── 票 `ui-display-redesign/07`：两屏卡头的**派生事实句**（纯函数，判据直调）──────────────
+
+// ── 票 `ui-display-redesign/17`（收口 review S1／S2）：站 9 那两个读数的**唯一派生**──────────
+//
+// 病（S1）：`Number(null) === 0` ⇒ `goldMeasuredHanzi` 读不到时印成「样章实测 0 汉字」——
+//   spec §7「缺数据登记 1」逐字写着 ⛔ 不显示 0；0 是**一个读数**，不是「没读到」。
+// 病（S2）：事实句的 P 取「其余章现有目标之和」，而同屏标定行的 P 取「按实测比例外推」——
+//   同一个屏上两个「合计约」，数不一样（画廊实读 11000 vs 162）。spec §2.8 的示例
+//   （1980 → 3960）明写那是**实测×章数外推** ⇒ 两处必须同一来源；拿现有目标之和冒充它是编数。
+
+/** `meta.goldMeasuredHanzi` → 实测汉字数；**读不到（null／undefined／空串／非有限数）⇒ `null`**。
+ *  ⚠️ 这是 S1 的唯一修法：`Number(null)` 是 0，不能拿它当「读到了 0 个汉字」。 */
+function measuredHanziOf(meta) {
+	const raw = meta?.goldMeasuredHanzi;
+	if (raw === null || raw === undefined || raw === "") return null;
+	const value = Number(raw);
+	return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * 站 9 的「按实测标定外推」读数——**事实句与标定行共用的唯一派生**（票 17 · 收口 review S2）。
+ *
+ * `projected ＝ round(其余各章现有目标之和 × 实测 / 母版章原定)`：母版章实际写了多少，其余章就
+ * 照这个比例算（与标定行逐字同一句口径）。**任一前提不成立 ⇒ `null`**（⛔ 不拿现有目标之和顶替、
+ * ⛔ 不编数）：读不到实测／母版章原定未定或 ≤0／只有母版章一章／其余章目标合计 ≤0。
+ *
+ * @param {object} meta 书级账本视图
+ * @returns {{measured: number, restCount: number, projected: number}|null}
+ */
+export function goldRestProjection(meta = {}) {
+	const chapters = Array.isArray(meta?.outline?.chapters) ? meta.outline.chapters : [];
+	const measured = measuredHanziOf(meta);
+	if (measured === null) return null;
+	const goldNo = goldChapterNo(meta);
+	const goldOriginal = Number(chapters[goldNo - 1]?.targetWords);
+	if (!Number.isFinite(goldOriginal) || goldOriginal <= 0) return null;
+	const rest = chapters.filter((_, index) => index + 1 !== goldNo);
+	if (rest.length === 0) return null;
+	const fallback = Number.isFinite(meta?.targetWords) ? Number(meta.targetWords) : 0;
+	const restOriginal = rest.reduce(
+		(sum, chapter) => sum + (Number.isFinite(chapter?.targetWords) ? chapter.targetWords : fallback),
+		0,
+	);
+	if (restOriginal <= 0) return null;
+	return { measured, restCount: rest.length, projected: Math.round((restOriginal * measured) / goldOriginal) };
+}
+
+/**
+ * 站 8 卡头事实句：`第 N 稿 · <检查结论> ·<N> 条待处理意见。`（spec §2.7 第 2 块）。
+ *
+ * 三件事实都是**现算**的：稿次＝`goldDraftVersion`、检查结论＝`goldAuditText` 的既有三态口径
+ * （与 `auditBadgeText` 同一份输入、同一套「没读到／没有／读到了但格式坏」的分档）、
+ * 待处理意见数＝`meta.goldOpinions` 里 `status === 'pending'` 的条数。
+ *
+ * ⚠️ **我的枚举面比现实窄在哪里**：`goldAuditText` 只认「读到了的字符串」这一档里的
+ * `passed` 布尔；`null`／`undefined` 各自一格（与徽章口径相同）。检查结论的措辞与徽章**有意
+ * 各写一份**——徽章是「🧪 检查：…」前缀的读数，事实句是屏级一句摘要，两处都不是词表出口。
+ * ⚠️ 但「各写一份」只指**句式**，不指**事实**：`undefined` 那一格 2026-10-25 起两处都是
+ * 「未知」这一档（词序按各自句式调），因为它们是同一屏、同一份输入的同一件事实——
+ * 一处说「读取中」、一处说「未知」，同屏就是自相矛盾。
+ * ⚠️ 那一格**一个动词都不留**（理由见 `auditBadgeText` 上方那段：`检查：` 标签后面的动词
+ * 会被读成「检查在做那件事」）。
+ *
+ * @param {{ goldDraftVersion?: number, goldAuditText?: string|null, opinions?: Array<{status?: string}> }} [facts]
+ * @returns {string}
+ */
+export function goldDraftHeadFacts({ goldDraftVersion, goldAuditText, opinions } = {}) {
+	// 票 `ui-display-redesign/17`（收口 review S3）：稿次**不是正安全整数时不编数**——
+	// 修前默认印成「第 1 稿」（编一个不存在的稿次）；现在整段省掉，保留检查结论与意见数。
+	const versionKnown = Number.isSafeInteger(goldDraftVersion) && goldDraftVersion > 0;
+	const pending = (opinions ?? []).filter((o) => o?.status === "pending").length;
+	// 票 gold-display-period/01（2026-10-25）：`undefined` 那格与徽章 `auditBadgeText(undefined)`
+	// **同一口径**——原句「检查记录读取中」是进行时＋无主语（3/3 判「读者会等」）；中间两版分别被
+	// 读成「检查还在读」（动词在标签后）与「检查正在记录」（`记录` 名动同形）⇒ 这一版走同族既有那一档
+	// （「未知」：读不到就停在未知，⛔ 不编一个状态），且**一个动词都不留**。
+	const conclusion =
+		{
+			unknown: "未知",
+			missing: "检查记录还没出来",
+			malformed: "检查记录格式待完善",
+			passed: "检查通过",
+			issues: "有几处待完善",
+		}[auditDisplayState(goldAuditText)] ?? "未知";
+	return `${versionKnown ? `第 ${goldDraftVersion} 稿，` : ""}${conclusion}，${pending} 条待处理意见。`;
+}
+
+/**
+ * 站 9 卡头事实句：`样章实测 N 汉字 · 其余 M 章合计约 P 汉字 · 还没定稿。`（spec §2.8 第 2 块）。
+ *
+ * 数字**全部现算**，⛔ 不抄示例：
+ *  · N＝`meta.goldMeasuredHanzi`（**读不到 ⇒ 整段省掉**，⛔ 不印「0 汉字」——收口 review S1）；
+ *  · M／P＝除母版章（`goldChapterNo`）以外的章数与**按实测比例外推**的合计
+ *    （`goldRestProjection`：与同屏标定行**同一个派生来源**——收口 review S2；前提不成立 ⇒ 整段省掉，
+ *    ⛔ 不拿「其余章现有目标之和」冒充外推值）。
+ * 读不到哪件就不说哪半句（不编数）：最后永远以「还没定稿。」收尾（这一屏就是定稿之前的那一步）。
+ *
+ * ⚠️ 与下面「标定行」（`样章实测 N 汉字。按样章实测与原定的比例外推，其余 M 章合计约 P 汉字——要调吗？`）
+ * **是同一个 P**（票 17）：两处都调 {@link goldRestProjection}，所以同屏不会出现两个不同的
+ * 「合计约」。
+ */
+export function goldMeasureHeadFacts(meta = {}) {
+	const measured = measuredHanziOf(meta);
+	const projection = goldRestProjection(meta);
+	const parts = [];
+	if (measured !== null) parts.push(`最佳范例章实测 ${measured} 汉字`);
+	if (projection !== null) parts.push(`其余 ${projection.restCount} 章合计约 ${projection.projected} 汉字`);
+	parts.push("还没定稿");
+	return `${parts.join("，")}。`;
 }
 
 // ── 谈判桌·展示期（票 walkthrough-2026-10/04，2026-10-06 裁决甲） ───────────────
@@ -1442,7 +1478,11 @@ export function goldDraftLanded(draftText) {
 }
 
 /**
- * 展示期那两句话（**唯一出口**）：卡内那句 fact line ＋ 定稿键旁边的理由。
+ * 展示期那句**唯一**的状态：卡内 fact line（票 `walkthrough-2026-10/04` 裁决甲）。
+ *
+ * ⚠️ 票 `ui-display-redesign/07`（spec §7.7#4）**取代** `gold-display-period/02` 的 UI 落法：
+ * 原先返回的 `finalizeReason`／`rewriteReason` 两句按键盘理由**整段删除**——两颗键仍禁用，
+ * 但禁用的**唯一解释**是这一句 fact line。所以本函数只回 `{ factLine }`；⛔ 别再长出第二句。
  *
  * `auditText` 的形状沿用同一条通道的既有口径（见 `auditBadgeText` 上方那段）：
  * `undefined`＝还没读到、`null`＝没有／读不到、字符串＝读到了。
@@ -1452,7 +1492,7 @@ export function goldDraftLanded(draftText) {
  * 徽章说的是「记录格式待完善」，两句话不许在同一张卡上各说各的。
  *
  * @param {{ draftText?: unknown, auditText?: unknown }} facts
- * @returns {{ factLine: string, finalizeReason: string } | null} 不是展示期时回 `null`（照旧放行）
+ * @returns {{ factLine: string } | null} 不是展示期时回 `null`（照旧放行）
  */
 export function goldDisplayPeriod({ draftText, auditText } = {}) {
 	if (!goldDraftLanded(draftText)) return null; // 还没稿子：验收面此刻也没东西可展
@@ -1460,15 +1500,8 @@ export function goldDisplayPeriod({ draftText, auditText } = {}) {
 	// 票 gold-display-period/01：原句「**这一稿还在检查**，暂不可定稿」是**关于进程的断言**，
 	// 而这条判据只问**文件**（检查记录读不到）——检查小助手崩了、被暂停收走了、或这本书走了
 	// `engine.js` 的 `auditWaived` 豁免时，它照旧说「还在检查」，用户会一直等一个不存在的人。
-	// 改成它真知道的那件事（记录还没出来），`finalizeReason` 一个字不动：它本来就没说谁在跑。
-	return {
-		factLine: "这一稿的检查记录还没出来，暂不可定稿",
-		finalizeReason: "等这一稿的检查记录出来再定稿",
-		// 票 gold-display-period/02：重写那颗键的理由**另写一份**，不与上面那句合并——
-		// 两颗键作废的东西不一样（定稿只是不能点；重写会把这一稿和正在跑的检查一起作废），
-		// 笼统一句「暂不可用」把两种代价抹平，用户就没法据此决定要不要等。
-		rewriteReason: "重写会连这一稿和正在跑的检查一起作废；等这一轮收工再决定",
-	};
+	// 改成它真知道的那件事（记录还没出来）。
+	return { factLine: "这一稿的检查记录还没出来，暂不可定稿" };
 }
 
 // ── 谈判桌·总装（稿页签 + 读/对比 + 意见单 + 定稿区） ────────────────────────
@@ -1549,7 +1582,27 @@ export const goldTableView = defineCardView({
 	derive: () => ({}),
 });
 
-export function GoldTable(props) {
+// ── 站 8 屏：这一稿行不行（票 `confirm-points-redesign-build/08`）──────────────
+/**
+ * 站 8「这一稿行不行」**一屏**（口径出处＝规划票 `confirm-points-redesign/07` 的 `## Answer`
+ * §2／§3／§5；拆屏的实现落在 [`GoldTable`] 那个总装那一层）。
+ *
+ * **这一屏装什么**：稿页签（第 N 稿／旧稿）· 正文（读）· 对比 · 意见单（整章意见／段落意见／
+ * 撤回）·「让 AI 改」，**键行＝「✅ 就用这一稿」＋「🔁 不满意，重写这一章」**两颗。
+ * 谈判桌（定体量）与定稿键**不在这里**——它们住站 9 那一屏（[`GoldFinalize`]）。
+ *
+ * ⚠️ **为什么拆**（票 07 §0／§1）：今天这两件事同屏同卡，且时序是「谈判桌（写回）→ 定稿」；
+ * 新结构是「**这一稿行 → 谈判桌 → 定稿**」——倒置是「站 9 吃 `决策/08.json`」那张边表的必然结果。
+ * **有意付的代价**：用户要**两屏各点一下**，换来的是「**稿子行、但字数还要调**」这个中间态。
+ * 本屏把这句话**写在界面上**（见下面那两行小字），⛔ 不藏进文档。
+ *
+ * ⚠️ **展示期**（票 07 §5）：`goldDisplayPeriod` 一个字不改，落在**这一屏**——
+ * 稿子已在盘上、检查记录还没出来时，这一屏照旧可见（读／对比／意见单都能用），
+ * 只是**两颗键都禁用 ＋ 理由写在脸上**（`finalizeReason` 挂拍板键、`rewriteReason` 挂重写键）。
+ * ⚠️ 票面点名的那条实现面：⛔ **不许漏出一个能点的窗口**——两颗键、以及重写那层的「确认重写」，
+ * 共**三处**全部吃同一个 `displayPeriod !== null`。
+ */
+export function GoldDraftStage(props) {
 	const {
 		meta,
 		goldDrafts,
@@ -1558,7 +1611,8 @@ export function GoldTable(props) {
 		busy,
 		postAction,
 		fetchText,
-		onSuggestWords,
+		// 站 8 拍板之后这一屏还能回来（「📖 回看这一稿」）——`reviewing` 只影响抬头那半句。
+		reviewing = false,
 	} = props;
 	// 这一稿的检查记录原文：**随 payload 下发**，不再由本卡去读。
 	// ⚠️ 原先这里是挂载 effect 里的一次 `fetchText('工作区/audit-NN.md')`——那条路走
@@ -1571,6 +1625,9 @@ export function GoldTable(props) {
 	const [texts, setTexts] = useState({});
 	const [view, setView] = useState({ tab: goldDraftVersion, mode: "read" });
 	const [loadError, setLoadError] = useState(null);
+	// 站 8 的负向出口那层**确认**（「🔁 不满意，重写这一章」→「确认重写」）。
+	// ⚠️ 票 07 §3：重写＝站 8 **内部**再拍一次（`决策/08.json` 的 `version` ＋1），⛔ 不新开确认点。
+	const [confirming, setConfirming] = useState(null); // 'rewrite' | null
 	const opinions = meta.goldOpinions ?? [];
 	const goldNo = goldChapterNo(meta);
 	// 当前稿路径（票 `depth-review-2026-10/05`：构造只此一份，住在 `domain-rules.chapterRel`；
@@ -1653,32 +1710,9 @@ export function GoldTable(props) {
 		);
 	return createElement(
 		"div",
-		{ style: S.focus },
-		createElement(
-			"div",
-			{
-				style: {
-					display: "flex",
-					gap: "8px",
-					alignItems: "center",
-					flexWrap: "wrap",
-					marginBottom: "6px",
-				},
-			},
-			createElement(
-				"strong",
-				{ style: { fontSize: "14px" } },
-				"🤝 最佳范例章 · 一起定风格",
-			),
-			createElement(
-				"span",
-				{ style: { fontSize: "12px", opacity: 0.8 } },
-				auditBadge,
-			),
-		),
-		// 票 walkthrough-2026-10/04（裁决甲）：展示期那句**明确状态**——提前展示是有意的，
-		// 但屏上得说清「这一稿此刻不能定稿」。它是**不占三词名额的 fact line**（状态词那一半
-		// 由状态条／活性行出「我正在做」，见 `view-rules.goldDraftDisplayed`）。
+		null,
+		// 展示期那句**明确状态**（票 walkthrough-2026-10/04 裁决甲）——它现在住在**站 8 这一屏**
+		// （票 07 §5：展示期落在站 8 之前：这一屏可见、两颗键禁用 ＋ 理由写在脸上）。
 		displayPeriod !== null
 			? createElement(
 					"p",
@@ -1770,6 +1804,8 @@ export function GoldTable(props) {
 								void postAction({ action: "gold-opinion-revoke", id });
 							},
 							readOnly: showTab !== goldDraftVersion,
+							// 票 `demo-channel-full/25`：确认层那句话的取值要认得出演示书（本卡手上的就是这一份）。
+							meta,
 						}),
 			showTab !== goldDraftVersion && view.mode === "read"
 				? createElement(
@@ -1797,19 +1833,241 @@ export function GoldTable(props) {
 				void postAction({ action: "gold-revise" });
 			},
 		}),
-		createElement(GoldFinalize, {
-			meta,
-			opinions,
-			busy,
-			// 票 walkthrough-2026-10/04（裁决甲）：展示期里定稿那颗键的能力（禁用＋理由），
-			// 由卡算好递进来——`GoldFinalize` 自己不去读检查记录（它没有那条通道）。
-			displayPeriod,
-			onApprove: (approved, targetWords) => {
-				void postAction({ action: "gold-approve", approved, targetWords });
-			},
-			onSuggestWords,
-			onWriteTargets: (targets) =>
-				postAction({ action: "gold-target-words-set", targets }),
+		// ── 拆屏小字〔常显／两键上方〕（票 `ui-display-redesign/07` §2.7 第 9 块）──────────────
+		// ⚠️ **有意付的代价**照实说在界面上（票 07 §8 末）：拆开之后要两屏各点一下。
+		createElement(
+			"p",
+			{ style: { ...S.hint, margin: "8px 0 0" } },
+			"「就用这一稿」只表态这一稿行；字数还要在下一屏另拍一次。",
+		),
+		// ── 站 8 的两颗键（票 07 §3；⛔ 文案不带「定稿」二字——定稿是站 9 之后那一下）──────────
+		// 展示期禁用面**同时**盖住这两颗 ＋ 下面重写那层的「确认重写」＝三处，⛔ 不许漏出一个
+		// 能点的窗口（票面点名的那条实现面）。
+		// 票 `ui-display-redesign/07`（spec §2.7 第 8 块，取代 `gold-display-period/02` 的 UI 落法）：
+		// 原先分挂两颗的按键盘理由**整段删除**——禁用的唯一解释是顶部那条 fact line。
+		createElement(
+			"div",
+			{ style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } },
+			createElement(
+				"button",
+				{
+					style: S.disabled(S.bigBtn(true), busy || displayPeriod !== null),
+					onClick: () => void postAction({ action: "gold-draft-approve", approved: true }),
+					disabled: busy || displayPeriod !== null,
+					// 票 `auto-walkthrough/04`：关键键的语义钩子（站 8 这一稿行不行）。
+					"data-gold-approve": "1",
+				},
+				GOLD_DRAFT_ACCEPT_LABEL,
+			),
+			createElement(
+				"button",
+				{
+					style: S.disabled(
+						{
+							...S.bigBtn(true),
+							background: "transparent",
+							color: "var(--dsw-alias-state-error-primary)",
+							padding: "8px 10px",
+						},
+						busy || displayPeriod !== null,
+					),
+					onClick: () => setConfirming("rewrite"),
+					disabled: busy || displayPeriod !== null,
+				},
+				GOLD_DRAFT_REWRITE_LABEL,
+			),
+		),
+		// ── 重写后果＋确认层〔隐〕（票 `ui-display-redesign/07` §2.7 第 11 块）──────────────
+		// 后果句原先常显在两键下方；票 07 把它收进确认层——没点重写键时整块不出现。
+		confirming === "rewrite"
+			? createElement(
+					"div",
+					{
+						style: {
+							...S.card,
+							borderColor: "var(--dsw-alias-state-error-primary)",
+							marginTop: "8px",
+						},
+					},
+					createElement(
+						"p",
+						{ style: { ...S.hint, margin: "0 0 6px" } },
+						// 票 14（承诺账 A2）＋票 `demo-channel-full/26`：两取值，出口＝`view-rules.goldRewriteHint`。
+						goldRewriteHint(meta),
+					),
+					createElement(
+						"p",
+						{ style: { margin: "0 0 6px" } },
+						// 票 14（承诺账 A2）：归档是「尽力」语义，「不丢」是全集承诺——收掉。
+						// 票 `demo-channel-full/26`：演示取值只把「AI」换成「演示书自己」（重写真发生）。
+						goldRewriteConfirmNote(meta),
+					),
+					createElement(
+						"div",
+						{ style: { display: "flex", gap: "8px" } },
+						createElement(
+							"button",
+							{
+								style: S.disabled(
+									{
+										...S.bigBtn(true),
+										background: "transparent",
+										color: "var(--dsw-alias-state-error-primary)",
+									},
+									busy || displayPeriod !== null,
+								),
+								onClick: () => void postAction({ action: "gold-draft-approve", approved: false }),
+								// 展示期里确认层这颗与外面那颗同一件事实（`rewriteReason`）。
+								disabled: busy || displayPeriod !== null,
+							},
+							"确认重写",
+						),
+						createElement(
+							"button",
+							{ style: S.smallLink, onClick: () => setConfirming(null) },
+							"再想想",
+						),
+					),
+				)
+			: null,
+	);
+}
+
+// ── 谈判桌·总装（站 8／站 9 **两屏**的切换） ─────────────────────────────────
+/**
+ * 总装：**站 8 一屏、站 9 一屏**（票 `confirm-points-redesign-build/08`）。
+ *
+ * ## 两屏怎么切换（机器上**没有**新状态值）
+ *
+ * ⛔ **不加新的 `awaiting-*` 值**（票 07 §4，Q11 甲）：`awaiting-gold` 照旧一个值覆盖两站，
+ * 两站的区分由**账本折出**——服务端把 `工作区/决策/08.json`／`09.json` 折成
+ * `meta.stationDecisions`（`workflow.js` 的 `stationDecisionsOf`，照关卡 `foldGate` 那一档先例）。
+ *   · **站 8 未拍板**（`决策/08.json` 不在，或 `approved !== true`）⇒ 只出**站 8 那一屏**，
+ *     站 9 屏（含定稿键）**整块不出现**。
+ *   · **站 8 已拍板** ⇒ 出**站 9 那一屏**；「📖 回看这一稿」把站 8 那一屏拉回来
+ *     （同一个组件、同一套读／对比区，⛔ 不复制正文）——站 8 **可重拍**（再拍一次就是
+ *     `决策/08.json` 的 `version` ＋1，⛔ 不新开确认点）。
+ *
+ * ## 「这一稿换了」只是**软提示**
+ *
+ * 站 8 重拍之后站 9 那份体量结论就旧了——界面提示一句（`DRAFT_CHANGED_HINT`），
+ * ⛔ **机器不给硬边**：不打回、不拦（票 07 §4，Q14 甲档；「重做上游把下游打回」已裁不做）。
+ *
+ * ⚠️ **我的枚举面比现实窄在哪里**：`meta.stationDecisions` 今天只折**站 8／9**（本票射程）；
+ * 这个键不在 ⇒ 一律读成「**没拍过板**」（拦着不放行，不会误判成拍过）。
+ */
+export function GoldTable(props) {
+	const {
+		meta,
+		goldDrafts,
+		goldDraftVersion,
+		goldAuditText,
+		busy,
+		postAction,
+		fetchText,
+		onSuggestWords,
+	} = props;
+	const decisions = meta?.stationDecisions ?? {};
+	const draft = decisions[8] ?? decisions["8"] ?? null;
+	const measured = decisions[9] ?? decisions["9"] ?? null;
+	const draftApproved = draft?.approved === true;
+	const station9Decided = measured?.approved === true;
+	// 站 8 重拍过（`decidedAt` 比站 9 那份晚）⇒ 站 9 的体量得重拍一次（软提示）。
+	const draftChanged =
+		station9Decided &&
+		draftApproved &&
+		typeof draft?.decidedAt === "string" &&
+		typeof measured?.decidedAt === "string" &&
+		draft.decidedAt > measured.decidedAt;
+	// 「📖 回看这一稿」：站 9 屏上的入口，把站 8 那一屏拉回来（本地态，⛔ 不发动作、⛔ 不改盘）。
+	const [reviewing, setReviewing] = useState(false);
+	const showStation9 = draftApproved && !reviewing;
+	const auditText = goldAuditText;
+	const headFactsBase = showStation9
+		? goldMeasureHeadFacts(meta)
+		: goldDraftHeadFacts({
+				goldDraftVersion,
+				goldAuditText: auditText,
+				opinions: meta?.goldOpinions ?? [],
+			});
+	// 票 `decision-provenance/01`：把服务端 apply 过纠偏的那一句「谁拍的」接在事实句后面。
+	// 服务端给空／旧投影没有这一格 ⇒ **一个字不加**（既有夹具与旧书的长相不变）。
+	const provenanceText = (showStation9 ? measured : draft)?.provenanceText ?? "";
+	const headFacts = `${headFactsBase}${provenanceText === "" ? "" : ` ${provenanceText}`}`;
+	return createElement(
+		"div",
+		{ style: S.focus },
+		// ── 卡头行（票 `ui-display-redesign/07`；spec §2.7 第 1／2 块、§2.8 第 1／2 块）──────────
+		// 问句＝存量 `decisionOf` 那句（逐字不改，⛔ 不进 `decisionOf` 的第二份）；事实句按这一屏的
+		// 现有读数现算。⚠️ 问句的 `<strong>` **字面量必须写在本文件里**再作为 `question` 传给共用件
+		// （理由见 `card-head.js` 文件头「API」：焦点区卡标题的取证面只认卡片自己文件里的字面量）。
+		createElement(CardHead, {
+			question: showStation9
+				? createElement(
+						"strong",
+						{ style: CARD_HEAD_QUESTION_STYLE },
+						"其余各章的字数就按这个定吗？",
+					)
+				: createElement(
+						"strong",
+						{ style: CARD_HEAD_QUESTION_STYLE },
+						"这一稿能当全书的最佳范例章吗？",
+					),
+			facts: headFacts,
 		}),
+		createElement(
+			"div",
+			{
+				style: {
+					display: "flex",
+					gap: "8px",
+					alignItems: "center",
+					flexWrap: "wrap",
+					marginBottom: "6px",
+				},
+			},
+			// ⚠️ **这一段是纯字面量、⛔ 不许写成条件表达式、也不许在实参里夹注释**：
+			// `test-context-vocabulary.mjs` 的逐字性判据（票 07 契约①）从源码里抠**焦点区卡标题**
+			// ——它认的是「`<strong>` 的最后一个实参是**一个**字符串字面量」且祖先是卡根（`S.focus`）。
+			// 写成 `cond ? "a" : "b"`、或在实参里夹一句注释，这一串就从清单里消失（那一格当场红）。
+			// 「现在是哪一屏」另起一格说（下面那个 span）。
+			createElement("strong", { style: { fontSize: "13px" } }, "🤝 最佳范例章：一起定风格"),
+			createElement(
+				"span",
+				{ style: { fontSize: "12px", opacity: 0.8 } },
+				showStation9 ? "站 9：定体量" : "站 8：这一稿行不行",
+			),
+			createElement(
+				"span",
+				{ style: { fontSize: "12px", opacity: 0.8 } },
+				auditBadgeText(auditText),
+			),
+		),
+		showStation9
+			? createElement(GoldFinalize, {
+					meta,
+					busy,
+					// 票 07 §5：展示期落在**站 8 之前**——站 9 屏到得了就说明这一稿早过了检查，
+					// 所以这一屏不再吃 `displayPeriod`（那颗键的能力改由 `station9Decided` 说话）。
+					station9Decided,
+					draftChanged,
+					onReviewDraft: () => setReviewing(true),
+					onApprove: (approved, targetWords) => {
+						void postAction({ action: "gold-approve", approved, targetWords });
+					},
+					onSuggestWords,
+					onWriteTargets: (targets) =>
+						postAction({ action: "gold-target-words-set", targets }),
+				})
+			: createElement(GoldDraftStage, {
+					meta,
+					goldDrafts,
+					goldDraftVersion,
+					goldAuditText,
+					busy,
+					postAction,
+					fetchText,
+					reviewing,
+				}),
 	);
 }

@@ -38,6 +38,9 @@ import { EVENT_META } from "../domain-rules.js";
 // 界面用词表：上屏的字一律经它取（票 `deep-module-scan/05` 的取词路径闸门）。
 import { phaseUi, gateHuman, stageLabelHuman, segmentHuman, eventHuman, checkHuman, STAGE_HUMAN, artifactName, workPathForEvent, workEntryForEvent } from "./view-rules.js";
 import { formatTime } from "./rules.js";
+// 正文出口（票 `ui-systematic-fixes/01`／`03` · spec §3·1）：一段以上的正文只有一个入口。
+// 本文件接的是「提案正文」那一处（`gate.detail` 的**同源第二出口**，焦点区那张关卡卡已由票 01 接上）。
+import { bodyOf, BODY_KIND_MARKDOWN } from "./md-render.js";
 // 卡片 props 契约（票 `workbench-card-contract/02`）：声明在**卡自己的域文件**里。
 import { defineCardView } from "./card-view.js";
 // 回放行的「打开」按钮（票 `deep-module-scan/15`）：只依赖 react 与 view-rules，
@@ -58,7 +61,7 @@ function cardText(event) {
 		case "textbook/agent-end":
 			return `AI 完成：${stageLabelHuman(data.label)}`;
 		case "textbook/gate-proposal":
-			return `AI 提案（${gateHuman(data.gate ?? "?")} · v${data.version ?? "?"}）：${data.title ?? ""}`;
+			return `AI 提案（${gateHuman(data.gate ?? "?")}，v${data.version ?? "?"}）：${data.title ?? ""}`;
 		case "textbook/gate-decision":
 			return data.approved === true
 				? `${gateHuman(data.gate ?? "?")}通过（v${data.version ?? "?"}）`
@@ -66,9 +69,17 @@ function cardText(event) {
 		case "textbook/mineru-progress":
 			return `转换 ${data.file ?? ""}：${data.stage ?? ""}`;
 		case "textbook/rollback":
-			return `↩️ 已回退到快照 ${data.snapshot ?? "?"}`;
-		case "textbook/source-added":
-			return `已上传材料：${data.file ?? ""}（${data.role ?? ""}）`;
+			// 票 `ui-systematic-fixes/03`（spec §3·2）：原来这里插 `data.snapshot`——那是账本快照的
+			// **文件名序号**（`过程/存档/<N>.json`，号只增、永不复用），机器账，人拿它做不了什么。
+			// 这一句没有可用的「人读那半」⇒ **不印那个号**（说不清就不印），⛔ 也不印一个「?」占位。
+			return "↩️ 已回退到更早的一份存档";
+		case "textbook/source-added": {
+			// ⚠️ 票 `pre-gold-build/02`：**老事件照旧渲染**（老账本里那一行本来就带角色，⛔ 不改写
+			// 老书的历史）；新事件不再带角色（上传那一刻还没有角色）⇒ 没有值时**整块括号不印**，
+			// 不上屏一个空的「（）」。
+			const role = typeof data.role === "string" && data.role !== "" ? `（${data.role}）` : "";
+			return `已上传材料：${data.file ?? ""}${role}`;
+		}
 		case "textbook/hint":
 			return `💡 ${data.text ?? ""}`;
 		case "textbook/error":
@@ -263,7 +274,7 @@ export function replayRowSummary(row, ctx = {}) {
 			const opinion = data.opinion ?? {};
 			const verb = goldOpinionVerbs[opinion.kind] ?? opinion.kind ?? "";
 			return clipText(
-				`${opinion.target ?? "笼统"}·${verb}${opinion.wish ? `：${opinion.wish}` : ""}`,
+				`${opinion.target ?? "笼统"}，${verb}${opinion.wish ? `：${opinion.wish}` : ""}`,
 			);
 		}
 		case "textbook/style-note":
@@ -601,19 +612,13 @@ export function ReplayList(props) {
 							),
 							(event.data?.detail ?? "") !== ""
 								? createElement(
-										"pre",
-										{
-											style: {
-												whiteSpace: "pre-wrap",
-												wordBreak: "break-word",
-												background: "var(--dsw-alias-bg-layer-1)",
-												borderRadius: "6px",
-												padding: "8px",
-												fontSize: "12px",
-												margin: "4px 0 0",
-											},
-										},
-										event.data.detail,
+										"div",
+										{ style: { margin: "4px 0 0" } },
+										// 票 `ui-systematic-fixes/03`（spec §3·1／§3·2）：这一份是 AI 交的**提案正文**
+										// （md：`## 标题`／`**加粗**`／`- 列表`），⛔ 不再 `pre-wrap` 逐字吃原文。
+										// 票 01 已把焦点区关卡卡上的**同一份** `gate.detail` 接进正文出口，这里是
+										// 它的同源第二出口 ⇒ 走**同一条路**（`bodyOf` 的 md 那档）。
+										...bodyOf(event.data.detail, BODY_KIND_MARKDOWN),
 									)
 								: null,
 						)

@@ -3,7 +3,7 @@
  *
  * ## 它是什么，不是什么
  *
- * **是**一组共用函数 ＋ **一份具名上限**。45 个动作的 payload 契约写着两处（`agent-tool.js`
+ * **是**一组共用函数 ＋ **一份具名上限**。<!--r:catalog.canonical-->53<!--/r--> 个动作的 payload 契约写着两处（`agent-tool.js`
  * 的 `preValidate` 与 `actions/*` 各 case），而「**哪些数是 interface 事实**」此前**没有任何
  * 一处清单**——风格意见 300 字、驳回说明 500 字、进度叙述 60 字……caller 只能从代码里读出来。
  *
@@ -49,6 +49,22 @@ export const INTERVENE_TEXT_MAX = 500;
 export const INTERVENE_TARGET_MAX = 60;
 /** 豁免时用户手输的原因（放行必要条件）。 */
 export const WAIVER_NOTE_MAX = 300;
+/** 豁免作用域里「哪一条检查」那一格（票 `walkthrough-fixes/23`）：`other` 点名放行的那条检查项名，
+ *  形如「无重复标题」「必含板块齐全（契约项）」——按检查项自己的名字逐字比，所以给足一个中文名的长度。 */
+export const WAIVER_CHECK_MAX = 60;
+/**
+ * 一次逐点豁免**最多点名几条**（票 `kn-unowned-silent/02`）。
+ *
+ * 它是「放弃哪几条点」的清单，不是整本书的图谱 ⇒ 上限取单章上限的十倍（200）：一本书十章、
+ * 每章都顶格 20 条也只有 200 条可放弃，超过这个数就是错把整张图谱塞进来了。
+ */
+export const WAIVER_POINTS_MAX = 200;
+/** 逐点豁免里一条知识点的 title 上限（与 `CHAPTER_SIDE_REASON_MAX` 同档：人读句子）。
+ *  ⚠️ 调用点（`collab-signals.js` 的 `waive`）**不裁**超长的 title（超了是 400，不是悄悄截断）：
+ *  截断后的 title 与图上那条对不上，豁免会静默失效。 */
+export const WAIVER_POINT_TITLE_MAX = 200;
+/** 逐点豁免里一条知识点的 `id` 上限（`kp-a-01` 这一族，给足余量）。 */
+export const WAIVER_POINT_ID_MAX = 60;
 /** 暂停原因（落账与恢复上下文）。 */
 export const PAUSE_REASON_MAX = 200;
 /** 拍板/重做时那句话（`gate-decide` 与两条重做路径共用）。 */
@@ -61,9 +77,15 @@ export const GOLD_HINT_MAX = 60;
 export const GOLD_REVISE_NOTE_MAX = 500;
 /** 建议样例章的理由 / 交接体积依据 / 抽查意见处置说明（同一档长度，取人读句子）。 */
 export const CHAPTER_SIDE_REASON_MAX = 200;
-/** outline 交工时单章知识点清单的条数上限（票 `pipeline-wiring-gaps/13`：超出按票 01 裁决
- *  「放行并记人话提示」处理，不再无声丢弃——上限数值沿用原表达式里的 20，逐字没动）。 */
-export const OUTLINE_POINTS_MAX = 20;
+/**
+ * outline 交工时单章知识点清单的条数上限 —— **原位置再导出**（票 `ui-workflow-seam/01`）。
+ * 声明已搬到 `src/outline-limits.js`（`src/` 根级、零 import）：界面（`magnitudeReading` 的
+ * 分母）也要这一个数，而它不该知道 `workflow/actions/` 这种内部路径。
+ * ⚠️ **本行不是第二份真值**：`export … from` 是同一个绑定，没有拷贝；下面 6 个本目录 importer
+ * （`convert`／`collab-signals`／`chapters`／`deep-modify`／`gold`／`gates`）与 `engine.js`
+ * 的 import **一行都不用改**——「搬运票不改 import 面」。
+ */
+export { OUTLINE_POINTS_MAX } from '../../outline-limits.js';
 /** 进度叙述的一行标签。 */
 export const PROGRESS_LABEL_MAX = 60;
 /** 进度叙述的展开说明。 */
@@ -72,6 +94,8 @@ export const PROGRESS_DETAIL_MAX = 300;
 export const DEEP_MODIFY_NOTE_MAX = 500;
 /** 材料转换进度回放行的摘要上限。 */
 export const CONVERT_TEXT_MAX = 200;
+/** 派单时主笔给的那一句叮嘱（`agent-assign`；判断的唯一出口，与「改进方向」同档长度）。 */
+export const AGENT_ASSIGN_NOTE_MAX = 500;
 
 /**
  * 严格读一个文本字段：**只认字符串**，裁掉首尾空白，再截到上限。非字符串落 `''`。

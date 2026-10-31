@@ -29,6 +29,8 @@ import {
   createMeta,
   updateMeta,
   appendEvent,
+  // 票 `confirm-points-redesign-build/09`：站 0／1「只提示人」那一句的**唯一出口**（标签簇）。
+  STATION_VALUE_EDIT_HINT,
   listProjects,
   trashProject,
   runners,
@@ -37,6 +39,14 @@ import {
 } from '../engine.js'
 import { familyOf, reject, accept } from '../action-runner.js'
 import { refreshArtifactRegistry, writeArtifactManifest } from '../book-shape.js'
+// 票 `confirm-points-redesign-build/03`：篇幅档位那一族（档位表 / `deriveLengthPlan` /
+// `lengthStyleLine`）**整块删除**——建书不再问篇幅、书里不再有那个字段（盘上老书那格全空 ⇒ 无迁移）。
+// 本动作层现在只认那**一个**剩下的旋钮：并发上限。
+import {
+  readMaxConcurrentSubagents,
+  concurrencyLedgerLine,
+  MAX_CONCURRENT_SUBAGENTS_CEILING,
+} from '../../workbench-knobs.js'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join, basename } from 'node:path'
 
@@ -87,7 +97,9 @@ export function syncSessionTitle(ctx, sessionId, bookName) {
 }
 
 
-/** 动作族 · 书目管理：'book-create' / 'book-rename' / 'book-set-goal' / 'book-delete'。 */
+
+
+/** 动作族 · 书目管理：'book-create' / 'book-rename' / 'book-set-goal' / 'book-set-knobs' / 'book-delete'。 */
 export const actBooks = familyOf('books', async ({ ctx: ctx, action: action, sessionId: sessionId, project: project, body: body }) => {
   switch (action) {
     case 'book-create': {
@@ -95,6 +107,22 @@ export const actBooks = familyOf('books', async ({ ctx: ctx, action: action, ses
       const { name, goal, route, science, demo } = body
       if (typeof name !== 'string' || name.trim() === '') {
         return reject(400, '请填写书名')
+      }
+      // 票 `confirm-points-redesign-build/03`：**服务端也拦空目标**（ADR-0037 决策 5）。
+      // 今天拦人的只有界面那条红字（`WizardCard.submit`），而这个接口对空目标**照收**
+      // （原来那句 `goal: typeof goal === 'string' ? goal : ''`）——`book-set-goal`（`:243`）
+      // 与 AI 自己建书那条路都要求非空，只有建书这条路漏着 ⇒ 承诺面 ＞ 实现面。
+      // 措辞与 `book-set-goal` 那一条**同一句**（同一件事两处说法不同，就是下一次漂移的种子）。
+      if (typeof goal !== 'string' || goal.trim() === '') {
+        return reject(400, '请填写学习目标')
+      }
+      // 票 `confirm-points-redesign-build/03`：**篇幅档位那一格整块删除**——建书不再问、书里不再有
+      // 那个字段。盘上老书那格全空（**无迁移**）：读侧一个字都不读它，写侧从此没有写入点。
+      // 章数上下限都不判；站 6 拍板的章数只做非阻断对账读数（`工作区/决策/06.json`，
+      // 读侧在 `workflow/decisions.js`）。
+      const cap = readMaxConcurrentSubagents(body.maxConcurrentSubagents)
+      if (cap !== null && cap.ok !== true) {
+        return reject(400, `并发上限要是 1-${MAX_CONCURRENT_SUBAGENTS_CEILING} 之间的整数`)
       }
       if (listProjects(sessionId).length > 0) {
         return reject(409, '这个会话已经有一本书了：先完成它、删除它，或者新建一个会话再开第二本')
@@ -110,13 +138,21 @@ export const actBooks = familyOf('books', async ({ ctx: ctx, action: action, ses
         writeFileSync(join(dir, 'README.md'), bookReadmeText(name))
       } catch { /* README 失败不影响建书 */ }
       const meta = {
-        id, name: name.trim(), goal: typeof goal === 'string' ? goal : '',
-        route: route === 'human' ? 'human' : 'blueprint',
+        id, name: name.trim(), goal: goal.trim(),
+        // ⚠️ **票 `confirm-points-redesign-build/06`：建书屏那条路不再写 `route`**——那一项已搬去
+        // **站 4（第 1 关）**，值在**拍板那一刻**才由人定（`gates.js` 的 `gate-decide` 写进 `meta.route`）。
+        // 建档时替用户先落一个默认档＝**替用户表态**（读侧一律 `meta.route ?? 'blueprint'` 兜底，
+        // 缺这一格不会让任何一条路读不出来）。AI 自己建书那条路仍可**显式**给
+        // （`agent-tool.js` 的 `create` 带 `route`），给了就照写——⛔ 不给就不编。
+        ...(route === 'human' || route === 'blueprint' ? { route } : {}),
         science: science === true,
         demo: demo === true,
         session: sessionId,
         folder: basename(dir),
         sources: [], phase: 1, status: 'active',
+        // ⚠️ **这里没有 `lengthPreset`**（票 cprb/03 起）：篇幅档位那个字段不存在了，
+        // 盘上老书那一格留着旧值也**没人读**（无迁移、无回落）。
+        ...(cap !== null && cap.ok === true ? { maxConcurrentSubagents: cap.value } : {}),
         createdAt: Date.now(), updatedAt: Date.now(), eventCount: 0,
       }
       createMeta(meta)
@@ -127,6 +163,8 @@ export const actBooks = familyOf('books', async ({ ctx: ctx, action: action, ses
         refreshArtifactRegistry(id)
       } catch { /* 形状件是派生的，写不进去不等于建档失败 */ }
       appendEvent(id, 'textbook/phase-start', { phase: 1, label: PHASE_LABELS[1] })
+      // ⚠️ 这里原先还落一条「篇幅档位」的 active 风格线——随三档删除一并退役（屏上不再有档位可换，
+      // 也就不存在「换档位要作废上一条」那件事）。用户自己提的风格线走 `style-note`，不受影响。
       // 书名敲定 → 会话名钉成「造书 · 书名」（ADR-0013；失败不影响建档）。
       syncSessionTitle(ctx, sessionId, meta.name)
       return accept({ project: id, meta })
@@ -158,7 +196,51 @@ export const actBooks = familyOf('books', async ({ ctx: ctx, action: action, ses
       }
       const goalMeta = updateMeta(project, (state) => { state.goal = goal.trim() })
       appendEvent(project, 'textbook/hint', { text: '学习目标已更新' })
+      // ── 票 `confirm-points-redesign-build/09`：**站 0 是「只提示人」那一档** ───────────────
+      // 站 0 的值（`meta.name`／`goal`／`science`）是**现读**的，没有可作废的产物 ⇒ 这里
+      // ⛔ 不归档、⛔ 不截账本、⛔ 不清 `meta`、⛔ 不把待办指回，只**多打一句**（spec §4.5 的两处例外之一）。
+      // 措辞的**唯一出口**＝`engine.STATION_VALUE_EDIT_HINT`（⛔ 不在这里手抄第二份）。
+      appendEvent(project, 'textbook/hint', { text: STATION_VALUE_EDIT_HINT })
       return accept({ project, goal: goalMeta.goal })
+    }
+    case 'book-set-knobs': {
+      // 票 `walkthrough-fixes/19`②：**拍板之前还能改**那个旋钮（消掉「等 AI 出一版方案再驳回」
+      // 那条绕圈子路）。⚠️ 票 `confirm-points-redesign-build/03` 起只剩**一个**旋钮
+      // （篇幅档位三档删除）⇒ 现在**要**给 `maxConcurrentSubagents`；给了别人认得的旧字段
+      // （`length`）也一律拒——静默收下一个已删的字段，就是下一次「用户以为改了」。
+      assertSessionOwned(project, sessionId)
+      if (body.length !== undefined) {
+        return reject(400, '篇幅档位已删除（票 confirm-points-redesign-build/03）：book-set-knobs 只剩 maxConcurrentSubagents')
+      }
+      const cap = readMaxConcurrentSubagents(body.maxConcurrentSubagents)
+      if (cap === null) {
+        return reject(400, 'book-set-knobs 需要 maxConcurrentSubagents')
+      }
+      if (cap.ok !== true) {
+        return reject(400, `并发上限要是 1-${MAX_CONCURRENT_SUBAGENTS_CEILING} 之间的整数`)
+      }
+      let changed = false
+      {
+        const before = readMeta(project)?.maxConcurrentSubagents ?? null
+        updateMeta(project, (state) => { state.maxConcurrentSubagents = cap.value })
+        if (before !== cap.value) {
+          // **改完必须落账**（裁决②）：走**既有**事件通道 `textbook/hint`，⛔ 不新开事件类型。
+          // 落的是「用户把它拧成了几」——「拧了没生效」从此在账本上查得出来。
+          appendEvent(project, 'textbook/hint', {
+            text: concurrencyLedgerLine(cap.value),
+            knob: 'maxConcurrentSubagents',
+            value: cap.value,
+            by: 'user',
+          })
+          changed = true
+        }
+      }
+      const meta = readMeta(project)
+      return accept({
+        project,
+        maxConcurrentSubagents: meta?.maxConcurrentSubagents ?? null,
+        changed,
+      })
     }
     case 'book-delete': {
       // 取消/删除一本书：两步确认后移入回收站（数据不物理删除，可恢复）。

@@ -18,9 +18,12 @@
 import {
   assertSessionOwned,
   WAIVER_ITEMS,
+  readMeta,
   updateMeta,
   appendEvent,
   updateStyleLineMirror,
+  // 票 `demo-channel-full/10`：「留言销号」的**唯一写入口**（`intervene-done` 与演示书终检那一趟共用）。
+  closeIntervention,
   // ⚠️ 票 `premature-announce/01`：这个函数从本文件**搬进 engine**（暂停与「重做/归档前」两处共用，
   // 生产者仍只有这里那一处消费点，契约登记面跟着搬到 engine）。
   countRunningSubagents,
@@ -35,6 +38,12 @@ import {
   INTERVENE_TEXT_MAX,
   INTERVENE_TARGET_MAX,
   WAIVER_NOTE_MAX,
+  // 票 `walkthrough-fixes/23`：作用域里「哪一条检查」那一格的上限（`other` 点名的检查项名）。
+  WAIVER_CHECK_MAX,
+  // 票 `kn-unowned-silent/02`：逐点豁免那一格的上限（条数／title／id）——与 `WAIVER_CHECK_MAX` 同族。
+  WAIVER_POINTS_MAX,
+  WAIVER_POINT_TITLE_MAX,
+  WAIVER_POINT_ID_MAX,
   PAUSE_REASON_MAX,
 } from './payload-fields.js'
 import { familyOf, reject, accept } from '../action-runner.js'
@@ -120,6 +129,20 @@ function stopRunningWorkflowJobs(ctx, sessionId) {
 }
 
 
+/**
+ * 演示书上点「豁免」时**原样给回**的那句说明（票 `demo-channel-full/14`，维护者 2026-10-15 拍板）。
+ *
+ * 为什么把它抽成一个导出：它是一条**说给人听的话**（判定线①），所以 ⛔ 不许在别处手抄第二份——
+ * 判据（`test-collab-backend.mjs` 的 F6e）与文案判据都引**这一份**（与票 17 的
+ * `DEMO_DEEP_MODIFY_NOTICE` 同一个先例）。它说的是**这一条通道的事实**，⛔ 不承诺任何后果：
+ * 演示书不真跑那些验货，所以这里没有要豁免的东西；这一下不算数——不记下豁免，也不因此放开任何东西。
+ *
+ * ⚠️ 与真书那句「你已同意：…」**必须明显不同**：同一句话在两种书上说不同的事＝说假话
+ * （真书那句的意思是「某条检查被取消了」，而演示书上压根没有那条检查在跑）。
+ */
+export const DEMO_WAIVE_NOTICE = '演示模式不真跑那些验货，这里没有要豁免的东西：这一下只是给你看它长什么样，不记豁免、也不因此放开任何东西。'
+
+
 /** 动作族 · 协作信号：'style-note' / 'style-note-revoke' / 'intervene' / 'intervene-done' / 'waive' / 'waive-revoke' / 'pause'。
  *  状态改动一律走 updateMeta 的改法（当场新读）：本族原先清一色「读状态 → 改 → 整份写回 → 再记一笔」，
  *  写回时会把账高带回读状态那一刻的旧值（票 02）。 */
@@ -166,29 +189,109 @@ export const actCollabSignals = familyOf('collab-signals', async ({ ctx: ctx, ac
     }
     case 'intervene-done': {
       assertSessionOwned(project, sessionId)
-      let target
-      updateMeta(project, (meta) => {
-        target = (meta.pendingInterventions ?? []).find((i) => i.id === body.id)
-        if (target === undefined) return
-        target.status = 'done'
-      })
-      if (target === undefined) { return reject(404, '没有这条留言') }
-      appendEvent(project, 'textbook/intervention-done', { text: target.text })
+      // 票 `demo-channel-full/10`：销号那一下（改 meta ＋ 记一笔）搬进 engine 的**唯一写入口**——
+      // 演示书的终检那一趟调的是**同一个函数**（演示通道没有主笔 AI，那一下由机器自己走）。
+      if (!closeIntervention(project, body.id)) { return reject(404, '没有这条留言') }
       return accept({ project })
     }
     case 'waive': {
       assertSessionOwned(project, sessionId)
       const item = typeof body.item === 'string' ? body.item : ''
       if (WAIVER_ITEMS[item] === undefined) { return reject(400, '未知的豁免项') }
+      // ── 票 `demo-channel-full/14`（维护者 2026-10-15 拍板「**可点但不算数 ＋ 给一句说明**」）──────
+      // 演示书上这一跳**照旧可点**（入口一个字不改），点下去**一个字节都不写**：不写 `meta.waivers`、
+      // 不落 `textbook/waiver` 账，而是拿回一句如实的告知。
+      //
+      // 为什么「不算数」才是如实的那一半：演示通道**从不真跑验货**（`stage-submit` 那条链在它身上
+      // 没有入口点，那个豁免的判定 `waived()` 对演示书恒 false）。若照真书那样写一条豁免记录，账上
+      // 就会出现「某条检查被用户放行了」——而那条检查在这条通道里**根本没跑过**。⛔ 所以这里既不
+      // 写记录、也不放行任何东西：那句告知说的正是「这里没有要豁免的东西」。
+      //
+      // ⚠️ 位置在 `userNote` 校验**之前**是有意的：演示书不写任何记录，那条「必须手输原因」的
+      // 必要条件对它不适用（它的边界是「跟用户说了句实话」，不是「拦下这次请求」）。⚠️ 但它必须
+      // 在 `assertSessionOwned` 与「未知的豁免项」**之后**——那两条是**身份与形状**校验，与是不是
+      // 演示书无关（演示书不该打开一条能探别家的口子）。
+      const demoMeta = readMeta(project)
+      if (demoMeta?.demo === true) { return accept({ project, demo: true, notice: DEMO_WAIVE_NOTICE }) }
       const userNote = textField(body.userNote, WAIVER_NOTE_MAX)
       if (userNote === '') { return reject(400, '豁免必须手输原因（在对话里直接说明即可，由 AI 转交），这是放行的必要条件') }
+      // ── 作用域（票 `walkthrough-fixes/23`，2026-10-06 裁决）：哪一条检查／哪本书／哪一章 ──────────
+      // 本 case 是 `meta.waivers[].scope` 的**唯一写入点**（读取面 `engine.js` 的 `waived()`）。
+      // 三格的来源各不一样，逐格写清（别在这里编第二份词表）：
+      //   · `check`：非 `other` 的豁免项，**那一项就是它放行的那条检查**（id 由服务端派生，不接受调用方另填）；
+      //     `other` 必须由调用方点名——机器不知道该放行哪一条，而这正是本裁决要的粒度（一次只放行一条）。
+      //   · `book`：本书 id（记录就住在这本书的 meta 里，这一格是防串用的显式核对）。
+      //   · `chapter`：适用时给章号（1 基）；**不适用就明确记 `null`**＝全书/不限——**不写假章号**。
+      //     今天只有「其他」这一族有按章的读取点（单章验货的「练习与答案齐全」），别的豁免项都是
+      //     全书的 ⇒ 调用方顺手带一个章号也**不抄进作用域**（那会记下一个没人按它判定的假值）。
+      const scopeIn = (body.scope !== null && typeof body.scope === 'object') ? body.scope : {}
+      const check = item === 'other' ? textField(scopeIn.check, WAIVER_CHECK_MAX) : item
+      if (check === '') {
+        return reject(400, '「其他」豁免必须点名放行的是哪一条检查（scope.check，用机器检查结果里的项名，如「无重复标题」）——一次只放行点名的那一条')
+      }
+      if (item !== 'other' && scopeIn.check !== undefined && scopeIn.check !== item) {
+        return reject(400, '这一项豁免的作用域只能点名它自己那条检查：scope.check 要么不写，要么与 item 相同')
+      }
+      const chapter = item === 'other' && Number.isSafeInteger(scopeIn.chapter) && scopeIn.chapter >= 1
+        ? scopeIn.chapter
+        : null
+      // ── 票 `kn-unowned-silent/02`：**逐点豁免**（`waivedPoints[]`）────────────────────────────
+      // 裁决（维护者 2026-10-27「按推荐」）：「豁免必须结构化到点。」旧形状是书级一刀切
+      // （`scope.chapter: null` ＋ 散文里写 5 个点）——读取面只按 `item` ＋ `userNote` 非空放行，
+      // 于是**哪几个点被放弃**机器一件都不知道（真书 143 承诺 / 138 实写）。
+      // 今天：一笔豁免要少收哪几条点，就在这里**逐条点名**（点 `id`／`title`，可选 `chapter`）。
+      // ⚠️ 形状只认「非空字符串」或「带非空 title 的对象」；**写了的型别错当场 400**——静默丢一条
+      //   就等于「用户点了名、机器当没看见」，那正是本票要治的病。
+      // ⚠️ 非 `other` 的豁免项**不收** `waivedPoints`（它们不按点判）——但**当场上 400**，不静默吞掉：
+      //    「写了的输入被机器悄悄丢掉」正是本票要治的病（`scope.chapter` 那一格可以静默不抄，因为它是
+      //    「顺手指带的假值」；`waivedPoints` 不一样，它是「用户点名要放弃哪几条」的正题）。
+      if (item !== 'other' && body.waivedPoints !== undefined && body.waivedPoints !== null) {
+        return reject(400, 'waivedPoints 只对「其他」豁免（item=other）有意义：别的豁免项不按点判，点名放弃哪几条点请用 item=other ＋ scope.check=被放行的那条检查')
+      }
+      let waivedPoints = []
+      if (item === 'other' && body.waivedPoints !== undefined && body.waivedPoints !== null) {
+        if (!Array.isArray(body.waivedPoints)) {
+          return reject(400, 'waivedPoints 需要数组：每条是知识点的 title（字符串），或 {id?, title, chapter?} 对象——逐条点名你要放弃的那几条')
+        }
+        if (body.waivedPoints.length > WAIVER_POINTS_MAX) {
+          return reject(400, `waivedPoints 一次最多点名 ${WAIVER_POINTS_MAX} 条（这是「放弃哪几条点」的清单，不是整本书的图谱）`)
+        }
+        for (const raw of body.waivedPoints) {
+          const title = typeof raw === 'string' ? raw : (typeof raw?.title === 'string' ? raw.title : '')
+          const trimmedTitle = title.trim()
+          if (trimmedTitle === '') {
+            return reject(400, 'waivedPoints 的每一条都要有非空的 title（知识点名，与工作区/outline.md 的 points 同一写法）')
+          }
+          // ⚠️ 超长 title **不截断**（`textField` 会裁）：裁出来的串与图上那条对不上，豁免会**静默失效**
+          // ——那正是「点了名、机器当没看见」的另一种写法。超了当场 400。
+          if (trimmedTitle.length > WAIVER_POINT_TITLE_MAX) {
+            return reject(400, `waivedPoints 里有一条 title 长 ${trimmedTitle.length} 字、超过 ${WAIVER_POINT_TITLE_MAX} 字上限（不截断：截了就对不上图上那条点了）`)
+          }
+          const point = { title: trimmedTitle }
+          if (typeof raw?.id === 'string' && raw.id.trim() !== '') point.id = textField(raw.id, WAIVER_POINT_ID_MAX)
+          // 章归属**落盘时就写实**：条目自己给了就记它；没给而这条记录本身按章（`scope.chapter`）⇒ 记那个章号。
+          // 为什么要在写侧补齐：面板「豁免放弃 M」与「哪一章的点数被减负」都按**条目上的章号**认，
+          // 落盘时省掉它，读侧就只能推出 `null`（＝不知道），于是闸门放行而面板印 0——两处各说一套。
+          const pointChapter = Number.isSafeInteger(raw?.chapter) && raw.chapter >= 1 ? raw.chapter : chapter
+          if (pointChapter !== null) point.chapter = pointChapter
+          waivedPoints.push(point)
+        }
+      }
       const waiver = {
         id: `wv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
         item, reason: WAIVER_ITEMS[item].label, risk: WAIVER_ITEMS[item].risk, userNote,
         source: body.source === 'chat' ? 'chat' : 'ui', at: Date.now(),
+        scope: { check, book: project, chapter },
+        // 只有真的点名了才写这一格（不写空数组占位：那会让「没有逐点豁免」与「点了名但是空的」分不出来）。
+        ...(waivedPoints.length > 0 ? { waivedPoints } : {}),
       }
       updateMeta(project, (meta) => { meta.waivers = [...(meta.waivers ?? []), waiver] })
-      appendEvent(project, 'textbook/waiver', { item, userNote })
+      // 作用域也进账本那一笔：事后翻账的人要读得到「这次放行的是哪一条、哪一章」；
+      // 点名的点跟着进——账本是「这次到底放弃了什么」的追溯面。
+      appendEvent(project, 'textbook/waiver', {
+        item, userNote, scope: waiver.scope,
+        ...(waivedPoints.length > 0 ? { waivedPoints } : {}),
+      })
       return accept({ project, waiver })
     }
     case 'waive-revoke': {
@@ -200,7 +303,7 @@ export const actCollabSignals = familyOf('collab-signals', async ({ ctx: ctx, ac
         ;[removed] = meta.waivers.splice(idx, 1)
       })
       if (removed === undefined) { return reject(404, '没有这条豁免') }
-      appendEvent(project, 'textbook/waiver-revoke', { item: removed.item })
+      appendEvent(project, 'textbook/waiver-revoke', { item: removed.item, scope: removed.scope })
       return accept({ project })
     }
     case 'pause': {

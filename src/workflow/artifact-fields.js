@@ -9,7 +9,20 @@
 // 与识别侧（`NUMBERED_CHAPTER_FILE_RE` / `productOpenMode`）同居，两端不再各拼一份。
 // ⚠️ 要**基名**（`chapter-NN.md`）的调用点取 `chapterName`，不是这个——给它们塞相对路径会拼出
 // `工作区/工作区/chapter-01.md`，真的把文件写坏或读坏。
-import { chapterRel } from '../domain-rules.js'
+// 票 `context-budget/18`：`agent-assign` 派出去的那几路各落自己的产物（审计记录 / 精读细目 /
+// 终检分报告），它们在**同一张**产物清单里——所以这一族 label 的映射也走那些单一出处，不手拼路径。
+import { auditRel, chapterRel, finalAuditReportRel, productFamilyPath, readingRel } from '../domain-rules.js'
+
+/**
+ * 跨章审计报告的落点（产物清单单一出处）。
+ *
+ * ⚠️ 原先这里是 `find(...) ?? '工作区/audit-cross.md'`——兜底那条路径是**手抄的第二份**，清单行一漂
+ * 它就悄悄给出一份「看起来对」的路径（票 `context-budget/18` 收口复核 findings）。现在走
+ * `productFamilyPath`：找不到那一族直接抛（模块加载即响），没有兜底值。
+ * 与 `cross-audit.js` 的 `CROSS_AUDIT_REPORT_REL` 是同值的两个出口，同值关系由判据钉住
+ * （`test/test-ledger-artifact-fields.mjs`）。
+ */
+const CROSS_AUDIT_REL = productFamilyPath('跨章审计')
 
 /** 章正文路径（两位序号是产物契约）。 */
 export function artifactDataForChapter(chapter) {
@@ -54,6 +67,10 @@ export function artifactDataForStage(stage, gate, goldChapter = 1) {
  */
 export function artifactDataForLabel(label, goldChapter = 1) {
   const text = String(label ?? '')
+  // ⚠️ 顺序是契约：`最后检查 第 N 路`（票 `context-budget/18` 终检分查那一路的报告）必须排在
+  // 下面那条 `startsWith('最后检查')` 之前——否则它会被映射到成品书上，产物入口指错地方。
+  const finalRoute = /^最后检查\s*第\s*(\d+)\s*路/u.exec(text)
+  if (finalRoute !== null) return { path: finalAuditReportRel(Number(finalRoute[1])) }
   if (text.startsWith('源探查')) return { path: '工作区/explore.md' }
   if (text.includes('章节骨架') || text.includes('章节安排')) return { path: '工作区/outline.md' }
   if (text.includes('最佳范例章')) return artifactDataForChapter(goldChapter)
@@ -61,6 +78,16 @@ export function artifactDataForLabel(label, goldChapter = 1) {
 
   const write = /写第\s*(\d+)\s*章/.exec(text)
   if (write !== null) return artifactDataForChapter(Number(write[1]))
+
+  // 票 `context-budget/18`：`agent-assign` 派出去的另外三路各自的产物。
+  const audit = /^检查第\s*(\d+)\s*章/u.exec(text)
+  if (audit !== null) {
+    const n = Number(audit[1])
+    return { path: auditRel(n), chapter: n }
+  }
+  const reading = /^精读资料\s*(\d+)/u.exec(text)
+  if (reading !== null) return { path: readingRel(Number(reading[1])) }
+  if (text.startsWith('跨章审计')) return { path: CROSS_AUDIT_REL }
 
   const gate = /设计提案·(?:第\s*(\d+)\s*关|关卡\s*(\d+))(?:·修订\s*v\s*(\d+))?/.exec(text)
   if (gate !== null) return artifactDataForGate(gate[1] ?? gate[2], gate[3] === undefined ? 1 : Number(gate[3]))

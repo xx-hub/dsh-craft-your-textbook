@@ -7,11 +7,17 @@
  *  3. 轮询 GET /api/v4/extract-results/batch/{batch_id}
  *  4. 下载结果 zip → 解压 → 写 outDir/full.md
  *
- * Token 读取顺序：MINERU_TOKEN 环境变量 → $DSH_HOME/textbook/settings.json 的
- * mineruToken 字段 → $DSH_HOME/.credentials.yaml 中 mineru_token 键（简易扫描）。
+ * Token 读取顺序（票 `token-banner/01` 的用户裁决 D③=A）：$DSH_HOME/textbook/settings.json 的
+ * mineruToken 字段（用户在界面里显式保存的，优先） → MINERU_TOKEN 环境变量（宿主注入，兜底） →
+ * $DSH_HOME/.credentials.yaml 中 mineru_token 键（历史第三通道，简易扫描）。
+ *
+ * ⚠️ **读序只有一份**：`findMineruToken()` 既是真正取 Token 的那条路，也是
+ * `mineruTokenStatus()`（`/textbook/settings` 与保存回包的判据）的来源。横幅与转换必须看同一份
+ * 事实——票前它们各读一路（横幅只看 settings、转换还认 env），于是「env 配好了」的用户成功
+ * 转换后还常驻「还差一步」的假警报。
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, mkdtempSync, rmSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, mkdtempSync, rmSync, chmodSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
 import { execFile as execFileCb } from 'node:child_process'
@@ -23,17 +29,19 @@ import AdmZip from 'adm-zip'
 const execFileAsync = promisify(execFileCb)
 
 /**
- * ── 本文件对外的形状（票 `deep-module-scan/21`）──
+ * ── 本文件对外的形状（票 `deep-module-scan/21`，票 `token-banner/01` 补一枚）──
  *
- * package 侧只 import **八个**符号：真正干活的那个 `convertPdfBatch`，加 `readSettings` /
+ * package 侧只 import **九枚**符号：真正干活的那个 `convertPdfBatch`，加 `readSettings` /
  * `writeSettings`、`stripKnownExtension`、`autoSplitAvailable`、`humanizeMineruError`
  * （它**唯一**一个「测试 import、生产零消费者」却仍然导出的，理由在它自己的 JSDoc里），
+ * `mineruTokenStatus`（**唯一**的 Token 判据：`/textbook/settings` 与保存回包都从它取，
+ * ⛔ 别在别处重拼一遍 settings/env 的读序——那正是票 `token-banner/01` 的病），
  * 再加两份**原样再导出**的单一真相源（`MINERU_MAX_BYTES` / `MINERU_KNOWN_EXTENSIONS`
  * ——那两份有测试专门钉着，撤掉就毁掉了「只有一份真相」这道防漂移）。
  *
  * 下面这些**一律不导出**：`MINERU_MAX_PAGES`、`countPdfPages`、`planPageChunks`、
  * `planSizeChunks`、`splitPdfBySize`、`mergeSplitParts`、`isEmptyConvertedMd`、
- * `resolveMineruToken`。它们过去挂着 `export` 只是为了让测试能直接断中间算式，
+ * `resolveMineruToken`、`findMineruToken`、`maskMineruToken`。它们过去挂着 `export` 只是为了让测试能直接断中间算式，
  * 而生产侧**一个消费者也没有**——那份宽度是白付的：分段算法改一次，那批断言就得跟着改一次，
  * caller 唯一能观察到的（提交给 MinerU 的 `files[]` 与 `page_ranges`）却一条没变。
  *
@@ -510,9 +518,14 @@ function mergeSplitParts(parts) {
   return blocks.join('\n\n')
 }
 
+/** 设置文件的唯一路径出口（读／写／加固三处共用）。 */
+function settingsFile() {
+  return join(resolveHome(), 'textbook', 'settings.json')
+}
+
 /** 读设置文件（$DSH_HOME/textbook/settings.json），不存在返回 {}。 */
 export function readSettings() {
-  const path = join(resolveHome(), 'textbook', 'settings.json')
+  const path = settingsFile()
   if (!existsSync(path)) return {}
   try {
     return JSON.parse(readFileSync(path, 'utf8'))
@@ -521,11 +534,40 @@ export function readSettings() {
   }
 }
 
-/** 写设置文件（$DSH_HOME/textbook/settings.json）。 */
+/**
+ * 写设置文件（$DSH_HOME/textbook/settings.json）。
+ *
+ * ⚠️ **0600 是硬要求**（票 `token-banner/01`）：这份文件里住着用户显式保存的 MinerU Token，
+ * 与 `.credentials.yaml` 同级。`mode` 只在**新建**时生效，所以旧文件（可能是 0644）必须再
+ * `chmodSync` 一次——否则「从今天起是 0600」只对第一台新机器成立。窗口期里旧权限的那一瞬间
+ * 无法用「先 chmod 再写」消除（文件可能还不存在），这里选的是「写完立刻收紧」，与 Node 的
+ * 常规做法一致。
+ */
 export function writeSettings(settings) {
   const dir = join(resolveHome(), 'textbook')
   mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'settings.json'), JSON.stringify(settings, null, 2) + '\n')
+  const path = settingsFile()
+  writeFileSync(path, JSON.stringify(settings, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
+  chmodSync(path, 0o600)
+}
+
+/**
+ * 历史文件加固（票 `token-banner/01` 收口 review）：旧版本写下的 settings.json 可能是 0644
+ * （那时没有 0600 要求，Token 已经躺在里面）。用户升级后**第一次走到判据**（打开工作台或保存）
+ * 就收紧，不必等他再保存一次。
+ *
+ * ⚠️ 刻意不放进 `readSettings`：转换每处理一份材料都会读一次设置，读路径不该反复写盘。
+ * Windows 的 ACL 语义不在这条判据里（`chmod` 只动只读位），直接跳过。
+ */
+function tightenSettingsFileMode() {
+  if (process.platform === 'win32') return
+  const path = settingsFile()
+  if (!existsSync(path)) return
+  try {
+    if ((statSync(path).mode & 0o077) !== 0) chmodSync(path, 0o600)
+  } catch {
+    /* 收紧失败不阻断读取：界面服务照常可用，残余风险如实登记在票与信任边界里。 */
+  }
 }
 
 function resolveHome() {
@@ -547,14 +589,64 @@ function scanCredentialsYaml() {
   }
 }
 
+/**
+ * 找到此刻真正会用的 Token 及其来源——**读序的唯一实现**。
+ *
+ * 优先级（D③=A）：settings（用户显式保存） → env（宿主注入） → credentials（历史第三通道）。
+ * 「来源」的取值是后端词汇（`settings` / `env` / `credentials`），中文标签归界面（`event-cards.js`）。
+ *
+ * ⚠️ 票面（D③=A）只点名 settings／env 两条通道；credentials 是**既有读序里真实存在的第三条**。
+ * 把它排除在判据外，会让「只配了 credentials」的用户重新落回本票要治的那类假警报（横幅说他没配、
+ * 转换却跑得通）——所以判据跟**实际转换用的那条读序**走，界面对它单列一个来源标签，⛔ 不假装只有两路。
+ *
+ * @returns {{ token: string, source: 'settings'|'env'|'credentials' } | null}
+ */
+function findMineruToken() {
+  const fromSettings = readSettings().mineruToken
+  if (typeof fromSettings === 'string' && fromSettings.trim() !== '') {
+    return { token: fromSettings.trim(), source: 'settings' }
+  }
+  const fromEnv = process.env.MINERU_TOKEN
+  if (fromEnv !== undefined && fromEnv.trim() !== '') return { token: fromEnv.trim(), source: 'env' }
+  const fromCredentials = scanCredentialsYaml()
+  if (fromCredentials !== undefined && fromCredentials !== '') {
+    return { token: fromCredentials, source: 'credentials' }
+  }
+  return null
+}
+
+/**
+ * 界面只许看到脱敏值：保留可辨识的前缀（如 `sk-`）与末四位，中间一律 `****`。
+ * 短 Token（≤12 字符）连末四位都不露——露了就等于露掉一大截。
+ */
+function maskMineruToken(token) {
+  const text = String(token ?? '').trim()
+  if (text === '') return null
+  const prefix = /^([A-Za-z]{2,4}-)/.exec(text)?.[1] ?? ''
+  const tail = text.length > 12 ? text.slice(-4) : ''
+  return `${prefix}****${tail}`
+}
+
+/**
+ * Token 的**唯一判据**（票 `token-banner/01`）：`/textbook/settings` 与保存回包都从这里取。
+ *
+ * ⚠️ `configured` 与 `resolveMineruToken` **同一条读序**（都走 `findMineruToken`）：横幅问的
+ * 「配好了没有」必须等于转换那一刻「找不找得到」——两者各读一路就是假警报的病因。
+ * `masked` 是脱敏值（不是明文）；明文一个字节都不许进回包。
+ *
+ * @returns {{ configured: boolean, source: 'settings'|'env'|'credentials'|null, masked: string|null }}
+ */
+export function mineruTokenStatus() {
+  tightenSettingsFileMode()
+  const found = findMineruToken()
+  if (found === null) return { configured: false, source: null, masked: null }
+  return { configured: true, source: found.source, masked: maskMineruToken(found.token) }
+}
+
 /** 解析 MinerU token；无 token 抛错（含配置引导文案）。 */
 function resolveMineruToken() {
-  const fromEnv = process.env.MINERU_TOKEN
-  if (fromEnv !== undefined && fromEnv.trim() !== '') return fromEnv.trim()
-  const fromSettings = readSettings().mineruToken
-  if (typeof fromSettings === 'string' && fromSettings.trim() !== '') return fromSettings.trim()
-  const fromCredentials = scanCredentialsYaml()
-  if (fromCredentials !== undefined && fromCredentials !== '') return fromCredentials
+  const found = findMineruToken()
+  if (found !== null) return found.token
   throw new Error('未配置 MinerU Token：请在设置里填写（设置页 → 造书工作台 → MinerU Token），或设置环境变量 MINERU_TOKEN')
 }
 
@@ -609,7 +701,7 @@ function isNestedFullMd(entryName) {
  * 一份转换稿算不算「压根没有正文」（票 `mineru-formats/04` 判据 A）。
  *
  * **判据是结构性的、有没有，与篇幅无关**：去空白之后**长度为 0**。
- * ⚠️ **不许做成字数阈值**——`CONTEXT.md`「机器检查契约原则」：机器永不查字数/篇幅。
+ * ⚠️ **不许做成字数阈值**——`CONTEXT.md`「机器检查契约原则」：字数闸门只判逐章兜底，不判**材料正文**的长短。
  * 同一个道理、`CONTEXT.md`「正文偏少」词条把它写成了红线：某份稿子「转成了但正文很短」
  * 是**一句如实告知**（AI 探查时逐源表态），机器**只判有没有**，一个字的门槛都不设。
  *

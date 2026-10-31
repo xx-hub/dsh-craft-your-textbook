@@ -8,23 +8,30 @@
 import { createElement, useState } from "react";
 import { S } from "./styles.js";
 import { formatTime, humanDuration } from "./rules.js";
+// 票 `ui-display-redesign/11`：问卷面板的三选一收卷人（闭集唯一出处＝探索确认契约；⛔ 不手抄名单）
+// 与下载地址要的书夹路径常量（发卷件的落点，⛔ 不在面板里手拼文件名）。
+import { EXPLORE_CONFIRM_ANSWERERS } from "../explore-confirm-contract.js";
+import { READER_QUESTIONNAIRE_ISSUED_REL } from "../domain-rules.js";
 // 界面用词表（批 2）：六阶段在界面上的字只此一份。
-import { phaseUi, gateHuman, goldDraftDisplayed } from "./view-rules.js";
+import { phaseUi, goldDraftDisplayed } from "./view-rules.js";
+// 票 `ui-systematic-fixes/02`：状态 → 人话只在**值出口**翻译一次；「轮到你该干什么」与
+// 「这本书被暂停了吗」两个判据也住在那里（本文件只取用，⛔ 不各判各的）。
+import { statusHuman, withPendingStage, turnOwnerOf, pausedNow } from "./view-rules.js";
+// 票 `demo-channel-full/26`（清仓）：这一族「AI 会／正在…」句子的两个取值（真书／演示书）。
+// 出口收在 `view-rules.js`（⛔ 本文件不拼第二份措辞），判据见 view-rules 那一节的注释。
+import {
+	styleNotesPanelTitle,
+	styleLinePanelHeading,
+	styleLinePanelHint,
+	patternPasteHint,
+} from "./view-rules.js";
 
 // ── 协作状态条：现在轮到谁 ───────────────────────────────────────────────────
 
-/**
- * 「这本书被暂停了吗」的唯一判据（票 walkthrough-fixes/22 · P6）。
- *
- * 为什么要单独一份：暂停这件事**三处各判各的**——顶栏判 `meta.pause` 出「⏸ 已暂停 / ▶ 继续」，
- * 状态条与活性行原先**全程不读** `meta.pause`，于是点完暂停同一屏既说「已暂停」又说
- * 「🤖 我正在做」（走查实测，且刷新后照旧）。判据同源，矛盾就没有第二处生长的地方。
- *
- * 判定归属（本票只落这一条）：**暂停优先**——`meta.pause` 一置上，正文这两处就不再说
- * 「我正在做」。⚠️ 「同一屏允许几个状态词」那个上限的裁决属于另一张票
- * （`16-状态词同屏打架.md`），这里不抢、也不新造第四个说法：暂停期间正文让位给顶栏那句。
- */
-const pausedNow = (meta) => meta?.pause != null;
+// 「这本书被暂停了吗」的唯一判据（票 walkthrough-fixes/22 · P6）**已搬进值出口模块**
+// `view-rules.js`（票 `ui-systematic-fixes/02`：状态条要它判「整条不出声」那一支）。
+// 票 `ui-systematic-fixes/11`：暂停那一档并进了「轮到谁」的**唯一判定**（`turnOwnerOf` 回 null），
+// 所以本文件不再直接调 `pausedNow`——两处（状态条／活性行）仍由同一个判定说话。
 
 /**
  * 「这一步**有**内容支撑吗」的唯一判据（票 `walkthrough-fixes/14` · 走查 P40 那一格）。
@@ -51,105 +58,105 @@ const pausedNow = (meta) => meta?.pause != null;
  */
 const hasProgressDetail = (detail) => typeof detail === "string" && detail.trim() !== "";
 
-/** 「这一步**已经交办出去了**吗」——`pendingStage` 非空（`StatusStrip` 与 `ActivityLine` 共用同一份口径）。 */
+/** 「这一步**已经交办出去了**吗」——`pendingStage` 非空（状态条那一格用它判「有没有内容支撑」）。 */
 const handedOverNow = (pendingStage) => pendingStage !== null && pendingStage !== undefined;
 
 /**
- * 「我正在做」这句此刻**没有内容支撑**吗（票 `walkthrough-fixes/14` 的全部判据，**只有这一处**）。
+ * 状态条那一格「我正在做」此刻**没有内容支撑**吗（票 `walkthrough-fixes/14` 的判据）。
  *
  * ⚠️⚠️ **两个前提缺一不可，少一个就变成「一律闭嘴」，而那不是本票的裁决**：
  *   ① **已交办**（`pendingStage` 非空）——机器已经把某一步交出去了，才谈得上「说了却说不出在做什么」；
  *   ② **零 `progress`**（`stageScopedProgressDetail` 返回 `""`）——详情行整行消失。
  *
  * **只有这两条同时成立**（＝宿主重启后、恢复链补了 `stage-start` 还没补 `progress` 的那一段窗口）
- * 才摘掉那半句。**下面这些一律留着**：
- *   · **跑动中、尚未交办**（`status: "running"`、`updatedAt` 刚动、没判停）：AI **确实在跑**，
- *     「🤖 我正在做」是**实话**；摘掉它等于用一句新的假静默换一句旧的实话（`smoke-test.mjs:5680`
- *     「活性行·回合中态不对」钉的就是这一格，**它是既有事实，不是过期断言**）。
- *   · 有 `progress` 详情：那句**有**支撑。
- * ⚠️ 第一次落地时这里**漏了前提 ①**（只判了 `progressDetail` 空不空），范围比裁决宽了一格，
- * 连带把上面那条老断言炸了——`StatusStrip` 一侧当时是对的。**两处必须走这一个函数**，
- * 不许各写各的（这正是本仓反复治的「一处改、另一处漏」）。
+ * 才把状态条整条收掉。**跑动中、尚未交办**（`status: "running"`、`pendingStage` 为空）那一格
+ * 不在判据里：AI **确实在跑**，状态条那句「🤖 我正在做：准备下一步」是实话。
+ *
+ * ⚠️ 票 `ui-display-redesign/20` 起这条判据**只归 `StatusStrip`**：活性行未判停本来就整行不出声
+ * （状态词只留状态条一处），不再需要第二个「没有支撑就闭嘴」的分支。⛔ 不要把 ActivityLine
+ * 重新接回这个函数——两处各判各的正是本仓反复治的病。
  */
 const activityClaimUnsupported = (pendingStage, progressDetail) =>
 	handedOverNow(pendingStage) && !hasProgressDetail(progressDetail);
 
-/** 「轮到你」时你到底该做什么——一句大白话，按书的 status 给。
- *  批 1（2026-09-20）：状态词收敛成「轮到你 / 我正在做 / 已完成」，见 CONTEXT.md「工作台状态词」。 */
-function humanTurnAction(status, gate, phase) {
-	if (status === "awaiting-explore") return "确认读到的材料重点对不对";
-	if (status === "awaiting-outline") return "确认章节安排";
-	if (status === "awaiting-gold") return "确认最佳范例章";
-	if (status === "awaiting-chapters-review") return "逐章过目";
-	if (status === "awaiting-final-approval") return "对整本书做最后把关";
-	// 批 4：原来写「拍板第 1 关」——同一屏的步清单写「第 1 次拍板 · 学习目标与难点」，两套词。
-	if (gate !== null && gate.status === "awaiting")
-		return gateHuman(gate.gate);
-	if (phase === 1) return "上传教材（开始转换后 AI 会自动接手）";
-	return "看一眼下面的卡片";
-}
+// 「轮到你该干什么」那一句**已收进展示派生模块** `view-rules.js` 的拍板契约 `decisionOf`
+// （票 `ui-systematic-fixes/02` 先把旧出口搬过去；票 10 把它 reshape 成 `{ question, decisionKey }`，
+// `question` 从「话题名」改成问句）。⛔ 本文件不留第二份措辞。
+// ⚠️ 票 `ui-display-redesign/16` 起**状态条不再渲染它**（问句归卡头）：值出口那一格照旧是
+// `decisionOf(...).question`（契约一字未改），只是 `StatusStrip` 在「轮到你」态只印状态词。
+
+/**
+ * 取色档 → 状态词前面那个图标（票 `ui-systematic-fixes/02`）。
+ *
+ * 分工：**词归值出口、图标归渲染**——`statusHuman.word` 是裸词（别处要「一句话里的状态词」时
+ * 也能直接取），图标只在这里按 `tone` 贴。`config`（待配置）与 `you`（轮到你）同色、只差图标 🔑／⚡。
+ */
+const STATUS_TONE_ICON = Object.freeze({
+	ok: "🎉",
+	error: "⚠️",
+	you: "⚡",
+	config: "🔑",
+	ai: "🤖",
+});
 
 export function StatusStrip(props) {
-	const { meta, gate, pendingStage, metaLabel, humanTurn, progressDetail } = props;
-	const status = meta?.status ?? "active";
-	const phase = meta?.phase ?? 1;
-	const paused = pausedNow(meta);
+	const { meta, gate, pendingStage, metaLabel, progressDetail } = props;
+	// 票 `ui-systematic-fixes/02`：状态 → `{ word, tone, action }` **只在值出口翻译一次**
+	// （`view-rules.statusHuman`）。状态条自己**不再比较 status**——收出口之前那 7 个分支的取值
+	// 全部由它给，渲染结果逐字不变（判据见 `test-wording-invariants.mjs` 的「状态条那 7 个分支」）。
+	// 票 `ui-systematic-fixes/10`：「轮到你」那半句现在来自拍板契约 `view-rules.decisionOf`
+	// （`{ question, decisionKey }`，`question` 是问句、`decisionKey` 取「用户正看着哪张卡」）。
+	// ⇒ 本组件**只渲染**，⛔ 不拼那句话、也⛔ 不按 `status` 另判一次（站 2／3、站 8／9 的错位
+	// 就是在那里治掉的）。活性行与阶段片读**同一份判定**是票 11 做的（`turnOwnerOf`／`humanTurn`），
+	// 本组件那一侧一格没改。
+	//
+	// 票 `ui-display-redesign/16`：**问句归卡头**（01–10 各票已把 8 个决策站的问句搬上卡）⇒
+	// 「轮到你」这一格**不再渲染** `human.action` 那半句：只印 `⚡ 轮到你`，同一句问句不在
+	// 一屏出现两次。`statusHuman`／`decisionOf` 两个出口**一字未改**（问句仍同源取自
+	// `decisionOf(...).question`，只是状态条不再拿它拼字）；站 1 的
+	// 「上传教材（开始转换后 AI 会自动接手）」同属这半句，随之不上屏（若维护者要保留，另登记）。
+	// ⚠️ 「我正在做／已完成」两态的动作说明**保留不动**——它们说的不是问句、卡头也没有；
+	// 出错／待配置那两格的「请看下面的提示」同样不是问句，照旧保留。
+	//
+	// `pendingStage` 住在 payload 顶层、壳已经把它拆开了，这里并回投影：展示期
+	// （`awaiting-gold` ＋ `pendingStage === 'gold'`）只有它才判得准（那一档归「我正在做」）。
+	// ⚠️ 壳还会传一个 `humanTurn` prop——本组件**不再消费它**：同一个值现在由 `statusHuman`
+	// 算（`deriveBookViewFacts` 的 `humanTurn` 已经是它的返回值），两处各判各的那条病根被拔掉。
+	const human = statusHuman(withPendingStage(meta, pendingStage), gate);
 	// 票 14：横幅详情行整格为空时，「我正在做」是**没有内容支撑**的断言 ⇒ 这一支整条不出声。
 	// 判据走**唯一那一个函数** `activityClaimUnsupported`（两个前提：已交办 ＋ 零 progress），
 	// 与 `ActivityLine` 同一份——**两处各判各的正是本仓反复治的那个病**。
-	// `pendingStage` 为空时的「🤖 我正在做 · 准备下一步」是**另一格**、不在本票范围内：
-	// 那一格机器压根没交办出去任何一步，它答的是「还没开始」而不是「正在做但说不清在做什么」。
+	// `pendingStage` 为空时的「🤖 我正在做 · 准备下一步」是**另一格**：那一格机器压根没交办出去
+	// 任何一步，它答的是「还没开始」而不是「正在做但说不清在做什么」。
+	const handedOver = handedOverNow(pendingStage);
+	const busy = human.humanTurn !== true && human.tone === "ai";
 	const detailEmpty = activityClaimUnsupported(pendingStage, progressDetail);
-	let text = null;
-	let tone = "normal";
-	if (status === "delivered") {
-		text = `🎉 书做好了 · 可以预览和下载《${meta.name ?? ""}》.md`;
-		tone = "ok";
-	} else if (status === "error" || status === "needs-config") {
-		text =
-			status === "error"
-				? "⚠️ 轮到你 · 出错了，请看下面的提示"
-				: "🔑 轮到你 · 需要配置，请看下面的提示";
-		tone = status === "error" ? "error" : "you";
-		// ⚡ 批 1 根因修复：原来这里按 status 逐条列举 awaiting-*，漏了 awaiting-outline /
-		//    awaiting-chapters-review / awaiting-final-approval，于是终检屏落到 else 说
-		//    「AI 正在准备下一步…」——与同屏的「等你把关」直接矛盾。
-		//    现在「轮到谁」只在 client-entry 的 humanTurn 里判一次，这里只负责翻译成一句话。
-	} else if (humanTurn === true || (gate !== null && gate.status === "awaiting")) {
-		text = `⚡ 轮到你 · ${humanTurnAction(status, gate, phase)}`;
-		tone = "you";
-	} else if (paused) {
-		// 票 22：暂停优先于「我正在做」。顶栏那一句「⏸ 已暂停」＋「▶ 继续」已经把状态说全了，
-		// 这一条不补第二套说法（也不新造第四个状态词）——整条不出声，而不是留一个只剩边框的空条。
-		// ⚠️ 「轮到你 / 出错 / 书做好了」那几支不受影响：它们说的不是「AI 还在跑」这件事。
-		text = null;
-		tone = "normal";
-	} else if (pendingStage !== null && pendingStage !== undefined) {
-		// 票 25（走查 P20）：这条横幅**只出状态词那半截**，不再把同一段进度叙述整段搬上来。
-		// 那一段（100 多字）本来与焦点区主卡里的 `ChaptersCard` / `StatusCard` 各出一次，
-		// 于是同一屏里同一段话渲染两三遍：白占一屏，还让人以为「它卡在同一个地方又说了一遍」
-		// ＝进度停滞（恰好加重 P11 那个「看起来卡住了」的错觉）。
-		//
-		// 选**主卡**当主出口的理由：主卡是用户当下正在看的那一块，叙述放在那里才「就近可读」；
-		// 横幅的身份是一行状态词，把一百多字塞进去既挤又吵，而且它会随滚动出屏——真需要时
-		// 反而看不见。两张主卡互斥（`focusCardKey` 一次只出一张），所以一屏里必然恰好一次。
-		//
-		// ⚠️ 取数口径一个字没动：`stageScopedProgressDetail` 仍然只算一次、仍然喂给这三处
-		// （票面明写不许为了去重去改它的取数口径）。
-		//
-		// 票 14：那一格**空**时（`detailEmpty`）整条不出声——横幅详情行整行消失的时候，
-		// 这一句是**已知的假话**。见文件上方 `hasProgressDetail` 的注释。
-		text = detailEmpty ? null : `🤖 我正在做 · ${metaLabel ?? ""}`;
-		tone = "ai";
-	} else {
-		text = "🤖 我正在做 · 准备下一步";
-		tone = "ai";
-	}
-	// 暂停期间这一条整条不出声（上面那一支的唯一出口）。
-	if (text === null) return null;
+	// 暂停（`word === null`）与「已交办却零进度」两支：整条不出声（不是留一个只剩边框的空条）。
+	if (human.word === null || (busy && handedOver && detailEmpty)) return null;
+	// 票 25（走查 P20）：已交办那一格**只出状态词那半截 ＋ 壳递进来的阶段名**，不再把同一段进度
+	// 叙述整段搬上来（那一段与焦点区主卡里的 `ChaptersCard` / `StatusCard` 各出一次，白占一屏，
+	// 还让人以为「它卡在同一个地方又说了一遍」）。阶段名的唯一出处仍是 `deriveBookViewFacts`。
+	const tone = human.tone;
+	// 词与图标拼在这里（词归值出口、图标归渲染，见 `STATUS_TONE_ICON` 的说明）。
+	// 票 `ui-display-redesign/16`：「轮到你」只印状态词（问句归卡头，⛔ 不再 `⚡ 轮到你 · <问句>`）；
+	// 其余各档的行文**逐字不变**（「我正在做」可能带壳递进来的阶段名，「已完成」带成品入口说明，
+	// 出错／待配置那两句「请看下面的提示」不是问句、卡头没有 ⇒ 照旧保留）。
+	// ⚠️ 判「轮到你」这一格认的是 `tone === "you"`（＝`turnKindOf` 的 `turn` 那一档），**不是**
+	// `humanTurn`：阶段一出错／待配置时 `humanTurnOf` 也会回 true（`phase === 1 && gate === null`），
+	// 但那两格的 tone 是 error／config、那半句必须留着（实测：用 `humanTurn` 会把
+	// 「出错了，请看下面的提示」一起摘掉）。
+	// 票 `ui-display-redesign/20`（`design-draft.md` §7.14 第 1 条，2026-10-29 裁决）：
+	// 「我正在做」那一格的中点按 `ui-cleanup` 判据 1 改冒号——`🤖 我正在做：<阶段名>`。
+	// 票 `ui-cleanup/03`（2026-10-30）起**所有**句内显示分隔符都按判据 1 改标点：
+	// running 走冒号，其余档走逗号（`test-wording-invariants.mjs` 的 11 格期望值同批钉着）。
+	const joiner = tone === "ai" ? "：" : "，";
+	const text = tone === "you"
+		? `${STATUS_TONE_ICON[tone]} ${human.word}`
+		: `${STATUS_TONE_ICON[tone]} ${human.word}${joiner}${busy && handedOver ? (metaLabel ?? "") : human.action}`;
 	const bg = {
 		ok: "var(--dsw-alias-state-success-tertiary)",
 		you: "var(--dsw-alias-state-warn-tertiary)",
+		config: "var(--dsw-alias-state-warn-tertiary)",
 		ai: "var(--dsw-alias-state-business-tertiary)",
 		error: "var(--dsw-alias-file-diff-deleted-bg)",
 		normal: "transparent",
@@ -157,6 +164,7 @@ export function StatusStrip(props) {
 	const border = {
 		ok: "#1a7f37",
 		you: "#d4a72c",
+		config: "#d4a72c",
 		ai: "var(--dsw-alias-state-business-primary)",
 		error: "var(--dsw-alias-state-error-primary)",
 		normal: "transparent",
@@ -189,8 +197,9 @@ export function StatusStrip(props) {
  *
  * 措辞只说**可见事实**（`N 分钟没动静了`），不下「卡住了」这个诊断：机器只看得到账本，
  * 看不到 AI 内部。停顿时长按分钟说（`humanDuration`，与状态卡计时共用一份格式化）。
- * 判停时这句仍然先说状态词「🤖 我正在做」——照用户上报那屏的原句形态（「🤖 我正在做 · 好像卡住了」），
- * 撤掉的只是那句诊断与重复出口；状态卡那一行的「只报时长」是**另一件事**（它是这一步的计时行）。
+ * 票 `ui-display-redesign/20` 起判停时只说 `⏱ N 分钟没动静了`（不再先说状态词「我正在做」）：
+ * 状态词只留状态条那一处，这一行说的是「停了多久」这个可见事实；状态卡那行的「只报时长」是
+ * **另一件事**（它是这一步的计时行）。
  *
  * 小助手状态来自宿主推送的会话摘要（`indexSubagentDescendants` 的口径），**不再自己轮询计数**：
  * 这里只说「N 个小助手在跑」；「📥 N 个完成待收」已撤——它的真身是「记录只存在于磁盘上」，
@@ -206,45 +215,36 @@ export function ActivityLine(props) {
 	// 三态词（2026-09-20 用户拍板）：轮到你 / 我正在做 / 已完成。
 	// 「轮到谁」先看 humanTurn，再看状态与活性（2026-09-20 02 屏判读实测的矛盾：那个会话
 	// status=running 但第 1 次拍板正等用户定，状态条写「⚡ 轮到你」、活性行却说「我正在做」）。
-	// 轮到用户时，状态条已经在说「⚡ 轮到你 · <要你做什么>」，这一行再喊一遍就是两行同话：
+	// 轮到用户时，状态条已经在说「⚡ 轮到你」（票 `ui-display-redesign/16` 起问句归卡头、
+	// 状态条不再带那半句），这一行再喊一遍就是两行同话：
 	// 只留子代理聚合；连聚合都没有就整行不出现。
 	const stalled = (stall ?? {}).stalled === true;
+	// 票 22：暂停**不**掐掉子助手聚合：那一句说的是小助手（它们确实在跑），与「已暂停」（说的是
+	// 主笔 AI）不是同一件事。暂停在「轮到谁」那一层就是「这一刻不说话」（`turnOwnerOf` 回 null）。
+	//
+	// 票 `ui-display-redesign/20`：「我正在做」四处收到一处（只留状态条那句）⇒ 这一行**未判停时
+	// 整行不出声**（有子助手聚合时只留聚合那一半）；判停时才说 `⏱ N 分钟没动静了` ＋ 那颗
+	// 「🔁 从断点继续」。⛔ 别把状态词前缀加回来：同一句「我正在做」一屏只说一次。
+	// ⚠️「从断点继续」那颗按钮**保留**：它答的是「能不能接着做」，是这一格唯一可操作的出口。
+	// 票 `ui-systematic-fixes/11`：**「轮到谁」不在这里判**——判定只有一份（`view-rules.turnOwnerOf`），
+	// 状态条与阶段片读的也是它。这一行只保留自己的**行文**：轮到用户时整行不出声（状态条已经在说
+	// 「⚡ 轮到你」——票 16 起不带问句）、已交付说「✅ 已完成」、其余不出声。
+	// ⚠️ 退场的是这一处自己的第二架梯子：`meta.status === "delivered"`、`meta.status !== "running"`
+	// 与 `goldDraftDisplayed` 那一格（展示期现在由共享判定给「我正在做」）。
+	// ⚠️ **暂停仍是这一行自己的先行条件**（不是「轮到谁」的一部分）：暂停时整行不出声——顶栏已经
+	// 写着「⏸ 已暂停」。同屏「出错 ＋ 暂停」那一格，状态条照旧说「⚠️ 轮到你 · 出错了」（那是书的状态），
+	// 这一行闭嘴；两件事各归各的（票 22 的裁决原样保留，判据 `test-wording-invariants.mjs` 钉着）。
 	const paused = pausedNow(meta);
-	// 票 22：暂停同理，且必须与状态条同改——只让状态条闭嘴，这一行仍会留着「🤖 我正在做 · 第 N 次拍板」那半句。
-	// 暂停**不**掐掉子助手聚合：那一句说的是小助手（它们确实在跑），与「已暂停」（说的是主笔 AI）不是同一件事。
-	//
-	// 票 14：横幅详情行为空时（`textbook/progress` 一条都还没有，宿主重启后的那一段窗口），
-	// 「🤖 我正在做」是**没有内容支撑**的断言——必须与状态条**同改**、读**同一份判据**，
-	// 只让状态条闭嘴这一行照旧留着。判的是 `stageScopedProgressDetail` 的**空值**，**不是** `paused`
-	// （两件事，理由见文件上方注释）。
-	//
-	// ⚠️⚠️ **判据带「已交办」前提**（`activityClaimUnsupported`），不是「`progressDetail` 空就摘」：
-	// **跑动中、尚未交办**那一格（`status:"running"`、刚动过、没判停）AI **确实在跑**，
-	// 那半句是**实话**——摘掉它等于用一句新的假静默换一句旧的实话
-	// （`smoke-test.mjs:5680`「活性行·回合中态不对」钉的就是这一格）。第一次落地时这里漏了那个前提，
-	// 把范围放宽了一格、连带炸了那条老断言；现在两处走同一个函数。
-	//
-	// ⚠️「从断点继续」那颗按钮**保留**：它答的是「能不能接着做」，是有内容支撑的（9.4 小时没动静
-	// 正是最需要它的时候），把整条收掉等于把那一格唯一可操作的出口一起收走。
-	// 收掉的只是那半句没有支撑的状态词——留下的是**纯事实**（多久没动静）与那颗按钮。
-	const detailEmpty = activityClaimUnsupported(pendingStage, progressDetail);
-	// 票 `walkthrough-2026-10/04`（2026-10-06 裁决甲）：**展示期**（稿已落盘、这一步还没交工）
-	// 不是「轮到你」——下面那一支原来只看 `status !== "running"`，于是展示期照样喊「⚡ 轮到你」，
-	// 与状态条同改（状态条那一侧走 `humanTurn`，判据同一个函数），否则同屏两个词打架。
-	// 那一格此刻该说的是「🤖 我正在做」（验收面卡内的定稿键正禁着，详见 `gold-table.js` 的
-	// `goldDisplayPeriod`）。
-	const goldDisplayed = goldDraftDisplayed(meta, pendingStage);
-	const idlePrefix = detailEmpty
-		? `${humanDuration(stall?.idleMs)}没动静了 `
-		: `🤖 我正在做 · ${humanDuration(stall?.idleMs)}没动静了 `;
+	const owner = turnOwnerOf(withPendingStage(meta, pendingStage), null);
+	const idlePrefix = `⏱ ${humanDuration(stall?.idleMs)}没动静了 `;
 	const content =
-		humanTurn === true || paused
+		humanTurn === true || paused || owner === null
 			? null
 			: // 已交付＝全书完成：此时既不是「轮到你」也不是「我正在做」（真 GUI 判读实测：
 				// 已交付的《工业大数据分析》活性行还写着「⚡ 轮到你」，同一屏却在大喊「🎉 书做好了」）。
-				meta?.status === "delivered"
+				owner === "done"
 				? "✅ 已完成"
-				: meta?.status !== "running" && !goldDisplayed
+				: owner === "you"
 					? "⚡ 轮到你"
 					: stalled
 						? createElement(
@@ -266,10 +266,8 @@ export function ActivityLine(props) {
 									"🔁 从断点继续",
 								),
 							)
-						: detailEmpty
-							? null
-							: "🤖 我正在做";
-	// 轮到用户、又没有子代理聚合 → 整行不出现（状态条已经说了「轮到你 · 要你做什么」）。
+						: null;
+	// 轮到用户、又没有子代理聚合 → 整行不出现（状态条已经说了「⚡ 轮到你」）。
 	if (content === null && aggText === "") return null;
 	return createElement(
 		"div",
@@ -304,9 +302,16 @@ export function ActivityLine(props) {
  * 但全章过目态下提交一条意见，服务端会把这本书从「请你过目」翻回「我正在做」并交办修订
  * （闸门消失、这一章被收起来）——**恰恰就是打断了**。原样复用那一档就是说反话，
  * 而用户读到一句与屏幕上发生的事相反的话，下一步就是「我是不是点坏了」。
+ *
+ * ⚠️ 票 `walkthrough-fixes/21`（2026-10-06 裁决「甲」）改的是**后半句那个时机承诺**，
+ * **不是「机器没停」这个事实**：原句尾「AI 到下个停靠点会照办」与机器行为相反——实测主 AI
+ * **当轮**就把这条叮嘱转达给了正在写那一章的小助手（§11.2 硬触发）。⇒ 「不打断正在写的这一章」
+ * 这半句**逐字保留**（它是真话，且已被 `test-component-cards.mjs`「票 30② 两档措辞」逐字钉住），
+ * 换掉的只是后半句。判据面见 `test-wording-invariants.mjs` 的「票 21」那条（禁词面＝**时机承诺**，
+ * 不是 blanket ban「不打断」）。
  */
 export const INTERRUPT_NOTE_TEXT =
-	"💡 已记下；不打断正在写的这一章，AI 到下个停靠点会照办";
+	"💡 已记下；不打断正在写的这一章，AI 当轮就叮嘱正在写它的小助手。";
 export const INTERRUPT_NOTE_TEXT_BREAKS_CHAPTER =
 	"💡 已记下；这一章交给 AI 去改了，过目先收起来了——AI 改完会把这一章重新摊开给你过目。";
 
@@ -409,8 +414,12 @@ export function InterruptNote(props) {
 // ── 自动跟随横幅（F5/Task 20 方案 A）：等拍板回现在 / AI 干活跳过去 ─────────────
 
 // 顶部滑入动画（横幅共用，一次定义到处引用）。
+// 判据 7（票 05）：统一 250ms ease-out；系统设了「减少动态效果」时关掉位移。
+// ⚠️ 本仓零 CSS 文件、样式只走内联对象 ⇒ 这条 @media 只能落在同一条 <style> 注入里，
+//    用 `[data-auto-follow]` + `!important` 盖过内联的 animation。
 const AUTO_FOLLOW_KEYFRAMES =
-	"@keyframes dsh-auto-follow-in { from { transform: translateY(-10px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }";
+	"@keyframes dsh-auto-follow-in { from { transform: translateY(-10px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }" +
+	" @media (prefers-reduced-motion: reduce) { [data-auto-follow] { animation: none !important; } }";
 // 横幅共用样式：粘顶（内容滚它不滚）、顶部滑入、与 F17 不打断提示条同一视觉语言。
 const AUTO_FOLLOW_BANNER_STYLE = {
 	position: "sticky",
@@ -426,14 +435,14 @@ const AUTO_FOLLOW_BANNER_STYLE = {
 	display: "flex",
 	alignItems: "center",
 	gap: "8px",
-	animation: "dsh-auto-follow-in 0.25s ease",
+	animation: "dsh-auto-follow-in 250ms ease-out",
 };
 
 // 等拍板横幅：AI 进入 awaiting-* 且你正在翻历史时强制切回「现在」并亮这一条（6 秒自清由 WorkbenchView 定时器负责）。
 export function AutoFollowAwaitNote(props) {
 	return createElement(
 		"div",
-		{ role: "status", style: AUTO_FOLLOW_BANNER_STYLE },
+		{ role: "status", "data-auto-follow": "1", style: AUTO_FOLLOW_BANNER_STYLE },
 		createElement("style", null, AUTO_FOLLOW_KEYFRAMES),
 		createElement(
 			"span",
@@ -455,6 +464,7 @@ export function AutoFollowProgressNote(props) {
 		"div",
 		{
 			role: "status",
+			"data-auto-follow": "1",
 			style: { ...AUTO_FOLLOW_BANNER_STYLE, cursor: "pointer" },
 			onClick: props.onJump,
 		},
@@ -510,7 +520,9 @@ export function TopBar(props) {
 					{
 						style: S.smallLink,
 						onClick: openStylePanel,
-						title: "你的风格意见清单（AI 写每一章都会照着办）",
+						// 票 `demo-channel-full/26`：这一句对演示书是假话（章正文是固定内容，
+						// ⛔ 没有「写每一章都照着办」这回事）⇒ 两取值，出口在 view-rules。
+						title: styleNotesPanelTitle(meta),
 					},
 					`🎨 风格线(${styleCount})`,
 				)
@@ -521,7 +533,10 @@ export function TopBar(props) {
 					{
 						style: S.smallLink,
 						onClick: openIntervene,
-						title: "留言稍后处理：不打断 AI，它到下个停靠点会看",
+						// 票 `walkthrough-fixes/21`：原来是「留言稍后处理：不打断 AI，它到下个停靠点会看」——
+						// 那句时机承诺是假话（当轮就转达）。且这颗键**所有相位都在**，而「不打断」只在
+						// 铺章途中成立 ⇒ 这里只留两态事实，不说「不打断」。
+						title: "留言：有 AI 在跑时当轮转达，没有 AI 在跑时等到下一站",
 					},
 					`📮 留言(${pendingCount})`,
 				)
@@ -570,7 +585,9 @@ export function TopBar(props) {
 // ── 顶栏展开面板：🎨 风格线清单 / 📮 留言清单（点开即见，✕ 收起） ───────────────
 
 export function StylePanel(props) {
-	const { notes, onClose } = props;
+	// 票 `demo-channel-full/26`：面板里那两句话对演示书是假话（同 `StylePanel` 上方那颗键的理由）
+	// ⇒ 认得出演示书要 `meta`（出口＝`view-rules.styleLinePanelHeading`／`styleLinePanelHint`）。
+	const { notes, onClose, meta } = props;
 	const list = notes ?? [];
 	return createElement(
 		"div",
@@ -594,7 +611,7 @@ export function StylePanel(props) {
 			createElement(
 				"strong",
 				{ style: { fontSize: "13px" } },
-				`🎨 你的风格线（${list.length} 条：AI 写每一章都照着办）`,
+				`${styleLinePanelHeading(meta, list.length)}`,
 			),
 			createElement(
 				"button",
@@ -633,7 +650,7 @@ export function StylePanel(props) {
 		createElement(
 			"p",
 			{ style: { margin: "6px 0 0", fontSize: "12px", opacity: 0.7 } },
-			"想再记一条？在对话里直接跟 AI 说，它会记成风格线；写每一章都照着办。",
+			styleLinePanelHint(meta),
 		),
 	);
 }
@@ -702,7 +719,12 @@ export function IntervenePanel(props) {
 		createElement(
 			"p",
 			{ style: { margin: "6px 0 0", fontSize: "12px", opacity: 0.7 } },
-			"想给 AI 留言？在对话里直接跟 AI 说，它会记成留言，到下个停靠点处理（不打断它正在写的章）。",
+			// 票 `walkthrough-fixes/21`（2026-10-06 裁决「甲」）：原句「…到下个停靠点处理（不打断它正在写的章）」
+			// 是一句**与机器行为相反的承诺**——实测主 AI **当轮**就把意见转达给了正在写的那一章
+			//（`resources/references/audit-and-testing.md` §11.2 的硬触发，那是仓里早写下的规则）。
+			// 换成**只说可见事实 ＋ 两态**：有 AI 在跑 → 当轮叮嘱（可见证据＝账本那行「转达第 N 章…」）；
+			// 没有 AI 在跑 → 它躺在待处理清单里，等到下一站。行为一个字没动。
+			"想给 AI 留言？在对话里直接说，它会记成留言。有 AI 在跑时会被当轮叮嘱，你会看到『转达第 N 章…』那一行；没有 AI 在跑时它等到下一站。",
 		),
 	);
 }
@@ -710,7 +732,9 @@ export function IntervenePanel(props) {
 // ── 自定义模式库面板（2026-08-21）：粘贴描述 → AI 分析成「模式卡」加入本书 ──────
 
 export function PatternPanel(props) {
-	const { patterns, busy, onAnalyze, onClose, result } = props;
+	// 票 `demo-channel-full/26`：这一段说明对演示书是假话（演示支回的是**占位卡**，
+	// 见 `view-rules.patternPasteHint` 的读数）⇒ 认得出演示书要 `meta`。
+	const { patterns, busy, onAnalyze, onClose, result, meta } = props;
 	const [text, setText] = useState("");
 	const list = patterns ?? [];
 	return createElement(
@@ -753,7 +777,7 @@ export function PatternPanel(props) {
 					lineHeight: 1.6,
 				},
 			},
-			"粘贴一段你想要的教法/章节结构描述，AI 会把它提炼成一张「模式卡」加入这本书的模式库；第 2 次拍板「教学方法与板块」和写作规范都会优先参考它。",
+			patternPasteHint(meta),
 		),
 		createElement("textarea", {
 			style: { ...S.textarea, minHeight: "64px" },
@@ -768,7 +792,7 @@ export function PatternPanel(props) {
 			createElement(
 				"button",
 				{
-					style: S.bigBtn(true),
+					style: S.disabled(S.bigBtn(true), busy || text.trim() === ""),
 					disabled: busy || text.trim() === "",
 					onClick: () => {
 						onAnalyze(text.trim());
@@ -838,3 +862,310 @@ export function PatternPanel(props) {
 		),
 	);
 }
+
+// ── 读者情况问卷面板（票 `reader-cognition-boundary-build/03`；票 `ui-display-redesign/11` 三态）──
+//
+// 这条通道只有一次往返：**给出一份 `.md`**（服务端写进书夹 → 这里给一颗下载键，走通用下载路由）
+// → 收卷人填 → **造书用户把整段文字手粘回这个框**（无长度上限）→ 服务端逐字落成书夹一份 `.md`。
+//
+// 票 `ui-display-redesign/11` 把面板拆成**三个互斥态**（spec §4；ADR-0038 决策 3 的「收卷人第一问点选
+// ＋三版问法」由本票取代）：
+//   · 发卷（默认）：说明 ＋ `📄 生成问卷`／`⬇️ 下载问卷（.md）`；**零收卷人控件、零系统默认**。
+//   · 回卷：无上限粘贴框 ＋ **此时才问** `这份是谁填的？` `本人／监护人／老师`（必选、无系统默认）
+//     ＋ `📥 收下这份回卷`（粘贴有字且选了人才亮）。收卷人随 `reader-questionnaire-submit` 一起发出去，
+//     服务端写 `meta.answerer`（写点从 `explore-confirm` 挪来）。
+//   · 已收卷：回执（谁填的＋时间）＋ `🧭 去看知识点图接着划` ＋ `再粘一份`／「重新下载」。
+//     ⚠️ 回执的**第一来源是盘上事实**：`returned`（`/textbook/events` 下发的回卷件原文）＋
+//     `meta.answerer`／`meta.answererAt`——刷新／切书回来仍是同一份；`receipt` 只是本会话刚收下那一帧的
+//     兜底（刷新后由盘上两格接管，⛔ 不是第二份事实源）。
+//
+// ⚠️ 为什么这个框**不许有** `maxLength`：本仓 note 类字段是 `trim().slice(0, max)`（200–500 字），
+// 塞一份答卷进去会被**静默截断**——那正是这条通路要绕开的形状。粘进来的内容不要求合格式
+// （跑题散文、只答一半都收），映射到上沿／下沿是 AI 的活。
+// ⚠️ 它**不承诺**实时、多轮或协作面：表单只有「给出」和「收回卷」两下，人不在线也照旧。
+// ⚠️ 发卷 / 收卷都不改书的状态、不推进流程：它们只是把两件东西放进书夹（可选动作，不做放行条件）。
+
+/** 回执时刻的人话：`今天 14:02`／`10月20日 09:05`／`2025年12月31日 23:07`；解析不了 ⇒ `null`。
+ *
+ * ⚠️ `now` 只给判据喂固定的「今天」（生产不传＝`Date.now()`）——不传时看的是**浏览器本地时区**。
+ * 跨天/跨年都带日期，⛔ 不把旧回卷说成「今天」。
+ *
+ * @param {unknown} at  ISO 时刻（`meta.answererAt`）
+ * @param {number} [now] 「今天」的参照时刻（毫秒）
+ * @returns {string|null}
+ */
+export function receiptTimeText(at, now = Date.now()) {
+	if (at === null || at === undefined || at === "") return null;
+	const time = new Date(at);
+	const stamp = time.getTime();
+	if (!Number.isFinite(stamp) || !Number.isFinite(now)) return null;
+	const reference = new Date(now);
+	const pad = (value) => String(value).padStart(2, "0");
+	const clock = `${pad(time.getHours())}:${pad(time.getMinutes())}`;
+	const sameDay =
+		time.getFullYear() === reference.getFullYear()
+		&& time.getMonth() === reference.getMonth()
+		&& time.getDate() === reference.getDate();
+	if (sameDay) return `今天 ${clock}`;
+	const monthDay = `${time.getMonth() + 1}月${time.getDate()}日`;
+	return time.getFullYear() === reference.getFullYear()
+		? `${monthDay} ${clock}`
+		: `${time.getFullYear()}年${monthDay} ${clock}`;
+}
+
+/** 回卷态那一行策略说明（逐字，spec §4；⛔ 与 brief 里那三档策略句混用——那份是给 AI 的指令）。 */
+const READER_QUESTIONNAIRE_STRATEGY_NOTE =
+	"AI 按「谁填的」采取不同策略：本人＝自评证据；监护人＝第三方观察（只采明确项）；老师＝教学判断（可把重点/难点意见带进下一步 brief）。";
+
+/** 三态都常显的尾注（逐字沿用；⛔ 不改强度：它只留证、不自动改已定内容）。 */
+const READER_QUESTIONNAIRE_FOOT_NOTE =
+	"这份回卷只是收进书夹留证：AI 会逐条读它，再回到图上核对；它不会自动改变任何已经定下的内容。";
+
+export function ReaderQuestionnairePanel(props) {
+	const {
+		issued,
+		returned,
+		answerer,
+		answererAt,
+		receipt,
+		busy,
+		downloadHref,
+		onIssue,
+		onSubmit,
+		onGoToGraph,
+		onClose,
+	} = props;
+	// 「回卷」是本会话的**展开态**（默认折起：打开面板先看发卷那一态）。
+	const [pasting, setPasting] = useState(false);
+	const [text, setText] = useState("");
+	// 收卷人**无系统默认**：`null` ＝ 还没选（回卷时才问、必选）。
+	const [chosenAnswerer, setChosenAnswerer] = useState(null);
+	const [submitting, setSubmitting] = useState(false);
+	// 回执的第一来源是盘上事实；`receipt`（本会话刚收下的那一帧）只是兜底。
+	const sessionReceipt = receipt !== null && typeof receipt === "object" ? receipt : null;
+	const diskReceipt = returned === true
+		? {
+			answerer: typeof answerer === "string" && answerer !== "" ? answerer : null,
+			at: typeof answererAt === "string" && answererAt !== "" ? answererAt : null,
+		}
+		: null;
+	// 票 `ui-display-redesign/17`（收口 review S7①）：**盘上事实优先**——`returned`＋`meta.answerer`
+	// /`meta.answererAt` 是长命的真事实，会话态 `receipt` 只作「刚收下、快照还没到」那一帧的兜底；
+	// 两格同时在场时按盘上那份说（⛔ 不让短命状态盖掉长命事实）。判据见 `test-component-cards.mjs`。
+	const effectiveReceipt = diskReceipt !== null ? diskReceipt : sessionReceipt;
+	const done = effectiveReceipt !== null;
+	// 互斥三态：**回卷态优先**（从已收卷态点「再粘一份」要能回到表单），其次已收卷，最后发卷。
+	const showBack = pasting === true;
+	const showReceipt = done && showBack === false;
+	const busyAll = busy === true || submitting === true;
+	// 下载地址只给「发过卷」或「已有回卷」两档（发卷前那颗键不出现——文件还不存在）。
+	const downloadRel = issued !== null && issued !== undefined ? issued : READER_QUESTIONNAIRE_ISSUED_REL;
+	const downloadVisible = (typeof issued === "string" && issued !== "") || done;
+	const downloadHrefValue = downloadVisible && typeof downloadHref === "function" ? downloadHref(downloadRel) : null;
+	const receiptAnswerer = effectiveReceipt?.answerer ?? null;
+	const receiptClock = effectiveReceipt === null ? null : receiptTimeText(effectiveReceipt.at);
+	const canSubmit = busyAll === false && text.trim() !== "" && chosenAnswerer !== null;
+	const submitReturn = async () => {
+		if (!canSubmit) return;
+		setSubmitting(true);
+		try {
+			const accepted = await onSubmit(text, chosenAnswerer);
+			// 壳收下（真写成功）才清空输入；失败时留着——别让用户白粘一遍。
+			if (accepted !== false) {
+				setText("");
+				setChosenAnswerer(null);
+				setPasting(false);
+			}
+		} finally {
+			setSubmitting(false);
+		}
+	};
+	return createElement(
+		"div",
+		{
+			style: {
+				...S.card,
+				borderColor: "var(--dsw-alias-state-business-primary)",
+				marginTop: "8px",
+			},
+		},
+		createElement(
+			"div",
+			{
+				style: {
+					display: "flex",
+					justifyContent: "space-between",
+					alignItems: "center",
+					gap: "8px",
+				},
+			},
+			createElement("strong", { style: { fontSize: "13px" } }, "🧑‍🎓 读者情况问卷"),
+			createElement("button", { style: S.smallLink, onClick: onClose }, "✕ 收起"),
+		),
+		createElement(
+			"p",
+			{ style: { margin: "6px 0", fontSize: "12px", opacity: 0.75, lineHeight: 1.6 } },
+			"给收卷人的是一份 .md：可以打印出来手写、可以在电脑上直接改、也可以口头让人代填。"
+				+ "填完把整段文字粘回下面这个框——多长都行，跑题、只答一半也可以。",
+		),
+		// ── 发卷键（三态常显；下载只在发过卷/已有回卷时出现）──────────────────────────
+		createElement(
+			"div",
+			{ style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+			createElement(
+				"button",
+				{
+					style: S.disabled(S.bigBtn(true), busyAll),
+					disabled: busyAll,
+					onClick: () => onIssue(),
+				},
+				"📄 生成问卷",
+			),
+			downloadHrefValue !== null
+				? createElement(
+						"a",
+						{
+							href: downloadHrefValue,
+							style: { fontSize: "12px" },
+							download: "",
+						},
+						"⬇️ 下载问卷（.md）",
+					)
+				: null,
+		),
+		// ── 已收卷：回执（谁填的＋时间，盘上事实优先）＋ 主路径 ＋ 再粘一份 ────────────
+		showReceipt
+			? createElement(
+					"div",
+					{ style: { margin: "10px 0 0" } },
+					createElement(
+						"p",
+						{ style: { margin: "0 0 6px", fontSize: "12px", lineHeight: 1.6 } },
+						// ⚠️ 整句放进**同一个文本节点**：屏幕上的人读、屏外的判据（`expectText`）都按连续文案认，
+						// 拆成 `strong` ＋ 兄弟文本会让「已收下……（老师」跨节点、读起来像两句话。
+						createElement(
+							"strong",
+							null,
+							`✅ 已收下，存在书夹里了${receiptAnswerer === null ? "" : `（${receiptAnswerer}${receiptClock === null ? "" : `，${receiptClock}`}）`}`,
+						),
+					),
+					createElement(
+						"div",
+						{ style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+						createElement(
+							"button",
+							{ style: S.smallLink, onClick: () => onGoToGraph() },
+							"🧭 去看知识点图接着划",
+						),
+						createElement(
+							"button",
+							{
+								style: S.smallLink,
+								onClick: () => {
+									setPasting(true);
+									setText("");
+									setChosenAnswerer(null);
+								},
+							},
+							"再粘一份",
+						),
+					),
+				)
+			: null,
+		// ── 回卷态（收卷人此时才问；必选、无系统默认）────────────────────────────────
+		showBack
+			? createElement(
+						"div",
+						{ style: { margin: "10px 0 0" } },
+						// ⚠️ **无长度上限**：不写 `maxLength`（见上面那条注释）。
+						createElement("textarea", {
+							style: { ...S.textarea, minHeight: "160px" },
+							placeholder: "把收卷人填好的整段文字粘到这里（多长都行，不用管格式）",
+							value: text,
+							onChange: (e) => setText(e.target.value),
+						}),
+						createElement(
+							"p",
+							{ style: { margin: "10px 0 6px", fontSize: "12px", fontWeight: 600 } },
+							"这份是谁填的？",
+						),
+						createElement(
+							"div",
+							{ style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+							// ⚠️ 三选一用**键**而不是 radio：面板的驱动面（画廊 `ui.drive` 的 click）只认
+							// `<button>`，radio 会让「回卷 → 选人 → 收下」那条链在画廊/走查里造不出来。
+							// 「必选、无系统默认」由 `chosenAnswerer === null` 现算（⛔ 不预选任何一档）。
+							...EXPLORE_CONFIRM_ANSWERERS.map((one) =>
+								createElement(
+									"button",
+									{
+										key: one,
+										style: {
+											fontSize: "12px",
+											padding: "2px 10px",
+											borderRadius: "6px",
+											cursor: "pointer",
+											border: chosenAnswerer === one
+												? "1px solid var(--dsw-alias-state-business-primary)"
+												: "1px solid var(--dsw-alias-border-l2)",
+											background: chosenAnswerer === one
+												? "var(--dsw-alias-state-business-tertiary)"
+												: "transparent",
+										},
+										"aria-pressed": chosenAnswerer === one,
+										onClick: () => setChosenAnswerer(one),
+									},
+									one,
+								),
+							),
+						),
+						createElement(
+							"p",
+							{ style: { margin: "6px 0", fontSize: "12px", opacity: 0.7, lineHeight: 1.6 } },
+							READER_QUESTIONNAIRE_STRATEGY_NOTE,
+						),
+						createElement(
+							"div",
+							{ style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+							createElement(
+								"button",
+								{
+									style: S.disabled(S.bigBtn(true), !canSubmit),
+									disabled: !canSubmit,
+									onClick: () => {
+										void submitReturn();
+									},
+								},
+								"📥 收下这份回卷",
+							),
+							busyAll ? createElement("span", { style: { fontSize: "12px", opacity: 0.7 } }, "处理中…") : null,
+						),
+					)
+				: // ── 发卷态本态：只多一颗「粘一份回卷」的入口（⛔ 不在这里选收卷人）──────
+					// （已收卷态不再重复摆它——那里已经有「再粘一份」那颗了。）
+					showReceipt
+						? null
+						: createElement(
+						"div",
+						{ style: { margin: "10px 0 0" } },
+						createElement(
+							"button",
+							{
+								style: S.smallLink,
+								onClick: () => {
+									setPasting(true);
+									setText("");
+									setChosenAnswerer(null);
+								},
+							},
+							"📥 粘一份回卷",
+						),
+					),
+		createElement(
+			"p",
+			{ style: { margin: "8px 0 0", fontSize: "12px", opacity: 0.7 } },
+			READER_QUESTIONNAIRE_FOOT_NOTE,
+		),
+	);
+}
+

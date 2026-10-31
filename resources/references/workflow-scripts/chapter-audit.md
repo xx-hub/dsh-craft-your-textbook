@@ -42,7 +42,7 @@ const chapter = args.chapter
 const pad = String(chapter).padStart(2, '0')
 phase('审一章')
 
-// ① 派发正文：照 references/subagent-prompts/audit-agent-prompt.md 那一份**逐项填满**
+// ① 派发正文：照 resources/references/subagent-prompts/audit-agent-prompt.md 那一份**逐项填满**
 //    （章正文路径、材料小节、写作规范、章节骨架与知识地图、风格线、产出契约……按模板的占位符填）。
 //    模板在主笔手上、成员拿不到 ⇒ 正文必须整份写进脚本，别指望成员自己去读模板。
 const prompt = `…按 audit-agent-prompt.md 填好的整份派发正文…`

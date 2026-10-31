@@ -22,6 +22,8 @@
  *   - 自动跟随的两条横幅、6 秒自清定时器、不打断提示条
  *   - 无书向导的建议态（AI 建议清单 + 建议中）
  *   - 删书两步确认态 `deletingId`
+ *   - 知识点图上人划掉的那几张 `graphDropped`（票 `knowledge-graph-build/08`；⚠️ 它今天**只活在
+ *     界面上**——盘上还没有它的家，划痕的落地面归票 09，所以切书/刷新就没了，这是有意的边界）
  *   - 书级 action 的 `busy` / `error`
  *   - 两个书级 ref（浏览时记住的进度序号、等拍板「新到达」那一帧）
  * 留在壳**外面**的是：根高度、外层布局、对话台（高度与展开态）、破卷常驻广告、MinerU 设置
@@ -52,6 +54,7 @@ import { lastEventOfType } from "./view-rules.js";
 // 空值必须是**模块级同一个引用**：每帧新建空数组会让下面两条 effect 白跑。
 const NO_SUGGESTIONS = Object.freeze([]);
 const NO_PATTERNS = Object.freeze([]);
+const NO_DROPPED = Object.freeze([]);
 const NO_EVENTS = Object.freeze([]);
 
 export function BookSessionScope({ children, uiRef = null, meta = null, gate = null, events = NO_EVENTS }) {
@@ -71,6 +74,15 @@ export function BookSessionScope({ children, uiRef = null, meta = null, gate = n
 	const [patternBusy, setPatternBusy] = useState(false);
 	const [patternResult, setPatternResult] = useState(null);
 	const [patternList, setPatternList] = useState(NO_PATTERNS);
+	// 票 `reader-cognition-boundary-build/03`：读者情况问卷面板的开关与书级状态
+	// （给出那一份在书夹里的路径 / 收卷中的忙碌 / 「已收下」这一帧的回执）。切书即归零。
+	// 票 `ui-display-redesign/11`：回执的**长命来源是盘上事实**（`readerQuestionnaireReturn` ＋
+	// `meta.answerer`/`meta.answererAt`）；这里这一格只兜「本会话刚收下、盘上快照还没到」的那一帧。
+	const [readerQuestionnaireOpen, setReaderQuestionnaireOpen] = useState(false);
+	const [readerQuestionnaireBusy, setReaderQuestionnaireBusy] = useState(false);
+	const [readerQuestionnaireIssued, setReaderQuestionnaireIssued] = useState(null);
+	const [readerQuestionnaireSaved, setReaderQuestionnaireSaved] = useState(false);
+	const [readerQuestionnaireReceipt, setReaderQuestionnaireReceipt] = useState(null);
 	// 自动跟随（方案 A）：等拍板强制回「现在」的横幅 + 浏览历史时 AI 有新进展的「跳过去」横幅。
 	const [awaitBanner, setAwaitBanner] = useState(false);
 	const [progressBanner, setProgressBanner] = useState(false);
@@ -81,6 +93,11 @@ export function BookSessionScope({ children, uiRef = null, meta = null, gate = n
 	const [suggestLoading, setSuggestLoading] = useState(false);
 	// 删书的两步确认态（第一步「取消这本书」把 id 收进来，第二下确认才发 `book-delete`）。
 	const [deletingId, setDeletingId] = useState(null);
+	// 票 `knowledge-graph-build/08`：知识点图上**人划掉的那几张**（卡键的数）。
+	// ⚠️ 它是**书上的一份人裁决**，但**今天只活在界面上**：盘上还没有它的家
+	// （`工作区/knowledge-map-exclusions.json` 与覆盖闸门那两件归票 09）⇒ 切书/刷新就没了，
+	// 这是本票**有意**的边界，不是漏了。空值取模块级同一个引用（同 `NO_PATTERNS` 那条理由）。
+	const [graphDropped, setGraphDropped] = useState(NO_DROPPED);
 	// 书级 action 的忙碌与错误。**首屏的读取错误不在这里**——它从 readiness 派生，由
 	// WorkbenchView 传进来（决策 11/16）；两者共用同一句 `⚠️ …`，位置与从前一致。
 	const [error, setError] = useState(null);
@@ -110,11 +127,17 @@ export function BookSessionScope({ children, uiRef = null, meta = null, gate = n
 			setBusy,
 			setNoteToast,
 			setDeletingId,
+			setGraphDropped,
 			setSuggestions,
 			setSuggestLoading,
 			setPatternBusy,
 			setPatternResult,
 			setPatternList,
+			setReaderQuestionnaireOpen,
+			setReaderQuestionnaireBusy,
+			setReaderQuestionnaireIssued,
+			setReaderQuestionnaireSaved,
+			setReaderQuestionnaireReceipt,
 			toggleStylePanel: () => setShowStylePanel((v) => !v),
 			toggleIntervenePanel: () => setShowIntervenePanel((v) => !v),
 		}),
@@ -184,12 +207,18 @@ export function BookSessionScope({ children, uiRef = null, meta = null, gate = n
 		patternBusy,
 		patternResult,
 		patternList,
+		readerQuestionnaireOpen,
+		readerQuestionnaireBusy,
+		readerQuestionnaireIssued,
+		readerQuestionnaireSaved,
+		readerQuestionnaireReceipt,
 		awaitBanner,
 		progressBanner,
 		noteToast,
 		suggestions,
 		suggestLoading,
 		deletingId,
+		graphDropped,
 		error,
 		busy,
 		progressSeqRef,

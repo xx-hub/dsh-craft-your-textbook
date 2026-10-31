@@ -24,8 +24,11 @@ import {
   handoffAndDrive,
   kick,
   noticeMessage,
+  pauseHandoverBlock,
   removeSourceFile,
   isRunning,
+  // 票 `confirm-points-redesign-build/09`：站 0／1「只提示人」那一句的**唯一出口**（标签簇）。
+  STATION_VALUE_EDIT_HINT,
 } from '../engine.js'
 import { familyOf, reject, accept } from '../action-runner.js'
 import { convertedState } from '../../domain-rules.js'
@@ -122,6 +125,11 @@ export const actConvert = familyOf('convert', async ({ ctx: ctx, action: action,
       appendEvent(project, 'textbook/hint', {
         text: `已删掉《${file}》这份材料（原件也一并删了${removal.outcome === 'missing' ? '；原件本来就不在书夹里' : ''}）`,
       })
+      // ── 票 `confirm-points-redesign-build/09`：**站 1 也是「只提示人」那一档** ────────────────
+      // 材料清单是**现读**的（`brief.materials`），没有可作废的产物 ⇒ 这里⛔ 不归档、⛔ 不截账本、
+      // ⛔ 不清 `meta`、⛔ 不把待办指回，只**多打一句**（spec §4.5 的两处例外之一；
+      // spec §3.2 站 1 的强度＝硬闸 2 条 ＋ `pointer`，⛔ 没有重做通路）。
+      appendEvent(project, 'textbook/hint', { text: STATION_VALUE_EDIT_HINT })
       // kick 之后 runPhase1 自己判：还剩红源就又停在材料准备，一份不剩就推进。
       // ⚠️ 与上传那一半同一条理由：已经在跑的状态机下一轮就会重读 meta，不起第二个。
       // （「有没有在跑」这个判据经 `isRunning` 取，票 `deep-module-scan/10`——原先两处各读一次
@@ -164,6 +172,14 @@ export const actConvert = familyOf('convert', async ({ ctx: ctx, action: action,
       if (resumeMeta.demo !== true && agent !== undefined) {
         try {
           const label = stageLabel(resumeMeta.pendingStage, resumeMeta.pendingGate ?? null)
+          // 票 `subagent-guidance/12`：§十二 的规则正文与「暂停那一刻还有几个在跑」都挂在这条通知上。
+          // **只能在这里给**：触发 §十二 注入的那一行读 `meta.pause`，而下面 `updateMeta` 就把它清成
+          // `null`（有意行为）；恢复后 AI 又常常不会再领一次任务说明书，brief 补不上。
+          // 「那一刻的数」＝`resumeMeta.pause`（**清掉之前**读的那一份，不必去账本里捞）；
+          // 正文运行时从源文取（`pauseHandoverBlock`），代码里没有第二份手抄。
+          // ⚠️ 覆盖边界：只有这一条分支（有活主 AI）发通知；另两条分支（`handoffAndDrive`／`kick`）
+          //    不发 ⇒ 那一支只剩指针兜底，裁决与理由见该票 `## Answer`。
+          const handover = clearedPause ? pauseHandoverBlock(resumeMeta.pause) : null
           const text = [
             `【工作台继续 · ${label || '当前环节'}】`,
             '用户点了「让 AI 接着干」。请接着把当前环节做完，不要重做已完成的部分：',
@@ -171,6 +187,7 @@ export const actConvert = familyOf('convert', async ({ ctx: ctx, action: action,
             '2. 若本环节还没领过任务，调用 workbench_act（action=stage-brief）领取说明后再继续；领过就直接从中断处继续。',
             '3. 过程中用 workbench_act（action=progress）随时上报进度；完成后照常调用 stage-submit 交工。',
             '铁律：先用大白话告诉用户你要接着做什么，再动手；需要用户拍板的事绝不自作主张。',
+            ...(handover === null ? [] : ['', handover]),
           ].join('\n')
           agent.followup(noticeMessage({
             idPrefix: 'tb-resume',

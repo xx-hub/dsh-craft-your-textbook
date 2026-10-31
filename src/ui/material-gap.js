@@ -39,9 +39,11 @@ import { S } from "./styles.js";
 import { judgeMaterialUploadSize, materialFormatAccept } from "../domain-rules.js";
 import { convertedState, convertedIcon } from "./view-rules.js";
 
-/** 一份材料的缺口说成什么样：逐源，只讲这一份，且**不承诺**机器替用户决定该怎么办。 */
+/** 一份材料的缺口说成什么样：逐源，只讲这一份，且**不承诺**机器替用户决定该怎么办。
+ *  ⚠️ 票 `pre-gold-build/02`：这一行**不再印角色**——没转成的源**永远没有角色**（它没有分片，
+ *  角色那一路判定也覆盖不到它，射程＝`converted === 'ok'`），所以也⛔ 不许补一个空值充数。 */
 function gapLine(source) {
-	return `${convertedIcon(source)} ${source.file}${source.role ? `（${source.role}）` : ""} —— 这一份没转成，这本书暂时缺它。`;
+	return `${convertedIcon(source)} ${source.file} —— 这一份没转成，这本书暂时缺它。`;
 }
 
 /**
@@ -158,7 +160,7 @@ export function MaterialGapList(props) {
 						// 而服务端闸门是收的 ⇒ 对那份红源彻底无路可走（票 03 的硬要求）。
 						accept: materialFormatAccept(),
 						disabled: busy || working !== null,
-						style: { ...S.input, display: "inline-block", width: "auto", margin: "2px 0" },
+						style: S.disabled({ ...S.input, display: "inline-block", width: "auto", margin: "2px 0" }, busy || working !== null),
 						onChange: pick(source),
 					}),
 				),
@@ -170,7 +172,7 @@ export function MaterialGapList(props) {
 							createElement(
 								"button",
 								{
-									style: { ...S.ghostBtn(true), padding: "2px 8px", fontSize: "12px", margin: "0 6px" },
+									style: S.disabled({ ...S.ghostBtn(true), padding: "2px 8px", fontSize: "12px", margin: "0 6px" }, busy || working !== null),
 									disabled: busy || working !== null,
 									onClick: () => void run(source.file, () => onRemoveSource(source.file)),
 								},
@@ -188,7 +190,7 @@ export function MaterialGapList(props) {
 					: createElement(
 							"button",
 							{
-								style: { ...S.smallLink },
+								style: S.disabled({ ...S.smallLink }, busy || working !== null),
 								disabled: busy || working !== null,
 								onClick: () => setConfirming(source.file),
 							},

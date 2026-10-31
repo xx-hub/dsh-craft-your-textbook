@@ -7,8 +7,6 @@
 
 import { createElement } from "react";
 import { splitParagraphs } from "./rules.js";
-// 票 pipeline-wiring-gaps/11：小节名的词面单点在 domain-rules（卡、提取器、测试同一份）。
-import { EXPLORE_TEACHER_UNIQUE_SECTION as TEACHER_UNIQUE_SECTION } from "../domain-rules.js";
 
 /**
  * 工作台内「连续正文块」的**量宽上限**——全仓唯一出处（票 `walkthrough-fixes/17`，
@@ -43,7 +41,7 @@ export const BODY_MEASURE_MAX_WIDTH = "36em";
 // 前者经 `exploreReportBlocks`、后者经 `gold-table.js` 的 `GoldReader`/`GoldCompare`）。
 export const READER_PARA_STYLE = {
 	margin: "0 0 0.75em",
-	fontSize: "14px",
+	fontSize: "13px",
 	lineHeight: 1.7,
 	maxWidth: BODY_MEASURE_MAX_WIDTH,
 };
@@ -132,47 +130,142 @@ export function exploreReportBlocks(mdText) {
 	return blocks;
 }
 
-// 票 pipeline-wiring-gaps/11：师生合版独有内容比对的**提取**——探查确认卡那一颗折叠块
-// 从已验的 工作区/explore.md（本 module 渲染的就是它）里把「教师用书独有内容」那一节
-// 取出来就地折叠，让顶部那份默认铺开的长报告不再是它的唯一出口。
+// 票 `ui-systematic-fixes/01`：**正文出口** `bodyOf`（spec 实现决策 §1·2、§3·1）。──────
 //
-// ⚠️ 判据的窄处（AGENTS.md 纪律）：出现与否认的是**报告里真有那一节**（机器手上的真实数据），
-// 不认材料构成——「师生合版 ⇒ AI 照方法学（source-material.md §三，经 brief.methodology 注入）
-// 写了那一节」这半段因果机器不验（票 07 有意不把粗比对收进交工拒交词表）。AI 没写时块缺席；
-// 缺席 ≠ 没有独有内容，卡不冒充这个判断。单教材书没有可比对的对象，报告里不会有那一节 ⇒ 块不出现。
+// 病（57 屏逐屏观察 `../ui-page-audit/shots/04`、`shots/13`）：正文**直接吃原文**——AI 报告的
+// `# 标题`／`**加粗**`、关卡那份「完整方案」、站 2 卡尾那三条如实说明里的排版标记**逐字印在屏上**。
+// 处置：一段以上的正文只有一个入口，两档分派（spec §1·2）：
+//   · `markdown` → **既有报表块**（`exploreReportBlocks`：`# `/`## ` 标题、`**加粗**`、`- ` 列表，
+//     并吃那条唯一的正文量宽上限 `BODY_MEASURE_MAX_WIDTH`）；
+//   · `machine-json` → **既有那份折叠件**（`<details>` ＋ 折叠口 ＋ `<pre>` 原文，与 `MachineChecks`／
+//     意见卡那几处同形）——机器原文逐字进 `<pre>`，⛔ 不做二次排版。
+//
+// ⛔ **不扩渲染器能力**（spec §范围外）：代码围栏、表格、引用今天都不支持（当普通文本段渲染），
+// 本票只要求「正文都走它」。⇒ 屏上仍可能出现 `> `／``` 这类记号，那是渲染器的既有边界、不是本出口的缺口。
+//
+// ⚠️ **`kind` 是**我们自己产的闭集（spec §2 那条）：未登记的一档 ⇒ **不印**（返回空数组）＋ 测试报红
+// ——闭集漏登记是 bug，不是「猜不出来」；自由文本那一档（译不出原样显示）与本出口无关。
+
+/** 正文出口的第一档：md 正文（AI 报告、方案正文、说明句…）。 */
+export const BODY_KIND_MARKDOWN = "markdown";
+/** 正文出口的第二档：机器 JSON（原始产物）。 */
+export const BODY_KIND_MACHINE_JSON = "machine-json";
 /**
- * 从探查报告（工作区/explore.md）里取出「教师用书独有内容」那一节的正文行。
- *
- * 小节名从 `domain-rules.EXPLORE_TEACHER_UNIQUE_SECTION` 取（与卡、测试同一份词面）；
- * 标题行认 `#`~`###` 且标题文字以该词开头（AI 写成「教师用书独有内容比对」也认得），
- * 内容取到下一个**同级或更高级**标题为止——节内的 `###` 类目行（评价标准/教学目标/…）
- * 算内容保留。空行丢掉；没有那一节、节是空的、或读不到报告时返回 `null`，
- * 由调用方整块不渲染（与报告区读不到同一条降级口径，不摆占位件）。
- *
- * @param {unknown} mdText 工作区/explore.md 的原文（可为 null/undefined）。
- * @returns {string[]|null} 节内正文行（已去空行）；读不出那一节时 `null`。
+ * `bodyOf` 认的那两档——**闭集的唯一出处**（判据的期望值取它，⛔ 不在别处手抄第二份）。
+ * ⚠️ 它与现实的关系：现实里「还有哪些正文渲染点没走这个出口」这件事**这张表看不见**（住
+ * `RICH_SLOTS` 与 `test-wording-invariants.mjs` 那条双向闭包）。
  */
-export function exploreTeacherUniqueLines(mdText) {
-	if (typeof mdText !== "string" || mdText === "") return null;
-	const lines = mdText.split(/\r?\n/);
-	// 起始行一次匹配同时拿到位置与级别——findIndex 与单独取 level 各扫一遍，找的是同一行。
-	let start = -1;
-	let level = 0;
-	for (let i = 0; i < lines.length; i += 1) {
-		const head = /^(#{1,3})\s+(.*)$/.exec(lines[i].trim());
-		if (head !== null && head[2].startsWith(TEACHER_UNIQUE_SECTION)) {
-			start = i;
-			level = head[1].length;
-			break;
-		}
-	}
-	if (start === -1) return null;
-	const out = [];
-	for (let i = start + 1; i < lines.length; i += 1) {
-		const head = /^(#{1,6})\s+/.exec(lines[i].trim());
-		if (head !== null && head[1].length <= level) break; // 同级或更高级标题：本节到此为止
-		const text = lines[i].trim();
-		if (text !== "") out.push(text);
-	}
-	return out.length > 0 ? out : null;
+export const BODY_KINDS = Object.freeze([BODY_KIND_MARKDOWN, BODY_KIND_MACHINE_JSON]);
+
+/**
+ * 正文出口：吃一段正文原文与它的档，吐**可以直接摊进 `createElement` children 的节点数组**。
+ *
+ * 恒返回数组（两档同一形状）⇒ 两个调用点写法一致：`...bodyOf(text, BODY_KIND_MARKDOWN)`。
+ * 空/异常输入由各档自己兜（`exploreReportBlocks` 空输入返回空数组；机器那一档空串只留折叠壳）。
+ *
+ * @param {unknown} text 正文原文
+ * @param {string} kind `BODY_KINDS` 之一
+ * @returns {import("react").ReactElement[]} 节点数组（闭集未登记的一档：**空数组**，不印）
+ */
+export function bodyOf(text, kind) {
+	if (kind === BODY_KIND_MARKDOWN) return exploreReportBlocks(text);
+	if (kind === BODY_KIND_MACHINE_JSON) return machineJsonBlocks(text);
+	// 闭集未登记 ⇒ 不印（spec §2）。测试那侧同一份表：`BODY_KINDS` 之外的档要有判据点名。
+	return [];
 }
+
+/** 机器 JSON 那份折叠件的折叠口文案（唯一出处）。 */
+const MACHINE_JSON_FOLD_SUMMARY = "▸ 展开原文（机器 JSON）";
+
+/** 正文出口的 `machine-json` 那一档：既有那份折叠件 ＋ 原文逐字进 `<pre>`。 */
+function machineJsonBlocks(text) {
+	const raw = String(text ?? "");
+	return [
+		createElement(
+			"details",
+			{ key: "machine-json", style: { margin: "4px 0 0" } },
+			createElement(
+				"summary",
+				{ style: { cursor: "pointer", fontSize: "12px", opacity: 0.85 } },
+				MACHINE_JSON_FOLD_SUMMARY,
+			),
+			createElement(
+				"pre",
+				{
+					style: {
+						whiteSpace: "pre-wrap",
+						wordBreak: "break-word",
+						background: "var(--dsw-alias-bg-layer-1)",
+						borderRadius: "6px",
+						padding: "8px",
+						fontSize: "12px",
+						margin: "4px 0 0",
+					},
+				},
+				raw,
+			),
+		),
+	];
+}
+
+/**
+ * **`RICH_SLOTS`**：仍然**原样渲染**（`whiteSpace: "pre-wrap"` 直接吃原文）的正文块登记表——
+ * 一行 ＝ 一处豁免 ＋ **它为什么必须原样**（spec §3·1 逐字：「只有纯文本才许 `pre-wrap`，
+ * 且要在 `RICH_SLOTS` 表里登记『为什么这块必须原样』」）。
+ *
+ * 它不是「免死金牌」：双向闭包由 `test-wording-invariants.mjs` 那条判据守着（盘上每一处 `pre-wrap`
+ * 都要在这里找得到；这里每一条也要在盘上真找得到那一处），而那些理由**算不算数**仍要人读。
+ *
+ * ⚠️ **这张表的枚举面比现实窄在哪里**：判据扫的是 `src/ui/**` 里**代码中**的
+ * `whiteSpace: "pre-wrap"`（注释里的同形文本不算）⇒ `<pre>` 元素、`whiteSpace` 写别的值、先解构
+ * 再转手、以及界面层目录之外的正文渲染点（薄壳 `src/client-entry.js`）**都不在面里**。
+ * 票 `ui-systematic-fixes/03` 起逐处把这些正文接进 `bodyOf`，接一处就从这张表里删一条。
+ */
+export const RICH_SLOTS = Object.freeze([
+	Object.freeze({
+		file: "src/ui/md-render.js",
+		slot: "机器 JSON 折叠件里的原文（本出口的 machine-json 那一档）",
+		reason:
+			"机器产物的**原文**就是它该有的样子：人读形态由各域自己的折叠件负责（数据同源、措辞各自成篇），"
+			+ "而裁决明确把折叠清单排除在正文块之外——二次排版只会改掉它逐字的性质。",
+	}),
+	Object.freeze({
+		file: "src/ui/chat-desk.js",
+		slot: "对话气泡正文（用户与 AI 的自由文本）",
+		reason:
+			"对话台渲染的是**宿主对话节点**的自由文本，不是本仓产出的正文；气泡是「88% 宽 ＋ 靠边对齐」"
+			+ "的版面，走正文块会把它改成长段落（那是另一种东西）。",
+	}),
+	Object.freeze({
+		file: "src/ui/chat-desk.js",
+		slot: "系统灰字小行（重试/命令/压缩等提示）",
+		reason: "一行一条的系统提示（`muted`），没有段落结构；它的字号与透明度就是「不打扰主对话」那一档。",
+	}),
+	Object.freeze({
+		file: "src/ui/chat-desk.js",
+		slot: "落账回执徽章",
+		reason: "一行一条的回执（「✓ 已记入…」），逐条左缩进对齐气泡内文——它是账本落点的回声，不是正文。",
+	}),
+	Object.freeze({
+		file: "src/ui/knowledge-graph-map.js",
+		slot: "知识点卡对话框里的「可检验」那一句",
+		reason:
+			"知识地图里的一句话（自由文本、单句），住在那张卡的对话框里；这里要的是「这句话该怎么验」"
+			+ "的原文，排版改不动它的信息量。",
+	}),
+	Object.freeze({
+		file: "src/ui/phase-page.js",
+		slot: "阶段页各「就地折叠清单」的原文（`P.pre`）",
+		reason:
+			"裁决明确把**折叠清单**排除在正文块之外（见本模块文件头那段）：它逐字印机器产物的原文，"
+			+ "人读形态由各域折叠件（`machine-product-folds`）负责。",
+	}),
+	Object.freeze({
+		file: "src/ui/replay-list.js",
+		slot: "回放行展开的全文（驳回理由/拒交原因/机器兜底…）",
+		reason:
+			"这一格给的是那一行**全文**（票 07 的纯展开收起，供核对当时写了什么）；"
+			+ "这一屏的职责是核对，逐字优先于好看，⛔ 不在这里做第二套排版。"
+			+ "（同一行里原先那份「提案正文」由票 `ui-systematic-fixes/03` 接进了 `bodyOf`，登记随之删掉。）",
+	}),
+]);

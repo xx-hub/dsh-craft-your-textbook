@@ -1,5 +1,5 @@
 /**
- * 造书工作台 · 状态存储（engine 内部子模块 3/3，票 `depth-review-2026-10/10`）
+ * 造书工作台 · 状态存储（engine 内部子模块 3/4，票 `depth-review-2026-10/10`）
  *
  * 本簇是**状态的读写与落盘**：内存缓存、延迟批量写盘，以及 ADR-0016 决策 2 定的四个写入口
  * （`updateMeta` / `createMeta` / `appendEvent` / `rollbackLedger` 里前三个在本模块、第四个也在本模块）。

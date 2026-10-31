@@ -47,11 +47,15 @@
  * @property {object} ctx        宿主上下文。`ctx.get` 的读取点按**文件路径**登记在宿主契约门禁里
  *                               （`dev/host-contract-gate/catalog/web-chat.js` 的 `dynamicHostEntries`
  *                               ＋ `web-target.js` 按路径扫源码），**本票一个都不挪**。
- * @property {string} action      规范动作名（`src/contract-actions.js` 的 45 个之一）。
+ * @property {string} action      规范动作名（`src/contract-actions.js` 的 <!--r:catalog.canonical-->53<!--/r--> 个之一）。
  * @property {string} sessionId   会话身份，已过 `requireSession`（非空）。
  * @property {string|undefined} project 书夹 id；`no-book` 的动作上它可以是 undefined。
  * @property {object} body        `readBody(req)` 之后那一份，**原样透传**：实现继续读
  *                               `body.gate` / `body.files` / `body.note`。
+ * @property {{eventId: string, at: string}|null} [humanEvent] HTTP adapter 落下的人工动作事件
+ *                               （票 `decision-provenance/01` D3=A）。只有工作台通道会带；AI 的
+ *                               `agent-tool` 通道恒为 `null` ⇒ 动作族把它透传给
+ *                               `recordStationDecision`，后者据此决定 human／machine。
  */
 
 /**

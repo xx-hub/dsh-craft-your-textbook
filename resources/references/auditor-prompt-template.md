@@ -1,6 +1,6 @@
 # 审计 subagent 派发模板
 
-> 用法：主 agent 需要独立审计时，**用你所在平台的 subagent 调度工具**（Claude Code 的 Task / 会话内 spawn 工具）派发独立审计员，把下方对应模板复制进工具、机械替换占位符即可——不要每次临场编 prompt，更**不允许自己代审**（"换个视角自审"不是独立审计，见 `audit-and-testing.md §6.1`）。
+> 用法：主 agent 需要独立审计时，**本仓造书工作台内**走 `workbench_act(action=agent-assign, dispatchKind=audit)`（章级）／`dispatchKind=gold-audit`（范例章）——派单正文由机器按模板代填；**Claude 独立运行时**用平台的 subagent 调度工具，把下方对应模板复制进工具、机械替换占位符即可——不要每次临场编 prompt，更**不允许自己代审**（"换个视角自审"不是独立审计，见 `audit-and-testing.md §6.1`）。
 > 独立性来源：审计员**只读**下方列出的输入，绝不携带造书推理上下文（它不知道这本书是怎么造的）。
 > 报告回来后按本文"派发后决策规则"逐条核实再改，不照单全收（`audit-and-testing.md §6.2`）。
 
@@ -10,17 +10,17 @@
 
 | 占位符 | 填什么 |
 |---|---|
-| `{META_PATH}` | 写作规范（契约与铁律）所在路径——skill 侧 `META.md`；本仓 `工作区/style-spec.md`（两半合写在一份里） |
+| `{META_PATH}` | 写作规范（契约与铁律）所在路径——skill 侧是发布产物里的写作规范 `META.md`；本仓是 `工作区/style-spec.md`（两半合写在一份里） |
 | `{OUTLINE_PATH}` | 章节骨架所在路径——skill 侧 `OUTLINE.md`；本仓 `工作区/outline.md` |
-| `{STYLE_SPEC_PATH}` | 风格与语法所在路径——skill 侧 `style-spec.md`；本仓与写作规范同一份 `工作区/style-spec.md` |
+| `{STYLE_SPEC_PATH}` | 风格与语法所在路径——skill 侧是写作规范里「风格与语法」那一节；本仓与写作规范同一份 `工作区/style-spec.md` |
 | `{SOURCE_INDEX_PATH}` | 源材料索引所在路径——skill 侧 `源材料索引.md`；本仓 `工作区/explore.md`＋`工作区/knowledge-map.json`（Mode A 无源时删掉该项） |
-| `{ROUTE}` | `pure-blueprint` 或 `human-readable`（决定读哪些不变量） |
+| `{ROUTE}` | `blueprint`（AI 教学蓝本）或 `human`（人读教材）——这两个是机器 id（`meta.route` 只认它们），决定读哪些不变量 |
 | `{CHAPTER_FILE}` | 被审章节文件路径（模板 A） |
 | `{GOLD_STANDARD_FILE}` | 金标准章文件路径（模板 B） |
 
 ---
 
-## 模板 A：章级审计（L1-L3）——Phase 4/5 每章写完即派
+## 模板 A：章级审计（L1-L3）——写作段每章写完即派
 
 ````
 Subagent (general-purpose):
@@ -32,10 +32,10 @@ Subagent (general-purpose):
     ## 输入（只读）
     - 约束文件：{META_PATH}、{OUTLINE_PATH}、{STYLE_SPEC_PATH}、{SOURCE_INDEX_PATH}
     - 被审章节：{CHAPTER_FILE}
-    - 适用不变量：{ROUTE} 路线（I1-I4 必查；pure-blueprint 加查 I5-I6；human-readable 加查 H1-H3）
+    - 适用不变量：{ROUTE} 路线（I1-I4 必查；blueprint 加查 I5-I6；human 加查 H1-H3）
 
     ## 任务（L1-L3 章级审计）
-    1. **L1 事前规则**：对照 style-spec §章内板块语法查板块齐全（无遗漏必含、无约定外）；非对话体；禁用词（style-spec §正文语言风格）；先推导后命名。
+    1. **L1 事前规则**：对照写作规范（{STYLE_SPEC_PATH}）§章内板块语法查板块齐全（无遗漏必含、无约定外）；非对话体；禁用词（写作规范 §正文语言风格）；先推导后命名。
     2. **L2 敏感对齐**：敏感领域表述是否越界。
     3. **L3 引文抽检**：随机抽 10 条具名引用/数字/定义/判断，独立判断真伪；有源场景回 {SOURCE_INDEX_PATH} 核对行号；偏好断言必须能回判断根。
     4. **覆盖自检**：{SOURCE_INDEX_PATH} 本章预抽条目是否全部覆盖（不是一笔带过）。
@@ -70,7 +70,7 @@ Subagent (general-purpose):
 
 ---
 
-## 模板 B：金标准审计（§7.0 六项）——Phase 4 金标准章写完即派
+## 模板 B：金标准审计（§7.0 六项）——范例章写完即派
 
 ````
 Subagent (general-purpose):
@@ -82,10 +82,10 @@ Subagent (general-purpose):
     ## 输入（只读）
     - 约束文件：{META_PATH}、{OUTLINE_PATH}、{STYLE_SPEC_PATH}、{SOURCE_INDEX_PATH}
     - 金标准章：{GOLD_STANDARD_FILE}
-    - 适用不变量：{ROUTE} 路线（I1-I4 必查；pure-blueprint 加查 I5-I6；human-readable 加查 H1-H3）
+    - 适用不变量：{ROUTE} 路线（I1-I4 必查；blueprint 加查 I5-I6；human 加查 H1-H3）
 
     ## 任务（§7.0 六项）
-    1. **对照写作规范**：Voice 规则、板块模板、版权铁律、字数——逐条打钩（填 `{META_PATH}` 指向的那份；skill 侧 `META.md`，本仓 `工作区/style-spec.md`）。
+    1. **对照写作规范**：Voice 规则、板块模板、版权铁律、字数——逐条打钩（填 `{META_PATH}` 指向的那份；skill 侧是发布产物里的写作规范 `META.md`，本仓是 `工作区/style-spec.md`）。
     2. **对照章节骨架**：标题匹配；核心问题是否全部回答；该章覆盖目标（考纲任务/课标/知识域等）是否完整兑现；判断根锚定列是否有显式回扣（填 `{OUTLINE_PATH}`；skill 侧 `OUTLINE.md`，本仓 `工作区/outline.md`）。
     3. **对照源材料索引**：预抽关键条目全部覆盖；硬记锚无遗漏；高频陷阱被提及（填 `{SOURCE_INDEX_PATH}`；skill 侧 `源材料索引.md`，本仓 `工作区/knowledge-map.json`）。
     4. **"说清楚了吗"测试**：读者读完能自己说清本章标题承诺的三个核心概念吗？哪些被提到但没展开（读者会"这就完了？"）？

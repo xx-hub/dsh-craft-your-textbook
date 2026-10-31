@@ -15,6 +15,18 @@
  * {@link judgeFinalAuditSummary} 断的是「这份汇总件是不是那五份的确定函数、条目有没有丢或重、
  * 有没有混进机器裁决」——**不证**五份查得准不准、也不证点名属实（真机层，票 `context-budget/10`）。
  *
+ * ⚠️ **它是拼装器的性质测试，不是拦 AI 的闸**：`src/**` 里**零调用点**（唯一两个调用方是链上的
+ * `test-collab-backend.mjs` 与 `test-final-audit-scatter.mjs`）。生产面今天对五份分报告的硬闸是
+ * `stage-submit final` 的 `existsSync` ＋ {@link judgeFinalAuditReports} 那一层内容形状；
+ * 拿这份性质测试冒充「生产闸门」＝`docs/测试信任边界.md` 总纲里那第三条边界（票 `pre-gold-build/15`）。
+ *
+ * ## 内容义务（票 `pre-gold-build/15` · 债-21／债-18）
+ *
+ * 承诺面（`resources/references/audit-and-testing.md` §10.b）逐字要求每一份报告给出
+ * 「结论（通过／不通过）＋ 逐条问题 ＋ **每条给证据（文件 / 章 / 位置 / 原文）**，并按
+ * **严重度分级（P0 必改 / P1 应改 / P2 可改）**」。2026-10-12 之前「证据」与「分级」**零判据**
+ * ⇒ 下面这一族是那两条义务最薄的**可判形状**，落点在 `stage-submit final`。
+ *
  * ## 为什么判据长这样
  *
  * · **条目＝报告里的列表项**（`- …` / `* …` / `+ …`，与跨章审计那道门同一份形状），
@@ -297,6 +309,185 @@ export function judgeFinalAuditSummary(summaryText, reports) {
   return problems
 }
 
+// ── 内容义务那一层（票 `pre-gold-build/15` · 债-21：每条给证据 ＋ P0/P1/P2 分级）────
+//
+// 病（债-21 的读数）：五份分报告今天只有两道——① `existsSync` 断「在不在」；② 派生汇总件那一族
+// 断「拼装器忠实」（那是**测试链上的性质测试**，见文件头）。报告里**写了什么**没人看：
+// 一句「第 3 章有问题」与一条带四元组证据、带分级的条目，在盘上过得一样。
+//
+// ## 它断什么／不断什么（判据声称的强度＝实现强度）
+//
+// - **断**：每一条点名条目的**行内形状**——有没有严重度记号（`P0`／`P1`／`P2`）、有没有那四个
+//   证据字段名（各跟一个冒号、冒号后到下一个字段名之间不为空）；以及判「不通过」的那一份
+//   **至少有一条** `- ` 条目（防空跑：「不通过」+ 零条目＝把查不动的活原样推回去）。
+// - **不断**：证据真不真、分级对不对、结论对不对、点名是否属实——真机层（写那份报告的那一路
+//   才是读了正文的那个，§10.c）。这条与 `judgeFinalAuditSummary` 一样，**只断形状**。
+//
+// ## 窄处（枚举面比现实窄在哪里 —— `AGENTS.md` 票 `dev-gate-scan/17` 的纪律）
+//
+// ① **条目＝`-`／`*`／`+` 开头的列表项**（与 {@link finalAuditItemsOf} **同一份枚举**，
+//    不另写第二份形状）：**把问题写成散文**、或用有序列表 `1.` 开条目的报告**不在扫面里**，
+//    照样过闸——它仍是「没交代」，但那由人看，不由这道闸拦。
+// ② **判「通过」的那一份不要求有条目**：真没问题的一份不许被逼着编条目出来。
+// ③ **结论行只认「结论：通过／不通过」这一种写法**：认不出结论的报告只受「条目形状」那几条管，
+//    不受「不通过必须有条目」这一条管（认不出就不假装认得出）。
+// ④ **字段的值只断「冒号后非空」**：`原文：见上` 也算（值写得敷衍是判断，不是形状）。
+
+/** 证据字段名（承诺面 §10.b 逐字列的那四个：文件 / 章 / 位置 / 原文）。 */
+export const FINAL_AUDIT_EVIDENCE_LABELS = Object.freeze(['文件', '章', '位置', '原文'])
+
+/** 严重度记号（承诺面 §10.b 逐字列的那三档）。 */
+export const FINAL_AUDIT_SEVERITIES = Object.freeze(['P0', 'P1', 'P2'])
+
+/** 结论行：`结论：通过` / `结论：不通过`（承诺面 §10.b 的「结论（通过／不通过）」）。 */
+export const FINAL_AUDIT_VERDICT_RE = /结论\s*[:：]\s*(通过|不通过)/
+
+/** 严重度记号：`P0`／`P1`／`P2` **作为独立记号**（不被字母数字夹住——`P10` 不算）。 */
+const SEVERITY_RE = /(?:^|[^0-9A-Za-z])P[012](?![0-9])/
+
+/**
+ * 报告形状那一份文档的路径（拒收文案指回去的那一份）。
+ * ⚠️ 与 `domain-rules.SPEC_ROWS` 里 `audit-and-testing.md` 那一行、`dispatch-assembly` 的
+ * `AUDIT_DOC_REL` 指的是**同一份**；本模块只**引**它（形状正文在那份文件里，不在这里抄第二份）。
+ */
+export const FINAL_AUDIT_SHAPE_DOC_REL = 'resources/references/audit-and-testing.md'
+
+/** 一条条目里出现的证据字段名（按出现位置排；同一个字段名只认第一次出现的那个）。 */
+function evidenceFieldStarts(text) {
+  const out = []
+  for (const label of FINAL_AUDIT_EVIDENCE_LABELS) {
+    const m = new RegExp(`${label}\\s*[:：]`).exec(text)
+    if (m !== null) out.push({ label, at: m.index, end: m.index + m[0].length })
+  }
+  return out.sort((a, b) => a.at - b.at)
+}
+
+/** 字段值的**分隔记号**：值两边粘着的这些不算内容（`…｜章：第 3 章｜位置：…` 里的 `｜`）。 */
+const FIELD_SEPARATOR_EDGE_RE = /^[\s｜|、,，;；]+|[\s｜|、,，;；]+$/g
+
+/**
+ * 一条点名条目的**行内形状**问题（空数组＝这一条站得住）。
+ *
+ * @param {string} item 条目正文（{@link finalAuditItemsOf} 取出来的那一条）
+ * @returns {{label: string, why: string}[]} 逐项点名：`分级` 与四个证据字段
+ */
+export function finalAuditItemShapeProblems(item) {
+  const text = String(item ?? '')
+  const problems = []
+  if (!SEVERITY_RE.test(text)) problems.push({ label: '分级', why: '没有严重度记号（P0／P1／P2）' })
+  const starts = evidenceFieldStarts(text)
+  for (const label of FINAL_AUDIT_EVIDENCE_LABELS) {
+    const here = starts.find((s) => s.label === label)
+    if (here === undefined) {
+      problems.push({ label, why: `没有「${label}：」这个证据字段` })
+      continue
+    }
+    const next = starts.find((s) => s.at > here.end)
+    const raw = text.slice(here.end, next === undefined ? text.length : next.at)
+    // ⚠️ 只剥两边的分隔记号（`｜`／`、`／`；`／空白）：`文件：｜章：第 3 章` 里那个 `｜` 不是内容——
+    // 不剥的话「字段名后面空着」这一档会被一个分隔符蒙过去（判据的强度就打了折）。
+    if (raw.replace(FIELD_SEPARATOR_EDGE_RE, '') === '') {
+      problems.push({ label, why: `「${label}：」后面是空的（字段名跟了冒号就得有内容）` })
+    }
+  }
+  return problems
+}
+
+/**
+ * 判五份分报告的**内容义务**（债-21）。返回问题清单，空数组＝站得住。
+ *
+ * ⚠️ 调用方是 `stage-submit final`（生产闸）与链上的 `test-collab-backend.mjs`／
+ * `test-final-audit-scatter.mjs`——**同一段判据**，不另写一份「相似的量法」。
+ *
+ * @param {ReadonlyArray<{n: number, text: string}>} reports 五份（缺份也点名：防空跑）
+ * @returns {string[]} 逐条点名的问题
+ */
+export function judgeFinalAuditReports(reports) {
+  const problems = []
+  const list = Array.isArray(reports) ? reports : []
+  for (const row of FINAL_AUDIT_SCOPES) {
+    const found = list.find((r) => r.n === row.n)
+    if (found === undefined) {
+      problems.push(`第 ${row.n} 路分报告没进来（判据扫面非空）`)
+      continue
+    }
+    const text = String(found.text ?? '')
+    const items = finalAuditItemsOf(text)
+    const verdict = FINAL_AUDIT_VERDICT_RE.exec(text)
+    if (verdict !== null && verdict[1] === '不通过' && items.length === 0) {
+      problems.push(`第 ${row.n} 路判「不通过」却一条点名条目都没有：不通过必须点名到条目级（每条一行「- …」）`)
+    }
+    for (const [index, item] of items.entries()) {
+      const shape = finalAuditItemShapeProblems(item)
+      if (shape.length === 0) continue
+      problems.push(`第 ${row.n} 路第 ${index + 1} 条「${item}」——${shape.map((p) => p.why).join('；')}`)
+    }
+  }
+  return problems
+}
+
+/**
+ * 内容义务缺项时的拒收文案：**逐条点名缺在哪一条的哪一处**，并把形状指回那份方法论文档。
+ *
+ * @param {string[]} problems {@link judgeFinalAuditReports} 的输出
+ * @returns {string} 一句人话（落到 400 的 error 上）
+ */
+export function finalAuditReportsRejectReason(problems) {
+  const shape = '每条问题一行「- 」＋一个严重度记号（P0／P1／P2）＋四个证据字段「文件：… 章：… 位置：… 原文：…」（字段名后面跟冒号，冒号后到下一个字段名之间不许为空）'
+  return `五份分报告的内容义务没写全（${problems.length} 处）：${problems.join('；')}。`
+    + `报告形状见 ${FINAL_AUDIT_SHAPE_DOC_REL} §10.b：${shape}。`
+    + `机器只断这个形状——证据真不真、分级对不对由写那份报告的那一路负责（它才是读了正文的那个）。唤醒那一路补进它自己那份报告，改完重交。`
+}
+
+// ── 风格线去向的**来源**（票 `pre-gold-build/15` · 债-18：交代由五份分报告各自做）────
+//
+// 承诺面（同文件 §10.e）逐字：「**交代由五份分报告各自做**……协调员只汇总」。今天机器只断
+// 「每条 active 在 `styleCheck` 里有没有 id 对得上的条目」——**去向文本从哪来机器看不见**：
+// 协调员凭印象写的那一句与某一份报告里交代过的，在盘上长得一样。
+//
+// 这一层给的是**「有原文为据」**这一档（最薄的可判形状）：
+//   · `adopted`／`conflict` 每一条，五份分报告里**至少有一份**逐字写着那条风格线的原文
+//     （或它的 id）；
+//   · `superseded`（已不再适用）**不要求**分报告为据——那是协调员对用户后来那句话的记账，
+//     与「哪一路读了正文」无关。
+//
+// ## 窄处（枚举面比现实窄在哪里）
+//
+// ① 它断的是「**有据**」，**不**断「协调员那一条去向与报告里那句是同一句」——两句话是不是同一个
+//    意思属判断，真机层（§10.c：核实责任在写那份报告的那一路）。
+// ② 匹配是**逐字包含**：报告里把那条风格线改写了一遍（同义不同字）机器**认不出**，会误判成没据。
+//    这是有意的取舍：宁可让协调员唤醒那一路「照原文再写一遍」，也不让机器去猜两句话同不同义
+//    （同 `expectedSummary` 去重那条口径：猜错就是静默丢条目）。
+
+/**
+ * 一条风格线在五份分报告里**有没有原文为据**（引用了它的 id 或逐字原文，任一命中即算）。
+ *
+ * @param {ReadonlyArray<{n: number, text: string}>} reports 五份分报告全文
+ * @param {{id?: string, text?: string}} note 账上那条风格线（`meta.styleNotes` 里的一条）
+ * @returns {boolean}
+ */
+export function styleLineCitedInReports(reports, note) {
+  const id = String(note?.id ?? '').trim()
+  const line = String(note?.text ?? '').trim()
+  return (Array.isArray(reports) ? reports : []).some((row) => {
+    const body = String(row?.text ?? '')
+    if (id !== '' && body.includes(id)) return true
+    return line !== '' && body.includes(line)
+  })
+}
+
+/**
+ * 没有原文为据的那几条风格线的拒收文案。
+ *
+ * @param {string[]} lines 那几条风格线的原文（运行时算出来的，不是抄在代码里的清单）
+ * @returns {string}
+ */
+export function styleDisposalsWithoutSourceRejectReason(lines) {
+  return `这些风格线的去向在五份分报告里找不到出处：${lines.join('；')}。`
+    + `按 ${FINAL_AUDIT_SHAPE_DOC_REL} §10.e，去向由**读过正文的那一路**交代、协调员只汇总——`
+    + `报告里要逐字写上那条风格线的原文（或它的 id）。哪一路点了它就唤醒那一路补进它那份报告，改完再交工；⛔ 别自己凭印象编一条顶上。`
+}
+
 // ── 落盘（唯一写汇总件的地方）────────────────────────────────────────────────
 
 /**
@@ -328,5 +519,36 @@ export function refreshFinalAuditSummary(projectId) {
     chars: text.length,
     unionSize: expected.unionSize,
     items: expected.perReport,
+  }
+}
+
+/**
+ * `meta.finalReport` 那一格的**形状与那句话**（唯一一处；两个生产者都调它）。
+ *
+ * 生产者在两个地方：真书的 `stage-submit(stage=final)`（`actions/chapters.js`）与演示书的终检支
+ * （`engine.js` 的 `runPhase6`）。票 `demo-channel-full/08` 之前只有前者——演示书那一支根本不写这一格，
+ * 于是认可卡上没有那份汇总件的指针。⚠️ **这一格是一个字段、一种形状**，所以两处都从本函数取，
+ * ⛔ 不在任何一侧再写一遍那句话（两句会漂，而漂了没有任何闸门会响：那句话是人读文本）。
+ *
+ * 三件事实各是什么（与 `actions/chapters.js` 那段注释同一条口径）：
+ *   · `path`／`chars` —— 那份**五份并集**（`finalAuditSummaryRel()`）的路径与字符数；五份不齐时是 `null`
+ *     （`refreshFinalAuditSummary` 返回 `null` 的语义：**不指针**，而不是指一份空的）。
+ *   · `summary` —— 一句人话，说清「自查报告全文在哪（账本事件里，**不落盘**）」＋「五份并集几分条、落在哪」。
+ *
+ * @param {string} report 自查报告全文（它**不落盘**，随交工上送、逐字进账本事件 `textbook/ai-report`）
+ * @param {{path: string, chars: number, unionSize: number}|null} summary `refreshFinalAuditSummary` 的返回值
+ * @returns {{path: string|null, chars: number|null, summary: string}}
+ */
+export function finalReportPointer(report, summary) {
+  const text = String(report ?? '')
+  return {
+    path: summary === null ? null : summary.path,
+    chars: summary === null ? null : summary.chars,
+    // 摘要说的是**主笔要拿它干什么**：条目并集在哪、几条、以及「自查报告全文在哪」。
+    // ⚠️ 自查报告那一份全文**不落盘**（它随交工上送、逐字进账本事件 `textbook/ai-report`），
+    // 所以指针指的是**五份并集**那份，不是自查报告本身——两件事别混。
+    summary: summary === null
+      ? `最后检查自查报告（${text.length} 字符，随交工上送、全文在账本事件里）；五份分查的点名条目并集尚未拼装（盘上还没有那五份）`
+      : `最后检查自查报告（${text.length} 字符，随交工上送、全文在账本事件里）；五份分查的点名条目并集 ${summary.unionSize} 条，落在 ${summary.path}`,
   }
 }

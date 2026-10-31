@@ -24,27 +24,36 @@
  *    调用点写「<产物名> 打开」，见事件行）；
  *  - `disabled` / `title` 给"文件还没写出来"那种置灰用（缺省不置灰、提示一律走产物名）；
  *  - `style` 只给调用点改对齐用（本件默认 `marginLeft:auto`＝在产物行里靠右）。
+ *
+ * 📌 票 `gold-display-period/05`：**调用点把 `disabled` 当 prop 递进来，所以「置灰」得长在本件
+ * 自己身上**——本件的 `disabled` 表达式逐字就是 `props.disabled === true`，置灰走同一处
+ * `S.disabled`（`src/ui/styles.js` 的唯一出处）。调用点那一边就不必再套一层（判据认这种透传，
+ * 见 `test/test-disabled-visual.mjs` 第 4 条）。
  */
 import { createElement as h } from "react";
 import { artifactName } from "./view-rules.js";
+import { S } from "./styles.js";
 
 export function OpenArtifactButton(props) {
 	return h(
 		"button",
 		{
-			style: {
-				marginLeft: "auto",
-				border: "1px solid var(--dsw-alias-border-l2)",
-				borderRadius: "8px",
-				padding: "4px 12px",
-				fontSize: "12px",
-				fontWeight: 600,
-				background: "transparent",
-				color: "inherit",
-				cursor: "pointer",
-				whiteSpace: "nowrap",
-				...(props.style ?? {}),
-			},
+			style: S.disabled(
+				{
+					marginLeft: "auto",
+					border: "1px solid var(--dsw-alias-border-l2)",
+					borderRadius: "8px",
+					padding: "4px 12px",
+					fontSize: "12px",
+					fontWeight: 600,
+					background: "transparent",
+					color: "inherit",
+					cursor: "pointer",
+					whiteSpace: "nowrap",
+					...(props.style ?? {}),
+				},
+				props.disabled === true,
+			),
 			onClick: () => props.onOpen(props.item.path),
 			disabled: props.disabled === true,
 			// 票 10（判定三 #1）：这里原来印 `${props.item.path}`（`工作区/explore.md` 这类机器路径）。
