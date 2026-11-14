@@ -1513,10 +1513,15 @@ export function StatusCard(props) {
 	}
 	// 阶段在做什么（让人放心的说明）
 	const phase = meta.phase ?? 1;
+	// ⚠️ 票 `phase4-chapter-label/01`：阶段 4 那句**点名的是本次实际所选的范例章**，章号取
+	// `goldChapterNo(meta)`（`project.json` 里范例章选定值那一栏的唯一取值口，缺省 1）——
+	// ⛔ 不许在这里另抄一份默认值、也不许写死「第 1 章」。真书《无声的战争》选的是第 5 章、
+	// 产物落的也是 `工作区/chapter-05.md`，界面却说「正在写第 1 章」，用户唯一能看到的判断依据
+	// 就是这句话，最可能的动作是中断一次**本已正确**的运行重选。
 	const phaseDesc = {
 		2: "读材料挑重点：AI 正在通读你的教材（材料多时会派小助手分头读），整理成材料索引",
 		3: "拍板定方案：AI 正在起草设计方案（已经拍过板的会自动跳过）",
-		4: "最佳范例章：AI 正在写第 1 章给你看效果",
+		4: `最佳范例章：AI 正在写第 ${goldChapterNo(meta)} 章给你看效果`,
 		5: "写完整本：小助手执笔 + 小助手检查 + AI 复核，逐章推进",
 		6: "最后检查：AI 亲自做最后检查 + 机器兜底",
 	}[phase];
@@ -2437,7 +2442,7 @@ export function rejectPayload(mode, reasons, note, styleText) {
 /**
  * 关卡卡那颗主操作「✅ 通过，继续」的**后果说明**（票 `ui-systematic-fixes/09`；唯一出口）。
  *
- * ── 病（`.scratch/ui-page-audit/inv-decisions.md` §1 第 3 行、§B.9 第 9 条）──────────────
+ * ── 病（`.scratch/_archive/2026-11/ui-page-audit/inv-decisions.md` §1 第 3 行、§B.9 第 9 条）──────────────
  * 同一排键里「❌ 驳回」两个 mode 各带一句后果（`REASONS` 那两块）、「⏭ 先跳过这一关」一整段、
  * 「⏪ 回退」一个确认层，而**用户唯一会点的那颗主键一个字解释都没有**——
  * 「用户唯一会点的键，是唯一没被解释的键」。

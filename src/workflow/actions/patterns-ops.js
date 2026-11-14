@@ -305,14 +305,20 @@ export const actPatternsOps = familyOf('patterns-ops', async ({ ctx: ctx, action
       const offRetry = ctx.on('llm/retry', (info) => { captured.push(`llm/retry: ${JSON.stringify(info).slice(0, 200)}`) })
       let result
       try {
-        const run = await ctx.subagents.start('spawn', {
+        // 一次性子代理（0.2.1 起的统一入口）：`delivery: 'caller'` ⇒ 结果只回调用方、
+        // 不通知模型；跑完由这里 `dispose()` 释放（续接型那一支见 `chapters.js` 派单／读卷）。
+        const activation = await ctx.subagents.startActivation({
+          provider: 'spawn',
           label: '调试',
-          prompt: [{ type: 'text', text: '请只回复两个字：收到' }],
-          parent,
+          request: {
+            prompt: [{ type: 'text', text: '请只回复两个字：收到' }],
+            parent,
+          },
           signal: AbortSignal.timeout(120 * 1000),
+          delivery: 'caller',
         })
-        result = await run.result
-        await run.dispose()
+        result = await activation.result
+        await activation.dispose()
       } finally {
         offError()
         offRetry()

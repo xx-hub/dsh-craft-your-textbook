@@ -40,7 +40,13 @@ import { CARD_HEAD_QUESTION_STYLE } from "./ui/card-head.js";
 // 屏级路由（票 `ui-systematic-fixes/05`）：「渲哪一屏」的**唯一判定面**——纯函数、零副作用、
 // 不碰 React，壳只消费它的返回值（搬移前那五处就地判据到此为止，见 `src/ui/surface.js` 文件头）。
 // 票 06：那颗读面重试的动作名也从这里取（⛔ 不在壳里手抄 `"read-retry"`——抄一份就会漂）。
-import { resolveSurface, SURFACE_RETRY_ACTIONS } from "./ui/surface.js";
+import {
+	resolveSurface,
+	SURFACE_RETRY_ACTIONS,
+	// 票 `ui-systematic-fixes/13`：「接管了另一本」那句话的**唯一出处**（与 `IDENTITY_LOST_TEXT`
+	// 同族）。⛔ 壳与组件都不手写第二份。
+	identityTakeoverNotice,
+} from "./ui/surface.js";
 // 当前书投影（票 01/03 建的内部 module，Candidate 05 / ADR-0021）：六方法 interface，
 // 拥有 projects/events/work/process 四条核心读通道、订阅拥有的 2 秒轮询、readiness 与
 // 请求顺序。它无 React 依赖；WorkbenchView 只用 useSyncExternalStore 观察它。
@@ -257,6 +263,8 @@ import {
 	interruptNoteText,
 	AutoFollowAwaitNote,
 	AutoFollowProgressNote,
+	// 票 `ui-systematic-fixes/13`：接管另一本时那条可关的状态条告知（文案出处仍是 `surface.js`）。
+	IdentityTakeoverNote,
 	TopBar,
 	StylePanel,
 	IntervenePanel,
@@ -328,6 +336,7 @@ export {
 	InterruptNote,
 	AutoFollowAwaitNote,
 	AutoFollowProgressNote,
+	IdentityTakeoverNote,
 	TopBar,
 	StylePanel,
 	IntervenePanel,
@@ -549,14 +558,21 @@ export function WorkbenchView(props) {
 	);
 	// ③ 主 AI 上下文占用（票 28 / 走查 P46）：宿主 `contextPressure` **会话投影**——
 	//    与宿主输入区角标「上下文已用 51%」同一份数据（角标就是宿主 `contextOccupancy()` 的产物）。
-	//    走 `useSessions` 的 `projectionValues`（`SessionSummary` 上**目录已登记**的那个可选位），
-	//    所以这一行**不引入任何新宿主依赖**、不新开 client 包。
-	//    ⚠️ 读不到就是 null（没报过用量 / 没适配器报容量 / 投影整个缺席）：下游那一格不渲染，
+	//    ⚠️ 票 `dsh-022-adapt/01`：宿主 0.2.2 给 `contextPressureProjectionDefinition` 加了
+	//    `summary: false`，于是 `SessionSummary.projectionValues`（**会话摘要**）里**不再有**
+	//    这一位——只读摘要的旧写法在真机上静默变成 null，界面那格不渲染、不报错、整链绿。
+	//    新通道是同一份 `useSessions` 快照上的 `projectionsBySession[id].values`（完整投影值，
+	//    摘要剔除只影响摘要那一路）。新通道**在前**；0.2.1 及更早的宿主没有这一位，才回落到
+	//    摘要的 `projectionValues.contextPressure`。两条都不新增 client 包／inject 条目。
+	//    ⚠️ 读不到仍是 null（没报过用量 / 没适配器报容量 / 两路都缺席）：下游那一格不渲染，
 	//    **绝不显示 0%、绝不编一个百分比**。
 	const contextPercent = contextOccupancyPercent(
-		props.useSessions(
-			(s) => s.byId[session]?.projectionValues?.contextPressure ?? null,
-		),
+		props.useSessions((s) => {
+			const fromProjections =
+				s.projectionsBySession?.[session]?.values?.contextPressure;
+			if (fromProjections !== undefined) return fromProjections;
+			return s.byId[session]?.projectionValues?.contextPressure ?? null;
+		}),
 	);
 	// ── 当前书投影接线（票 04 / ADR-0021 决策 2/6/8/11）──────────────────────
 	// 一个 session 一个 instance，切会话靠**渲染期建新 instance**完成：`useMemo` 在 session
@@ -569,6 +585,12 @@ export function WorkbenchView(props) {
 	// 且共享基线只在主树上改（`docs/agents/effort-orchestration.md`）。
 	// 带 `session` 是防「切会话那一帧读到上一个会话的信号」。
 	const [identityLost, setIdentityLost] = useState(null);
+	// 票 `ui-systematic-fixes/13`：接管另一本那条告知（ADR-0021 决策 13 修订：告知、不拦）。
+	// `null` ＝ 这一帧没有告知；点掉（`✕`）只把这里置 `null`，接管本身**不回滚**。
+	// ⚠️ 它**不住在 `BookSessionScope` 里**：那条告知说的是「刚才那本 → 现在这本」这件**跨身份**的
+	// 事，而壳按 bookKey 重挂 ⇒ 记在壳里的话接管那一帧一换 key 就被清掉（永远不出现，或永远出现）。
+	// 带 `session` 的防串台与 `identityLost` 同一条口径（切会话那一帧不读上一个会话的信号）。
+	const [takeoverNotice, setTakeoverNotice] = useState(null);
 	// 「已经等了多久」：`elapsedMs` 由**壳里这一个**计时器给（下面的 effect），
 	// `resolveSurface` 是纯函数、只消费它（⛔ 它自己不读时钟，见 `src/ui/surface.js` 文件头）。
 	const [elapsedMs, setElapsedMs] = useState(0);
@@ -579,6 +601,11 @@ export function WorkbenchView(props) {
 				sessionId: session,
 				onIdentityLost: (lost) =>
 					setIdentityLost(lost === null ? null : { session, ...lost }),
+				// 接管**真发生**才送：投影侧只送「刚失效那一本的重新发现、另一本 core 真读回来」那一帧
+				// （见 `src/workbench-projection.js` 文件头票 13 那一节）。初始发现、用户自己点的
+				// `refresh()`／`selectProject(...)` 都不送。
+				onIdentityTakeover: (taken) =>
+					setTakeoverNotice(taken === null ? null : { session, ...taken }),
 			}),
 		[session],
 	);
@@ -624,6 +651,18 @@ export function WorkbenchView(props) {
 	// 身份失效信号只在**本会话**那一份上生效（回调带 `session`，切会话那一帧不串台）。
 	const identityLostNow =
 		identityLost !== null && identityLost.session === session ? identityLost : null;
+	// 接管告知同一条口径：只认本会话那一次接管，并**只在这一本还活着时**显示
+	// （`to === projectId`）。两件事都由投影那条通路给（同一个 instance ⇒ 同一个 session）：
+	//   · `to !== projectId` ⇒ 接管之后又换过书（用户自己点的，或又失效一次）⇒ 这条说的已经是旧事；
+	//   · 失效告知（`identityLostNow`）在场时不显示——那一屏说的是「这本书为什么打不开」，
+	//     再叠一条「现在打开的是另一本」会自相矛盾。
+	const takeoverNoticeNow =
+		takeoverNotice !== null &&
+		takeoverNotice.session === session &&
+		takeoverNotice.to === projectId &&
+		identityLostNow === null
+			? takeoverNotice
+			: null;
 	// 票 03：产物读取拥有者。`projectId` 读不到时它**不发请求**（表现为一次 reject），所以
 	// 「无当前书」这一支不需要壳再自己判一次。
 	// ⚠️ 必须 useMemo：下面几张卡把 `readArtifact` 放进各自 effect 的依赖数组，每次渲染换新引用
@@ -2579,7 +2618,7 @@ export function WorkbenchView(props) {
 								{
 									style: S.smallLink,
 									onClick: () => setReaderQuestionnaireOpen(true),
-									title: "给收卷人一份问卷（.md）：可以打印手写、也可以在电脑上改；填完把文字粘回来",
+									title: "给收卷人一份问卷（.md，电子填）：下载下来把该勾的勾上，填完再全选复制粘回工作台",
 								},
 								"🧑‍🎓 读者情况问卷",
 							),
@@ -2747,6 +2786,9 @@ export function WorkbenchView(props) {
 						// 状态条：spec 不变量 10——回看时不摆"现在"的内容（状态条 / 活性行 /「现在」主卡
 						// 一律收起）。2026-09-22 票 03：旧门控只看 `viewPhase`，于是**浏览态**
 						// （`browsing` 非空，全览条点一步进来）下状态条还在渲染——补上这一半。
+						// 票 `ui-systematic-fixes/13`：接管了另一本时，**状态条那一格**多一行告知
+						// （ADR-0021 决策 13 修订：告知、不拦；可关）。它排在状态条之后、活性行之前
+						// ——同属「现在」这一屏的 chrome，回看态照旧一律收起。
 						screen.kind === "now"
 							? createElement(StatusStrip, {
 									meta,
@@ -2756,6 +2798,14 @@ export function WorkbenchView(props) {
 									metaLabel: pendingStageLabel,
 									// 批 1：把「轮到谁」的唯一真值交给状态条，避免横幅与阶段片各说一套。
 									humanTurn,
+								})
+							: null,
+						screen.kind === "now" && takeoverNoticeNow !== null
+							? createElement(IdentityTakeoverNote, {
+									// 文案**只**从这里出去（`surface.js` 的 `identityTakeoverNotice`）：
+									// ⛔ 不在壳里拼第二份、也⛔ 不把投影送来的机器 id 印上屏。
+									text: identityTakeoverNotice(takeoverNoticeNow.name),
+									onClose: () => setTakeoverNotice(null),
 								})
 							: null,
 						// 主 AI 活性行（F17）：常驻一行——「🤖 我正在做」/ 好一会儿没动静了 [🔁 从断点继续] /

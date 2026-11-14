@@ -3,7 +3,7 @@
  *
  * ## 它是什么，不是什么
  *
- * **是**一组共用函数 ＋ **一份具名上限**。<!--r:catalog.canonical-->53<!--/r--> 个动作的 payload 契约写着两处（`agent-tool.js`
+ * **是**一组共用函数 ＋ **一份具名上限**。<!--r:catalog.canonical-->54<!--/r--> 个动作的 payload 契约写着两处（`agent-tool.js`
  * 的 `preValidate` 与 `actions/*` 各 case），而「**哪些数是 interface 事实**」此前**没有任何
  * 一处清单**——风格意见 300 字、驳回说明 500 字、进度叙述 60 字……caller 只能从代码里读出来。
  *

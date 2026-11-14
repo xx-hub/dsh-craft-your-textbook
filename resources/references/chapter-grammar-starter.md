@@ -69,6 +69,12 @@ pmbok7_anchor: ...
 ### 速判脚本：[四选一短情境]（quick-judgment）
 ```
 
+> ⚠️ **这个「AI 老师提问脚本」块住在章末 H2 教学区里**（human 档的带读手册就是这个教学区本身；
+> blueprint 档是教学区内部第一块的四个子项）。`### 探索脚本`／`### 速判脚本` 这类块名只属于
+> 手册内部，⛔ 不进正文（正文是给人读的散文）。human 档的教学区**零改动**：原样保留三层问题链
+> 与内嵌提示，⛔ 不因为这张卡另加段落。契约的 H2 那一份：本仓 dsh＝`resources/references/invariants.md`／
+> skill 侧＝`references/invariants.md`；「带读手册」见 `file-contracts.md`。
+
 ### 第五步：声明可选板块
 
 在写作规范里声明：`judgment-card` 是可选板块——技术性小节无 PMI 偏好时允许略去，不硬凑。

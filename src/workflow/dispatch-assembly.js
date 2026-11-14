@@ -61,6 +61,10 @@ import {
   okMaterialShards,
   productFamilyPath,
   readingRel,
+  READER_QUESTIONNAIRE_INTENT_REL,
+  READER_QUESTIONNAIRE_RETURNED_REL,
+  READER_QUESTIONNAIRE_TEXT_REL,
+  READER_QUESTIONNAIRE_VERDICT_REL,
 } from '../domain-rules.js'
 // 票 `knowledge-graph-build/13`：知识点图审校那一档的值块里有一段**机器现算的注意力清单**
 // （两条软读数 ＋ 把握档排序）——渲染只住一处（`knowledge-graph-review.js`），本模块只把它拼进值块。
@@ -75,6 +79,14 @@ import { ledgerClaimLine } from './cross-audit.js'
 // ⚠️ 那个模块的**计算面**是纯函数（不读时钟、不写随机数、不碰盘）；读图那一步在**调用方**
 // （`readKnowledgeChainGraph()`，见 `actions/chapters.js`）——本模块只把读出来的两样当值传进纯函数。
 import { CHAIN_SECTION_HEADING, knowledgeChainFeed } from './knowledge-graph-chain.js'
+// 票 `reader-questionnaire-ai-authoring/04`：写卷那一档的值块里那一段**机器已选好的条目清单**
+// （逐片逐条 ＋ 三条字数上限 ＋ 「本卷合计 N 条」）——渲染只住一处（`questionnaire-author.js`）；
+// 读合并件与取条那一步在动作层，⛔ 本模块不碰盘。
+import { questionnaireAuthorValueLines } from './questionnaire-author.js'
+// 票 `reader-questionnaire-ai-authoring/05`：读卷那一档的值块（三件注入的落点与读数 ＋ 交工形状）——
+// 渲染只住一处（`questionnaire-analyze.js`）；重建「当初写卷那份派单提示词原文」那一步在动作层
+// （它要读模板），⛔ 本模块不碰盘。
+import { questionnaireAnalyzeValueLines, questionnaireAnalyzeInjectionReading } from './questionnaire-analyze.js'
 // 票 `reader-cognition-boundary-build/07`：**读者边界那一份现算的派生视图**那一格
 //（四份逐章派单正文里的「本章不许写什么」）。渲染只住一处（`reader-boundary.js`），
 // 本模块只把它拼进值块——读盘那半在动作层（`readReaderBoundary()`），⛔ 本模块不碰盘。
@@ -132,6 +144,23 @@ const ALIGNMENT_PRODUCE_NOTE = '（这一档不落盘：你的结论随最终回
  * 由主笔与用户读（机器一个字都不解析），所以这一行不写任何路径。
  */
 const GRAPH_REVIEW_PRODUCE_NOTE = '（这一档不落盘：你交回的是一份**条目级清单**（点名到卡），随最终回复带回即可——章节骨架与知识地图都不是你的落点，⛔ 也别往书夹里写文件）'
+
+/**
+ * `questionnaire-author` 那一档的「你该产出的登记行」（票 `reader-questionnaire-ai-authoring/04`）。
+ *
+ * 它**不是**不落盘：这一档确实交两份文件（题面 JSON ＋ 意图 `.md`），路径逐字取自 `domain-rules`
+ * 的唯一出处。⚠️ 不照搬这一步（goal）那张产物表：那是站 3 的目标件，不是它的落点——照搬就是让机器
+ * 对小助手说一句假话。
+ */
+const QUESTIONNAIRE_AUTHOR_PRODUCE_NOTE = `${READER_QUESTIONNAIRE_TEXT_REL}（题面 JSON）与 ${READER_QUESTIONNAIRE_INTENT_REL}（意图件）——就这两份，⛔ 别往书夹里写别的文件`
+
+/**
+ * `questionnaire-analyze` 那一档的「你该产出的登记行」（票 `reader-questionnaire-ai-authoring/05`）。
+ *
+ * ⚠️ 只一份（`工作区/问卷判断.json`）——**不是**剔除记录：那份记录只经主笔发既有的「图上意见」通路
+ * 写（子助手调 `workbench_act` 会被归属闸拒，那是有意的）。
+ */
+const QUESTIONNAIRE_ANALYZE_PRODUCE_NOTE = `${READER_QUESTIONNAIRE_VERDICT_REL}（问卷判断 JSON）——就这一份，⛔ 别往书夹里写剔除记录（那一份只经主笔发 \`graph-opinion\` 写，你有自己的 sessionId，直调会被拒）`
 
 /**
  * 这一档要哪几个**读盘结果当值**的输入（票 `depth-round-3/06`；**唯一**一份「谁要哪几位」的声明）。
@@ -242,8 +271,8 @@ export const DISPATCH_SPECS = Object.freeze({
     anchors: Object.freeze([
       REGISTRY_SECTION,
       '## 派活时要填给你的四件事',
-      '## 产出契约一：`工作区/细目/精读-NN.md`（细目落盘，纯 Markdown）',
-      '## 产出契约二：`工作区/knowledge-map-NN.json`（知识地图分片，严格 JSON）',
+      '## 产出契约一：',
+      '## 产出契约二（本仓 dsh）：',
     ]),
   }),
   // 票 `knowledge-graph-build/06`：**探索段内再派的一路**——精读把每份材料变成一片卡片之后，
@@ -259,7 +288,8 @@ export const DISPATCH_SPECS = Object.freeze({
     shapeRel: templateRel('references/subagent-prompts/alignment-prompt.md'),
     anchors: Object.freeze([
       REGISTRY_SECTION,
-      '## 产出契约一：跨材料的边与「同一件事」的合并',
+      '## 本仓（dsh）：产出契约一',
+      '## skill 侧：产出契约一',
       '## 产出契约二：回灌三件套',
       '## 铁律',
     ]),
@@ -285,8 +315,58 @@ export const DISPATCH_SPECS = Object.freeze({
       REGISTRY_SECTION,
       // ⚠️ 这一段标题里的类数**随 `GRAPH_REVIEW_CATEGORIES` 走**（票 `knowledge-graph-edges-build/01`
       // 由四类改五类）——改类数时这一行与模板标题要**同批**改，否则这一档的锚当场读不到。
-      '## 判什么（五类，逐条给依据）',
-      '## 产出契约：**只交清单，不交结论键**',
+      '### 判什么（五类，逐条给依据）',
+      '### 产出契约：**只交清单，不交结论键**',
+      '### 铁律',
+    ]),
+  }),
+  // 票 `reader-questionnaire-ai-authoring/04`：**写卷**那一档。主笔在探查交工之后、发卷之前派这一路
+  // 续接型小助手：它读合并件（⛔ 不读材料正文），交题面 JSON ＋ 意图 `.md`。
+  // ⚠️ `stage: 'goal'` 不是随手挑的，理由与 `graph-review` 那一档同形：合并件是**探索段交工那一刻**
+  // 才由机器拼出来的（`actions/chapters.js` 的 `stage-submit(explore)`），所以这一路最早只能落在
+  // **下一段**；而 goal 这一步的登记行里正好有 `工作区/knowledge-map.json`（`STEP_INPUT_ROWS.goal`）
+  // ⇒ 它是「值从哪来」这件事本身。⚠️ 题面没交回也**不阻塞发卷**（用户点「发问卷」照发今天的确定性版）。
+  // ⚠️ 值里的条目清单**从合并件与取条规则现算**（`questionnaire-author.js` 的 `questionnaireAuthorSlices`），
+  // 读盘那一步在调用方（`DISPATCH_INPUT_READERS.questionnaireAuthor`），本模块仍不碰盘。
+  'questionnaire-author': Object.freeze({
+    kind: 'questionnaire-author',
+    label: '写读者问卷题面',
+    stage: 'goal',
+    inputs: dispatchInputs('questionnaire-author', 'questionnaireAuthor'),
+    shapeRel: templateRel('references/subagent-prompts/questionnaire-author-prompt.md'),
+    // 六个承重锚（票面逐字）：缺一个 `assembleDispatchPrompt` 就抛 `DispatchShapeError`。
+    // ⚠️ 第一段是几份共用的「登记表口径」；中间四段是这一档自己的骨架（身份／读物／翻话法／硬约束），
+    // 后两段是它交什么（意图件 ＋ 交工形状）。
+    anchors: Object.freeze([
+      REGISTRY_SECTION,
+      '## 你是谁',
+      '## 你手上是什么',
+      '## 怎么把标签翻成问话',
+      '## 四条硬约束',
+      '## 意图件写什么（`工作区/问卷意图.md`）',
+      '## 交工形状',
+    ]),
+  }),
+  // 票 `reader-questionnaire-ai-authoring/05`：**读卷**那一档。回卷件落盘之后，主笔先试冷恢复
+  // `meta.questionnaireAgentId` 那一个子助手（`resumed`）；唤不醒就新起一路上下文干净的读卷子代理
+  // （`rehydrated`），交办里把三件注入补齐（提示词原文可确定性重建／意图件／回卷件）。
+  // ⚠️ `stage: 'goal'` 与写卷那一档同形：回卷件是**站 2 拍板之后**、站 3 那一趟才被读的，而站 3 的
+  // 派单值就从那一段的 brief 来——否则「只在领到这一段任务时派」那道守卫会与本票的产品行为打架。
+  // ⚠️ 值里的**三件注入**由调用方读盘／现算当值传进来（`DISPATCH_INPUT_READERS.questionnaireAnalyze`），
+  // 本模块仍不碰盘。
+  'questionnaire-analyze': Object.freeze({
+    kind: 'questionnaire-analyze',
+    label: '读读者情况问卷',
+    stage: 'goal',
+    inputs: dispatchInputs('questionnaire-analyze', 'questionnaireAnalyze'),
+    shapeRel: templateRel('references/subagent-prompts/questionnaire-analyze-prompt.md'),
+    // 四个承重锚（缺一个就抛 `DispatchShapeError`）：
+    // ① 共用的登记表口径；② 身份与两档来历（冷恢复／干净重派——口径完全相同）；
+    // ③ 交工形状（`drop` ／ `skip` 两条数组，那是唯一被机器验的东西）；④ 铁律（不改件、不补答、不代笔）。
+    anchors: Object.freeze([
+      REGISTRY_SECTION,
+      '## 你是谁',
+      '## 交工形状（`工作区/问卷判断.json`，严格 JSON）',
       '## 铁律',
     ]),
   }),
@@ -771,6 +851,64 @@ export function dispatchValues(kind, input = {}) {
     }
   }
 
+  if (spec.kind === 'questionnaire-author') {
+    // 票 `reader-questionnaire-ai-authoring/04`：这一档的值里最承重的那一份是**机器已选好的条目清单**
+    // （逐片逐条，用的是 `selectSliceItems` 那一份）——它由**调用方**读盘现算当值传进来
+    // （`readQuestionnaireAuthorTarget(project)`），与 `graphReview`／`edgeLedger` 同一条纪律：
+    // 本函数不碰盘，没拿到就响（⛔ 不替它编一份空清单）。
+    const author = input.questionnaireAuthor
+    if (author === null || typeof author !== 'object' || !Array.isArray(author.slices)) {
+      throw new DispatchShapeError('questionnaire-author 派单需要 questionnaireAuthor（机器已选好的条目清单）：'
+        + '读合并件与取条那一步在调用方做（`actions/chapters.js` 的 `readQuestionnaireAuthorTarget()`）——'
+        + '本模块不碰盘，也不替它编一份空清单')
+    }
+    const total = author.slices.reduce((sum, slice) => sum + (Array.isArray(slice?.items) ? slice.items.length : 0), 0)
+    return {
+      ...base,
+      label: '写读者问卷题面',
+      chapter: null,
+      points: [],
+      author: { ...author, total },
+      // ⚠️ 这一档要的是**合并件**（不是知识地图那份共用文档）：子代理的语义来源就是它。
+      paths: {
+        knowledgeMap: DOC_PATH.knowledgeMap,
+        questionnaireText: READER_QUESTIONNAIRE_TEXT_REL,
+        intent: READER_QUESTIONNAIRE_INTENT_REL,
+      },
+      registry: { ...base.registry, produce: QUESTIONNAIRE_AUTHOR_PRODUCE_NOTE },
+      route: meta.route ?? 'blueprint',
+    }
+  }
+
+  if (spec.kind === 'questionnaire-analyze') {
+    // 票 `reader-questionnaire-ai-authoring/05`：这一档的**三件注入**由**调用方**读盘／现算当值传进来
+    // （`DISPATCH_INPUT_READERS.questionnaireAnalyze`）：① 提示词原文（`assembleDispatchPrompt` 重建）、
+    // ② 意图件在不在、③ 回卷件在不在。与 `graphReview`／`edgeLedger` 同一条纪律：本函数不碰盘，
+    // 没拿到就响；**三件缺一件也不派**（点名缺哪件，⛔ 不拿半份口径硬读）。
+    const analyze = input.questionnaireAnalyze
+    if (analyze === null || typeof analyze !== 'object') {
+      throw new DispatchShapeError('questionnaire-analyze 派单需要 questionnaireAnalyze（三件注入的读数）：'
+        + '读盘与重建提示词那一步在调用方做（`actions/chapters.js` 的 `readQuestionnaireAnalyzeTarget()`）——'
+        + '本模块不碰盘，也不替它编一份空口径')
+    }
+    const injections = questionnaireAnalyzeInjectionReading({ ...analyze, authorPrompt: analyze.authorPrompt })
+    if (!injections.ok) throw new DispatchShapeError(injections.message)
+    return {
+      ...base,
+      label: '读读者情况问卷',
+      chapter: null,
+      points: [],
+      analyze: { ...analyze },
+      paths: {
+        intent: READER_QUESTIONNAIRE_INTENT_REL,
+        returned: READER_QUESTIONNAIRE_RETURNED_REL,
+        verdict: READER_QUESTIONNAIRE_VERDICT_REL,
+      },
+      registry: { ...base.registry, produce: QUESTIONNAIRE_ANALYZE_PRODUCE_NOTE },
+      route: meta.route ?? 'blueprint',
+    }
+  }
+
   if (spec.kind === 'cross-audit') {
     // 票 `knowledge-graph-build/11`：这一档多一份**机器现算的逐边清单**（`prereq` 边，跨章 ＋ 章内
     // 都在），它由**调用方**读盘算好**当值传进来**——`dispatchValues` 的纯函数纪律（不读时钟、不写
@@ -794,7 +932,7 @@ export function dispatchValues(kind, input = {}) {
       edgeLedger: ledger,
       // 票 07：那一格「本章不许写什么」（这一档是**逐章核**：全书那一批剔除集合逐章核一遍）。
       boundary,
-      paths: { report: productFamilyPath('跨章审计'), outline: DOC_PATH.outline, knowledgeMap: DOC_PATH.knowledgeMap, styleSpec: DOC_PATH.styleSpec },
+      paths: { report: productFamilyPath('跨章审计'), outline: DOC_PATH.outline, knowledgeMap: DOC_PATH.knowledgeMap, styleSpec: DOC_PATH.styleSpec, styleLine: DOC_PATH.styleLine },
       route: meta.route ?? 'blueprint',
     }
   }
@@ -852,6 +990,19 @@ export function dispatchSlots(kind, values) {
     'knowledge-map.json 路径': p.knowledgeMap,
     'style-line.md 路径': p.styleLine,
   }
+  // 票 `shared-layer-form-factor/03`：共用层派发模板改成**形态无关的路径槽**。这些槽只给
+  // **真用到它的那一档**（⛔ 不塞进 `common`：一个槽在所有档里都出现，等于把一个错误映射
+  // 藏进别的档的模板里），值仍由本书实际路径填；不改变注入面与模板承重段。
+  const writingPaths = {
+    '知识点清单路径': p.knowledgeMap,
+    '章正文路径': p.chapter,
+    '本章分片路径': p.write,
+  }
+  const auditPaths = {
+    '审计报告路径': p.audit,
+    '章正文路径': p.chapter,
+    '知识点清单路径': p.knowledgeMap,
+  }
   const kindSlots = {
     writing: {
       '金标准章路径': p.gold,
@@ -861,6 +1012,7 @@ export function dispatchSlots(kind, values) {
       '本章源材料小节': matSection,
       '本章知识链位置说明': values.knowledgeChain,
       ...common,
+      ...writingPaths,
     },
     'gold-writing': {
       '章号': values.chapter === null ? null : String(values.chapter),
@@ -868,26 +1020,40 @@ export function dispatchSlots(kind, values) {
       '材料/转换稿 材料路径': matMd,
       '本章源材料小节': matSection,
       '知识链前置小节': values.knowledgeChain,
-      '第 N 章分片路径': p.write,
       ...common,
+      ...writingPaths,
+      '写作规范路径': p.styleSpec,
+      '审计报告路径': p.audit,
     },
     audit: {
       '审计对象：范例章 / 某章 / 附录 / 约束或基础设施文件路径': p.chapter,
       '材料文件': matStem,
       '源文件路径': matMd,
       ...common,
+      ...auditPaths,
     },
-    'gold-audit': { ...common },
+    'gold-audit': { ...common, ...auditPaths },
     // 票 `pre-gold-build/01`：判定那一档的模板只认这一个槽位（读物与路径都在值块里，
     // 模板不重复它们——值块是机器填的那一份）。
     'material-survey': { '材料判定产物路径': MATERIAL_JUDGMENT_REL },
-    'close-reading': { ...common },
+    'close-reading': {
+      ...common,
+      '精读细目路径': p.reading,
+      '分片路径': p.shard,
+      '材料序号': mat === null ? null : String(mat.n),
+    },
     // 票 `knowledge-graph-build/06`：对齐那一档的模板**不带占位符**（它要的值都在值块里：
     // 分片清单、各材料转换稿、合并件落点）⇒ 这一格只给共用文档路径，不给它编槽位。
     'alignment': { ...common },
     // 票 `knowledge-graph-build/13`：审校那一档的模板同样**不带占位符**（图、清单、standing
     // 都在值块里给）⇒ 与对齐那一档同形：只给共用文档路径，不编槽位。
-    'graph-review': { ...common },
+    'graph-review': { ...common, '知识点清单路径': p.knowledgeMap },
+    // 票 `reader-questionnaire-ai-authoring/04`：写卷那一档的模板同样**不带占位符**（合并件、两个交付
+    // 路径、条目清单、字数上限都在值块里给）⇒ 与审校那一档同形：只给共用文档路径，不编槽位。
+    'questionnaire-author': { ...common, '知识点清单路径': p.knowledgeMap },
+    // 票 `reader-questionnaire-ai-authoring/05`：读卷那一档的模板同样**不带占位符**（三件注入、落盘路径、
+    // 交工形状都在值块里给）⇒ 与写卷那一档同形：只给共用文档路径，不编槽位。
+    'questionnaire-analyze': { ...common },
     'cross-audit': {
       '全部章路径清单': (values.chapterPaths ?? []).join('、'),
       'N': values.totalChapters === undefined ? null : String(values.totalChapters),
@@ -895,8 +1061,10 @@ export function dispatchSlots(kind, values) {
       // （本模块**不生成清单**：它由调用方读盘现算，见 `cross-audit-ledger.js`）。
       '逐边清单': typeof values.edgeLedger?.text === 'string' && values.edgeLedger.text !== '' ? values.edgeLedger.text : null,
       ...common,
+      '跨章审计报告路径': p.report,
+      '知识点清单路径': p.knowledgeMap,
     },
-    'final-check': { ...common },
+    'final-check': { ...common, '终检分查报告路径': p.report },
   }
   return kindSlots[spec.kind] ?? {}
 }
@@ -1100,6 +1268,16 @@ export function dispatchValueLines(kind, values) {
   if (values.review !== null && values.review !== undefined) {
     lines.push(...graphReviewValueLines(values.review, { knowledgeMapRel: DOC_PATH.knowledgeMap }))
   }
+  // 票 `reader-questionnaire-ai-authoring/04`：写卷那一档的条目清单与三条字数上限。
+  // ⚠️ 渲染只住一处（`questionnaire-author.js`）：本行不做推导、也不另抄一份清单格式。
+  if (values.author !== null && values.author !== undefined) {
+    lines.push(...questionnaireAuthorValueLines(values))
+  }
+  // 票 `reader-questionnaire-ai-authoring/05`：读卷那一档的三件注入与交工形状。
+  // ⚠️ 渲染只住一处（`questionnaire-analyze.js`）：本行不做推导、也不另抄一份口径。
+  if (values.analyze !== null && values.analyze !== undefined) {
+    lines.push(...questionnaireAnalyzeValueLines(values))
+  }
   // 票 `knowledge-graph-build/11`：跨章审计那一档的逐边清单——
   // ⚠️ 条数那一行是**照抄面**（判「通过」时逐字抄进报告，机器拿它跟自己现算的数对账），
   // 清单正文进模板的 `{{逐边清单}}` 那一格（值一律来自 `dispatchValues()`，本行不做推导）。
@@ -1201,7 +1379,12 @@ export function judgeDispatchPrompt(prompt, input = {}) {
   const stillThere = slotTokens.find((token) => text.includes(token))
   if (stillThere !== undefined) problems.push(`正文里还剩模板的槽位「${stillThere}」——那一格没填上（半份骨架）`)
   // ③ 值块恰一份（两份＝机器和主笔各写了一份值，读者不知道信哪份）。
-  const blocks = text.split(VALUES_BLOCK_HEAD).length - 1
+  // ⚠️ **围栏代码块里的值不算一个值块**（票 `reader-questionnaire-ai-authoring/05`）：
+  // `questionnaire-analyze` 那一档把**当初写卷那份派单原文**当值嵌进来（它是确定性重建，
+  // 自己就带一份值块）——那不是「第二个写点」，是**值**。所以数之前先把围栏块剔掉；
+  // 机器自己那一份值块永远不在围栏里。⚠️ 窄处：有人把真值块写进一个围栏块里，这一句数不出来。
+  const unfenced = text.replace(/```[^\n]*\n[\s\S]*?```/gu, '')
+  const blocks = unfenced.split(VALUES_BLOCK_HEAD).length - 1
   if (blocks !== 1) problems.push(`值块「${VALUES_BLOCK_HEAD}」出现 ${blocks} 次（应恰好 1 次）`)
   // ④ 本章的值逐字在内（读者拿到的就是这一章那一份，不是邻章的）。
   const values = input.values

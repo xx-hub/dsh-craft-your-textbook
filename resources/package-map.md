@@ -26,6 +26,8 @@
 - `resources/references/subagent-prompts/cross-audit-prompt.md`：什么时候该读：合并前派跨章审计小助手时按模板填｜产出：machine
 - `resources/references/subagent-prompts/alignment-prompt.md`：什么时候该读：全部精读分片落盘之后再派对齐小助手时按它填｜产出：machine
 - `resources/references/subagent-prompts/graph-review-prompt.md`：什么时候该读：派图审校小助手时按它填｜产出：machine
+- `resources/references/subagent-prompts/questionnaire-author-prompt.md`：什么时候该读：探查交工之后、发卷之前派写卷小助手时按它填｜产出：machine
+- `resources/references/subagent-prompts/questionnaire-analyze-prompt.md`：什么时候该读：问卷回卷件落盘之后派读卷小助手时按它填｜产出：machine
 - `resources/references/workflow-scripts/chapter-audit.md`：什么时候该读：审计那一跳要调 workflow 时｜产出：machine
 - `resources/references/anti-patterns.md`：什么时候该读：关卡交办里点名它时、或要判某句话是不是流程级反模式时｜产出：machine
 - `resources/references/depth.md`：什么时候该读：判某一条知识点的讲授深度档位时｜产出：machine

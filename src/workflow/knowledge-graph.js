@@ -16,8 +16,8 @@
  *
  * 48 版原型读边时写的是 `e.kind ?? 'prereq'`——于是「查环只走 `prereq`」这句话**声称的边集
  * 就悄悄变宽**：任何一条 kind 缺省的边都被当成前置边进了查环。实测盘上那份
- * `.scratch/knowledge-map-v2/map-whole.json`：53 条边里 **47 条没有 `kind`**、6 条是 `see-also`
- * （取样：`node -e "const a=require('./.scratch/knowledge-map-v2/map-whole.json');console.log(a.edges.length,a.edges.filter((e)=>e.kind===undefined).length)"`）。
+ * `.scratch/_archive/2026-11/knowledge-map-v2/map-whole.json`：53 条边里 **47 条没有 `kind`**、6 条是 `see-also`
+ * （取样：`node -e "const a=require('./.scratch/_archive/2026-11/knowledge-map-v2/map-whole.json');console.log(a.edges.length,a.edges.filter((e)=>e.kind===undefined).length)"`）。
  * 「缺省即前置」在这一份上是**差不多对**的，正因为它对，这个默认值才危险：它让边集的口径
  * 藏在**数据**里，而读代码的人以为口径写在**代码**里。⇒ 本模块**不设默认值**：
  *   · **报告面** {@link prereqShapeProblems} 把「kind 缺失」当成一条要报的问题（`edge-kind-missing`）

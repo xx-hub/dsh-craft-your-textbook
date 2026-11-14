@@ -173,6 +173,52 @@ export const S = {
 	},
 	checkItem: { display: "block", margin: "4px 0", fontSize: "13px" },
 	bar: { display: "flex", gap: "4px", margin: "0 0 12px" },
+	/**
+	 * 焦点卡**最后那一行动作键**（主推进键那一行）的常驻带（票 `walkthrough-fixes/38`）。
+	 *
+	 * ## 它治的是什么
+	 *
+	 * 站 2 读材料那屏（`demo-phase-2`）与站 8 范例章那屏（`demo-phase-4`）的**初始、不滚动**读数里，
+	 * 主推进键整颗落在焦点区可视带**之下**（1280×720、亮暗一致：`data-explore-confirm` 键顶距带顶
+	 * 914px／`data-gold-approve` 679.7px，而带高只有 425.5px）。走查的判据是「主推进键整颗在带内」，
+	 * 于是那两屏每主题各一条红（票 `walkthrough-fixes/38` 的 gate）。
+	 *
+	 * 实测**靠削内容治不了**：要把那颗键整颗塞进 425.5px 的带里，得把它上方的内容削掉
+	 * **527.5px**（站 2）／**293.1px**（站 8）——而站 2 上方那块正是 spec §2.3 第 4 块的「知识点图·清单」
+	 * （349px）、站 8 上方正是 §2.7 第 6 块「正文（首屏，不折叠）」（426px）⇒ 削它们就是推翻 spec。
+	 *
+	 * ## ⛔ 它不是票 18 删掉的那条「吸底决策条」
+	 *
+	 * 票 20 当年在焦点区**底部另起一条**，条上是卡内那颗键的**副本**——同一动作同屏两颗，用户原话
+	 * 「满意的那行位置不对」，2026-10-04 整条删掉（`walkthrough-fixes/18`）。本格**不新增任何可点区域**：
+	 * 它盖的是卡内**本来那一行**（同一颗 `<button>`、同一句文案、同一个 `onClick`），只是让这一行在
+	 * 卡片滚动时贴在带底。**「同一个放行动作同屏只许一颗键」那条判据照旧成立**（判据在
+	 * `test-layout-anchors.mjs` 与 `test-workbench-first-screen.mjs`）。
+	 * ⛔ 也不是「把卡自动滚进去」（票 20 的方向二，已否）：那会把正在读报告/读稿的用户一把拽到
+	 * 几千字下面，而底对齐正是「键在卡最下面」时唯一能把它带进来的对齐方式（同上那条票面理由）。
+	 *
+	 * ## 三条落地口径
+	 *
+	 * ① **底色必须不透明**：`var(--dsw-alias-state-business-tertiary)` ＝ 焦点卡（`S.focus`）自己的底色，
+	 *    所以贴上去时看不出第二层，也**不会漏出**从它下面滚过的正文（透明会让字透上来，正是
+	 *    `.scratch/ad-strip-occlusion/` 那一族治的形状）。
+	 * ② **上下各 8px 内边距**归这一格：贴住时按钮不贴带边，滚过去时那段留白也是它自己的底。
+	 * ③ **装得下时它什么也不做**：内容没超出一屏 ⇒ `bottom:0` 的 sticky 元素就停在自然位置，
+	 *    不产生任何位移（不靠 JS 判「要不要吸」，也就不存在「哪一帧算超出」这种第二套判据）。
+	 *
+	 * ⚠️ 真几何（贴住之后键落在带内、有没有压住别的可点键）**node 侧量不到**——它由
+	 * `node scripts/walkthrough.mjs --screens=demo-phase-2,demo-phase-4` 在真浏览器里逐颗判；
+	 * 本格只给数据，不声称量过。
+	 */
+	stickyActions: {
+		position: "sticky",
+		bottom: 0,
+		// 与宿主那几处 sticky 小条同一档（`panels.js` 的提示条 / `chat-desk.js` 的输入区都是 20）：
+		// 这一行要压在自己卡内滚过去的正文之上，但**不许**盖到卡外的顶栏与底部小条。
+		zIndex: 20,
+		background: "var(--dsw-alias-state-business-tertiary)",
+		padding: "8px 0",
+	},
 	seg: (state) => ({
 		flex: 1,
 		borderRadius: "6px",

@@ -1090,7 +1090,7 @@ export function GoldFinalize(props) {
 			createElement(
 				"p",
 				{ style: { margin: "0 0 4px", fontSize: "12px", opacity: 0.8 } },
-				"逐章目标（单位：汉字；来自章节安排，只在写完整本开始前可调）：",
+				"逐章至少写到（单位：汉字；来自章节安排，只在写完整本开始前可调。这是最低线，写多不限——最后检查只判有没有达到，不判超了多少）：",
 			),
 			chapters.map((chapter, index) => {
 				const n = index + 1;
@@ -1847,7 +1847,16 @@ export function GoldDraftStage(props) {
 		// 原先分挂两颗的按键盘理由**整段删除**——禁用的唯一解释是顶部那条 fact line。
 		createElement(
 			"div",
-			{ style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } },
+			// 票 `walkthrough-fixes/38`：这两颗（就用这一稿／不满意重写）是站 8 的**主推进键行**——
+			// 它跟着卡片滚，而站 8 的正文（spec §2.7 第 6 块「首屏、不折叠」426px）一铺，初始不滚动时
+			// 主键就整颗落在焦点区可视带下方（实测键顶距带顶 679.7px、带高 425.5px）。
+			// ⇒ 用公共那一格 `S.stickyActions` 贴住带底。
+			// ⚠️ 同屏**不新增**任何可点区域：贴上来的就是**本来这两颗**（同一颗 `<button>`、同一句文案、
+			// 同一个 `onClick`），只是让这一行在卡滚时停在带底。⛔ 不是票 18 删掉的那条「在卡外另起一条、
+			// 条上放同名副本」的吸底条——「同一个放行动作同屏只许一颗键」那条判据照旧成立。
+			// 口径与「为什么不是把卡自动滚进去」（底对齐会把读稿的用户拽到几千字下面）写在 `styles.js`
+			// 的 `stickyActions` 头注释里。
+			{ style: { ...S.stickyActions, display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } },
 			createElement(
 				"button",
 				{

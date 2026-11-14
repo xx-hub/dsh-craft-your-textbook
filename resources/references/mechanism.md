@@ -5,9 +5,9 @@
 ## 工具面
 - 共 2 个工具；参数键取自注册后的定义，不执行 execute、不联网。
 - `workbench_status`：查看造书工作台当前的真实状态：有没有书、进行到第几步、机器在等谁、当前交给你 AI 的任务（pendingStage）、是否在等你拍板、抽查意见、各章进度、书…；参数：无
-- `workbench_act`：与造书工作台交互；参数：`action`、`approved`、`auditJson`、`chapter`、`chapterSuggestion`、`chaptersJson`、`detail`、`dispatchKind`、`gate`、`goal`、`goals`、`goldChapter`、`goldChapterReason`、`handledReviews`、`hint`、`id`、`item`、`key`、`kind`、`label`、`material`、`maxConcurrentSubagents`、`name`、`note`、`para`、`preface`、`readerSlices`、`reason`、`redoCheck`、`redoItems`、`report`、`route`、`science`、`scope`、`segment`、`shard`、`snapshot`、`source`、`stage`、`styleCheck`、`summary`、`target`、`teachingFocus`、`text`、`title`、`userNote`、`verdict`、`verdictReason`、`version`、`waivedPoints`、`wish`
-- 动作目录（listContractActions()）共 53 项：AI 可调用 36 项（`agentCallable=true`）；AI 不可调用 17 项：`wizard-suggest`、`convert-start`、`retry-convert`、`source-remove`、`skip-step`、`gold-target-words-set`、`review`、`review-revoke`、`suggest-words`、`pattern-analyze`、`pattern-list`、`settings`、`demo-run`、`debug-spawn`、`knowledge-graph-backfill`、`reader-questionnaire-issue`、`reader-questionnaire-submit`。
-- `workbenchExposure` 三档：`callable` 34 项、`read-only` 1 项、`null` 18 项；`null` ＝「不在工作台直调面」。
+- `workbench_act`：与造书工作台交互；参数：`action`、`approved`、`auditJson`、`chapter`、`chapterSuggestion`、`chaptersJson`、`detail`、`dispatchKind`、`gate`、`goal`、`goals`、`goldChapter`、`goldChapterReason`、`handledReviews`、`hint`、`id`、`item`、`key`、`kind`、`label`、`material`、`maxConcurrentSubagents`、`name`、`note`、`para`、`preface`、`readerQuestionnaire`、`readerSlices`、`reason`、`redoCheck`、`redoItems`、`report`、`route`、`science`、`scope`、`segment`、`shard`、`snapshot`、`source`、`stage`、`styleCheck`、`summary`、`target`、`teachingFocus`、`text`、`title`、`userNote`、`verdict`、`verdictReason`、`version`、`waivedPoints`、`wish`
+- 动作目录（listContractActions()）共 54 项：AI 可调用 37 项（`agentCallable=true`）；AI 不可调用 17 项：`wizard-suggest`、`convert-start`、`retry-convert`、`source-remove`、`skip-step`、`gold-target-words-set`、`review`、`review-revoke`、`suggest-words`、`pattern-analyze`、`pattern-list`、`settings`、`demo-run`、`debug-spawn`、`knowledge-graph-backfill`、`reader-questionnaire-issue`、`reader-questionnaire-submit`。
+- `workbenchExposure` 三档：`callable` 34 项、`read-only` 1 项、`null` 19 项；`null` ＝「不在工作台直调面」。
 - 「需用户明确同意」今天不是动作目录的声明字段（它散在个别动作的约束散文里），本投影不替你判。
 
 ## 阶段表
@@ -37,7 +37,7 @@
 - 缺口不抹平：`goal` 出现在某些声明面、却不在工具 stage 枚举里；本投影不替它选边。
 
 ## 产物路径
-- 产物族（16）：
+- 产物族（17）：
   - 写作规范 → `工作区/style-spec.md`（producer=ai、scope=book、disclose=pointer）
   - 章节安排 → `工作区/outline.md`（producer=machine、scope=book、disclose=pointer）
   - 章节正文 → `工作区/chapter-{n}.md`（producer=machine、scope=chapter、disclose=pointer）
@@ -48,6 +48,7 @@
   - 报告 → `工作区/报告/*`（producer=subagent、scope=book、disclose=pointer）
   - 探查报告 → `工作区/explore.md`（producer=ai、scope=book、disclose=pointer）
   - 知识地图 → `工作区/knowledge-map.json`（producer=machine、scope=book、disclose=pointer）
+  - 知识结构 → `工作区/知识结构.md`（producer=machine、scope=book、disclose=pointer）
   - 知识地图分片 → `工作区/knowledge-map-{n}.json`（producer=subagent、scope=book、disclose=pointer）
   - 章审计 → `工作区/audit-{n}.md`（producer=subagent、scope=chapter、disclose=pointer）
   - 审计读数 → `工作区/审计读数.json`（producer=machine、scope=book、disclose=never）
@@ -94,10 +95,10 @@
 - 尾段只是尾段，权威是 `runQualityChecks`；条件项与 style-spec 追加的 0–2 项不在名单里。
 
 ## 派发
-- 派发档（10）：`writing`、`gold-writing`、`audit`、`gold-audit`、`material-survey`、`close-reading`、`alignment`、`graph-review`、`cross-audit`、`final-check`
-- 模板落点（`dispatchKindSpec(kind).shapeRel`）：`writing`→`references/subagent-prompts/writing-agent-prompt.md`、`gold-writing`→`references/subagent-prompts/gold-writing-agent-prompt.md`、`audit`→`references/subagent-prompts/audit-agent-prompt.md`、`gold-audit`→`references/subagent-prompts/gold-audit-prompt.md`、`material-survey`→`references/subagent-prompts/material-survey-prompt.md`、`close-reading`→`references/subagent-prompts/close-reading-prompt.md`、`alignment`→`references/subagent-prompts/alignment-prompt.md`、`graph-review`→`references/subagent-prompts/graph-review-prompt.md`、`cross-audit`→`references/subagent-prompts/cross-audit-prompt.md`、`final-check`→`references/audit-and-testing.md`
-- 这十档的派单正文由机器按模板代填（`workbench_act(action=agent-assign, dispatchKind=…)`）。
-- 主笔可调用动作（36）：`create`、`rename`、`set_goal`、`set-knobs`、`delete`、`nudge`、`resume`、`gate`、`explore-confirm`、`outline-confirm`、`chapters-review-confirm`、`final-approve`、`final-redo-items`、`rollback`、`gold-opinion`、`gold-opinion-revoke`、`gold-revise`、`gold-chapter-set`、`gold-draft-approve`、`gold-approve`、`deep-modify`、`deep-undo`、`style-note`、`style-note-revoke`、`intervene`、`intervene-done`、`waive`、`waive-revoke`、`pause`、`graph-opinion`、`audit-submit`、`chapter-assemble`、`stage-submit`、`stage-brief`、`agent-assign`、`progress`
+- 派发档（12）：`writing`、`gold-writing`、`audit`、`gold-audit`、`material-survey`、`close-reading`、`alignment`、`graph-review`、`questionnaire-author`、`questionnaire-analyze`、`cross-audit`、`final-check`
+- 模板落点（`dispatchKindSpec(kind).shapeRel`）：`writing`→`references/subagent-prompts/writing-agent-prompt.md`、`gold-writing`→`references/subagent-prompts/gold-writing-agent-prompt.md`、`audit`→`references/subagent-prompts/audit-agent-prompt.md`、`gold-audit`→`references/subagent-prompts/gold-audit-prompt.md`、`material-survey`→`references/subagent-prompts/material-survey-prompt.md`、`close-reading`→`references/subagent-prompts/close-reading-prompt.md`、`alignment`→`references/subagent-prompts/alignment-prompt.md`、`graph-review`→`references/subagent-prompts/graph-review-prompt.md`、`questionnaire-author`→`references/subagent-prompts/questionnaire-author-prompt.md`、`questionnaire-analyze`→`references/subagent-prompts/questionnaire-analyze-prompt.md`、`cross-audit`→`references/subagent-prompts/cross-audit-prompt.md`、`final-check`→`references/audit-and-testing.md`
+- 这 12 档的派单正文由机器按模板代填（`workbench_act(action=agent-assign, dispatchKind=…)`）。
+- 主笔可调用动作（37）：`create`、`rename`、`set_goal`、`set-knobs`、`delete`、`nudge`、`resume`、`gate`、`explore-confirm`、`outline-confirm`、`chapters-review-confirm`、`final-approve`、`final-redo-items`、`rollback`、`gold-opinion`、`gold-opinion-revoke`、`gold-revise`、`gold-chapter-set`、`gold-draft-approve`、`gold-approve`、`deep-modify`、`deep-undo`、`style-note`、`style-note-revoke`、`intervene`、`intervene-done`、`waive`、`waive-revoke`、`pause`、`graph-opinion`、`audit-submit`、`chapter-assemble`、`stage-submit`、`stage-brief`、`agent-assign`、`progress`、`reader-questionnaire-analyze`
 - 用户操作、AI 不可调用的 17 个动作见 §工具面。
 
 ## 窄处

@@ -35,6 +35,27 @@
  *      或环境里根本没有定时器）⇒ 视为挂死，下一轮照常起飞；旧的那一轮由 epoch 挡住。
  *      **单飞照旧**（决策 10）：没超上限时第二个 tick 仍然直接返回。
  *    `now` 可注入（默认 `Date.now`）：判据拿它把 60 秒那一格走到，⛔ 不真等。
+ *
+ * ## 票 `ui-systematic-fixes/13`：接管另一本也要有信号（ADR-0021 决策 13 修订）
+ *
+ * 身份失效后 `discoverAndReadCore` 会按**既有发现顺序**接管同会话的另一本——`readCore` 成功
+ * 那条路从前只把 `onIdentityLost(null)` 送出去，壳因此**分不出**「清空回空态」与「换了一本」，
+ * 屏上也就一句话都没有（用户只看到书名换了）。现在接管**完成**（新身份落下且它的 core 真读
+ * 回来）时另送一次 `onIdentityTakeover({ from, to, name })`：
+ *   · `from`：刚失效那一本的 projectId（失效信号里带过来的那个，不是猜的）；
+ *   · `to`：接管到的新身份；
+ *   · `name`：接管到那一本的显示名（优先取刚读回来那份 core 的 `meta.name`——与屏上「📖 X」
+ *     是同一格；core 没给才退回书单里的 `name`）。两边都没给就是空串（壳不许把 `undefined`
+ *     或一对空书名号印上屏）。
+ *
+ * 三条边界（⛔ 都不是可选项）：
+ *   · **不改发现顺序、不拦接管**：ADR-0021 决策 13 的「按既有顺序选择当前书」一个字没动，
+ *     这里只加可观察性（裁决是「告知（不拦）」，见票 13）。
+ *   · **只送「机器替你做主」的那一帧**：初始发现、显式 `refresh()`／`selectProject(...)`
+ *     （用户自己点的那条路）都不送——否则「用户点了一下」也会被说成「机器换了一本」。
+ *   · **不进 snapshot**：理由与 `onIdentityLost` 同一条（`test-ui-state-gallery-shape.mjs`
+ *     逐字段比夹具录下的顶层键集，多一个键＝每一份录制基线当场过期）。也不加第 7 个公开方法。
+ *     ⛔ 文案不在这一层（ADR-0021 决策 16）：这里只送**事实**。
  */
 
 const POLL_INTERVAL_MS = 2000
@@ -419,6 +440,7 @@ export function createBookProjection({
   now = () => Date.now(),
   readTimeoutMs = READ_TIMEOUT_MS,
   onIdentityLost = null,
+  onIdentityTakeover = null,
 }) {
   if (typeof sessionId !== 'string' || sessionId === '') {
     throw new TypeError('createBookProjection 需要 sessionId')
@@ -445,6 +467,9 @@ export function createBookProjection({
   }
   if (onIdentityLost !== null && typeof onIdentityLost !== 'function') {
     throw new TypeError('createBookProjection 的 onIdentityLost 必须是函数或 null')
+  }
+  if (onIdentityTakeover !== null && typeof onIdentityTakeover !== 'function') {
+    throw new TypeError('createBookProjection 的 onIdentityTakeover 必须是函数或 null')
   }
 
   // instance 的 sessionId 构造后不变：切会话靠卸载旧 instance、建新 instance（决策 2）。
@@ -492,6 +517,31 @@ export function createBookProjection({
       onIdentityLost(next)
     } catch {
       /* 回调自己的问题不归 module 管（与 listener 同一条口径） */
+    }
+  }
+
+  /**
+   * 把「机器替你做主，换了一本」这件事送出去（⛔ 不进 snapshot，见文件头票 13 那一节）。
+   *
+   * `name` 取**刚读回来那一份 core 的 `meta.name`**（屏上「📖 X」印的同一格），core 没给才退回
+   * 书单里那一本的 `name`；两边都没有就是空串——壳那一侧要拼一句人话，⛔ 不许它自己猜、
+   * 也⛔ 不许 `undefined`／一对空书名号上屏。
+   * 不去重：每一次接管都是**新发生的一件事**（壳按自己那份「这一帧还显示吗」的状态管告知）。
+   */
+  function reportIdentityTakeover({ from, to }) {
+    if (onIdentityTakeover === null) return
+    // 书名取**刚读回来的那一份 core**（`meta.name`）——那正是屏上「📖 X」印的那一格，
+    // 告知与标题因此不会各说一本。书单里的 `name` 只是退路（core 没给名字时用它）。
+    const coreName = state.core.data?.meta?.name
+    const picked = state.projects.find((project) => project.id === to)
+    const fromCore = typeof coreName === 'string' ? coreName.trim() : ''
+    const fromList =
+      picked !== undefined && typeof picked.name === 'string' ? picked.name.trim() : ''
+    const name = fromCore !== '' ? fromCore : fromList
+    try {
+      onIdentityTakeover(Object.freeze({ from, to, name }))
+    } catch {
+      /* 同上：回调自己的问题不归 module 管 */
     }
   }
 
@@ -720,7 +770,11 @@ export function createBookProjection({
   async function discoverAndReadCore(exclude = null) {
     const discovered = await readProjects({ discover: true, exclude })
     if (!discovered) return
-    if (await readCore('full')) startSidecars()
+    if (!(await readCore('full'))) return
+    // 票 `ui-systematic-fixes/13`：`exclude` 非空 ⇒ 这一趟是**刚失效那一本的重新发现**，
+    // 真读回来另一本才算「接管发生」。初始发现（exclude 为 null）与轮询走的那条路不送。
+    if (exclude !== null) reportIdentityTakeover({ from: exclude, to: state.projectId })
+    startSidecars()
   }
 
   async function refresh() {

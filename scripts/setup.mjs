@@ -227,28 +227,58 @@ export function isWindowsShimBin(bin, platform = process.platform) {
 }
 
 /** 带 shell 元字符的 bin → 拒绝执行。返回人话原因，不抛。 */
-function rejectReasonOf(bin) {
+export function rejectReasonOf(bin) {
   return /[&|<>^%!()"\n\r]/u.test(String(bin))
-    ? `dsh 命令路径里有 shell 元字符，拒绝执行：${bin}`
+    ? `命令路径里有 shell 元字符，拒绝执行：${bin}`
     : null
 }
 
-/** 一处 shell 引号：参数里可能有空格（`--profile` 的值、路径），不做引号就会被拆成两个词。 */
-function quoteForShell(value) {
-  return `"${String(value).replace(/"/gu, '""')}"`
+/**
+ * 一处 shell 引号：参数里可能有空格（`--profile` 的值、路径），不做引号就会被拆成两个词。
+ *
+ * ⚠️ **没有需要转义的字符就一个引号都不加**（2026-11-13 实测，票 `release-check/02` 的收口 findings）：
+ * 给 bin 无条件加引号（`"npm.cmd" "--version"`）会让 cmd.exe 把那条 shim 的 `%~dp0` 解析成
+ * **当前目录**，于是 npm 去找 `<cwd>\node_modules\npm\bin\npm-prefix.js` 并报 `Cannot find module`。
+ * `dsh.cmd` 恰好不看 `%~dp0` 之外的东西、所以没暴露，而 `npm.cmd` 一加引号就换了个身体。
+ * 判据是「这个 token 有没有 shell 会误解的字符」——**不猜**，有就整串加引号，没有就原样。
+ */
+export function quoteForShell(value) {
+  const text = String(value)
+  if (!/[\s"]/u.test(text)) return text
+  return `"${text.replace(/"/gu, '""')}"`
 }
 
-/** 宿主 CLI 的唯一出口：拒绝判定与 Windows shim 判定都在这里，别处不许直接 spawn。 */
-function spawnHost(bin, args, spawnOptions = {}) {
+/**
+ * shim 的**唯一出口**：拒绝判定与 Windows shim 判定都在这里，别处不许直接 spawn 一个 `.cmd`／`.bat`。
+ *
+ * ⚠️ **2026-11-13：出口从「本文件的私有函数」变成导出面**（票 `release-check/02` 的收口 findings）。
+ * 上一段自述的纪律当时只管住了安装器自己；新写的 `scripts/release-check.mjs` 又长了**两处**
+ * 裸 `spawnSync('npm.cmd', …)`，于是「模式声明闸」与「在线版本」两格在 Windows 上被记成
+ * `未取证`（读数 `没跑完：EINVAL`／`npm 起不来：EINVAL`），而在 Linux 上同一份代码是绿的。
+ * 判据本身没变（下面那三条），变的只是**够得着它的范围**：安装器、发布脚本、汇总器都从这里取。
+ * 「不许另写一处」这条纪律现在有机器读数——`test/test-release-check.mjs` 那格扫
+ * `scripts/**` 的裸 `spawnSync(` 面（面窄处写在那一格的注释里）。
+ */
+export function spawnShim(bin, args, spawnOptions = {}) {
   const rejected = rejectReasonOf(bin)
   if (rejected !== null) {
-    return { error: Object.assign(new Error(rejected), { code: 'host-cli-rejected' }) }
+    return { error: Object.assign(new Error(rejected), { code: 'shell-unsafe-bin' }) }
   }
   if (!isWindowsShimBin(bin)) return spawnSync(bin, args, spawnOptions)
   // 走 shell 时**自己把命令行拼好并逐个加引号**，而不是把 args 数组交给 Node：
   // ① 那样会触发 DEP0190（args 不转义、直接拼接），用户终端上多一行安全警告；
   // ② 参数里的空格会被拆成两个词（`--profile` 的值、含空格的路径都会中招）。
   return spawnSync([bin, ...args].map(quoteForShell).join(' '), { ...spawnOptions, shell: true })
+}
+
+/** 宿主 CLI 走的就是同一个出口（名字留在这里，是因为调用方与判据都按这个名字读）。 */
+function spawnHost(bin, args, spawnOptions = {}) {
+  return spawnShim(bin, args, spawnOptions)
+}
+
+/** `npm` 这个 bin 的平台名：Windows 上只有 `.cmd` 那一层 shim。 */
+export function npmBinary(platform = process.platform) {
+  return platform === 'win32' ? 'npm.cmd' : 'npm'
 }
 
 function spawnHostCli(bin, args, spawnOptions = {}) {

@@ -47,7 +47,7 @@
  * @property {object} ctx        宿主上下文。`ctx.get` 的读取点按**文件路径**登记在宿主契约门禁里
  *                               （`dev/host-contract-gate/catalog/web-chat.js` 的 `dynamicHostEntries`
  *                               ＋ `web-target.js` 按路径扫源码），**本票一个都不挪**。
- * @property {string} action      规范动作名（`src/contract-actions.js` 的 <!--r:catalog.canonical-->53<!--/r--> 个之一）。
+ * @property {string} action      规范动作名（`src/contract-actions.js` 的 <!--r:catalog.canonical-->54<!--/r--> 个之一）。
  * @property {string} sessionId   会话身份，已过 `requireSession`（非空）。
  * @property {string|undefined} project 书夹 id；`no-book` 的动作上它可以是 undefined。
  * @property {object} body        `readBody(req)` 之后那一份，**原样透传**：实现继续读

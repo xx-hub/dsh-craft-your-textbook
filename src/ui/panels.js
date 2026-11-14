@@ -186,6 +186,52 @@ export function StatusStrip(props) {
 	);
 }
 
+/**
+ * **接管了另一本**那一帧的状态条告知（票 `ui-systematic-fixes/13`，ADR-0021 决策 13 修订）。
+ *
+ * 它就在状态条那一格、同一行（裁决 2026-10-29：状态条一行、可关、**不拦**接管）：
+ * ⛔ 不是 toast、⛔ 不是确认框、⛔ 不是第四个状态词。文案的唯一出处是
+ * `surface.js` 的 `identityTakeoverNotice(name)`（⛔ 本组件不拼那句话）。
+ *
+ * 「可关」的判据（票 13 的 brief 第 2 条）：点掉之后**这一帧**不再出现；下一次接管再出现
+ * ——「这一帧」与「下一次」由壳按接管事件记（本组件只把 `onClose` 递出去，不自己记状态：
+ * 记在这里会跟着 `bookKey` 重挂，下一次接管就再也亮不起来）。
+ */
+export function IdentityTakeoverNote(props) {
+	const { text, onClose } = props;
+	if (typeof text !== "string" || text === "") return null;
+	return createElement(
+		"div",
+		{
+			role: "status",
+			// 走查器与判据都按这一个属性认这一条（⛔ 与自动跟随横幅共用 `data-auto-follow`）。
+			"data-identity-takeover": "1",
+			style: {
+				display: "flex",
+				alignItems: "center",
+				gap: "8px",
+				margin: "0 0 10px",
+				padding: "8px 12px",
+				borderRadius: "8px",
+				fontSize: "13px",
+				background: "var(--dsw-alias-state-warn-tertiary)",
+				border: "1px solid #d4a72c",
+			},
+		},
+		createElement("span", { style: { flex: 1 } }, text),
+		createElement(
+			"button",
+			{
+				type: "button",
+				style: S.smallLink,
+				title: "关掉这条告知（只是不再显示，不会换回那本书）",
+				onClick: onClose,
+			},
+			"✕",
+		),
+	);
+}
+
 // ── 主 AI 活性行（F17）：AI 回合进行中 / N 分钟没动静了 [🔁 从断点继续] / 轮到你 ─────
 
 /**
@@ -251,20 +297,30 @@ export function ActivityLine(props) {
 								"span",
 								null,
 								idlePrefix,
-								createElement(
-									"button",
-									{
-										style: S.smallLink,
-										onClick: onResume,
-										// 票 stale-detection/01：原来那颗写着「让 AI 接着干」、做的只是「催一句」
-										// （标签与动作本身对不上），而且没有活着的主 AI 时直接报错。
-										// 现在发「从断点继续」：会写状态、清暂停标记、必要时重新交办，
-										// 没有活的主 AI 时还能退回推状态机这条路。
-										title:
-											"让 AI 从断点接着做完这一步（不重做已完成的部分；它没在跑时也能把它叫起来）",
-									},
-									"🔁 从断点继续",
-								),
+								// 票 `real-machine-walkthrough-20261114/05`：**有子助手在跑时不摆那颗键**。
+								// 真机那一屏同时写「5 个小助手在跑」与「8 分钟没动静了 🔁 从断点继续」——
+								// 两颗事实各自成立，但「从断点继续」在有人干活时点下去会与正在跑的子助手
+								// 撞车（重复派章、重复写）。⇒ 这一档只说「在等谁」，不给那颗键。
+								(runs.runningCount > 0 || (stall ?? {}).subagentsRunning === true)
+									? createElement(
+											"span",
+											{ title: "它们还在写，等它们交回再判断要不要继续" },
+											`· 等 ${Math.max(runs.runningCount, 1)} 个小助手交回`,
+										)
+									: createElement(
+											"button",
+											{
+												style: S.smallLink,
+												onClick: onResume,
+												// 票 stale-detection/01：原来那颗写着「让 AI 接着干」、做的只是「催一句」
+												// （标签与动作本身对不上），而且没有活着的主 AI 时直接报错。
+												// 现在发「从断点继续」：会写状态、清暂停标记、必要时重新交办，
+												// 没有活的主 AI 时还能退回推状态机这条路。
+												title:
+													"让 AI 从断点接着做完这一步（不重做已完成的部分；它没在跑时也能把它叫起来）",
+											},
+											"🔁 从断点继续",
+										),
 							)
 						: null;
 	// 轮到用户、又没有子代理聚合 → 整行不出现（状态条已经说了「⚡ 轮到你」）。
@@ -1005,8 +1061,8 @@ export function ReaderQuestionnairePanel(props) {
 		createElement(
 			"p",
 			{ style: { margin: "6px 0", fontSize: "12px", opacity: 0.75, lineHeight: 1.6 } },
-			"给收卷人的是一份 .md：可以打印出来手写、可以在电脑上直接改、也可以口头让人代填。"
-				+ "填完把整段文字粘回下面这个框——多长都行，跑题、只答一半也可以。",
+			"给收卷人的是一份 .md（电子填，只此一条路）：下载下来、把该勾的勾上、要说的写在题下，"
+				+ "再全选复制粘回下面这个框——多长都行，跑题、只答一半也可以。",
 		),
 		// ── 发卷键（三态常显；下载只在发过卷/已有回卷时出现）──────────────────────────
 		createElement(

@@ -562,7 +562,7 @@ function handleDownload(req, res) {
  * 渲染的是 `dsh-tool-ask-user`（工具名 `ask_user_question`）的 schema。答案**本来留痕了**，
  * 只留在宿主会话档案里；书账本里查不到，那才是这一票要补的通路。
  *
- * **为什么是新端点而不是新动作**：契约面动作目录（`src/contract-actions.js`）的 <!--r:catalog.canonical-->53<!--/r--> 个规范动作里
+ * **为什么是新端点而不是新动作**：契约面动作目录（`src/contract-actions.js`）的 <!--r:catalog.canonical-->54<!--/r--> 个规范动作里
  * 没有任何一个的语义是「记下用户答了什么」——硬套 `intervene`（留言）会让账本说「稍后处理」，
  * 而用户答完那一刻 AI 正在等这个答案，说法就是假的。动作身份归目录，目录不归本票改。
  *

@@ -903,7 +903,15 @@ export function ExploreConfirmCard(props) {
 				)
 			: createElement(
 					"div",
-					{ style: { display: "flex", gap: "8px", flexWrap: "wrap" } },
+					// 票 `walkthrough-fixes/38`：这三颗（确认／重做／看完整报告）是**这一屏的主推进键行**——
+					// 它们跟着卡片滚，卡片一高出焦点区可视带，主推进键就整颗掉到带外（实测键顶距带顶 914px、
+					// 带高只有 425.5px）。⇒ 用公共那一格 `S.stickyActions` 贴住带底。
+					// ⚠️ 同屏**不新增**任何可点区域：贴上来的就是**本来这三颗**，只是让这一行在卡滚时停在带底。
+					// ⛔ 不是票 18 删掉的那条「在卡外另起一条、条上放同名副本」的吸底条（同屏两颗同名键）。
+					// 口径与「为什么不是把卡自动滚进去」写在 `styles.js` 那一格的头注释里。
+					// ⚠️ 本票只给站 2 这一屏上（票 20 那句「不要一次改全部」照旧成立）：章节安排那一张（本文件
+					// 后面 `OUTLINE_CONFIRM_ACCEPT_LABEL` 那一支）不动。
+					{ style: { ...S.stickyActions, display: "flex", gap: "8px", flexWrap: "wrap" } },
 					createElement(
 						"button",
 						{

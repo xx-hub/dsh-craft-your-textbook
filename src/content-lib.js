@@ -109,6 +109,11 @@ const DEMO_MARK = "【演示内容 · 仅用于熟悉流程，非真实产出】
  * 派发一个一次性子代理，返回其最终文本。
  * runtime: { ctx, demo, dir, project, getParent }
  * timeoutMs：单任务硬超时（默认 30 分钟——P2-10 从 15 分钟放宽，避免长章写作被硬超时打断；超时自动报错）。
+ *
+ * ⚠️ 接口（0.2.1 起）：宿主把小助手起法统一成 `startActivation({ provider, label, request, signal, delivery })`。
+ * 这一档是**一次性**的：`delivery: 'caller'` 表示结果只回到调用方（这里 `await activation.result`），
+ * 不通知模型；跑完由调用方 `dispose()` 释放。续接型那一支（报告回直接父级）见
+ * `src/workflow/actions/chapters.js` 的派单／读卷两跳。
  */
 async function runSubagent(
 	runtime,
@@ -117,14 +122,18 @@ async function runSubagent(
 	timeoutMs = 30 * 60 * 1000,
 ) {
 	const parent = await runtime.getParent();
-	const run = await runtime.ctx.subagents.start("spawn", {
+	const activation = await runtime.ctx.subagents.startActivation({
+		provider: "spawn",
 		label,
-		prompt: [{ type: "text", text: promptText }],
-		parent,
+		request: {
+			prompt: [{ type: "text", text: promptText }],
+			parent,
+		},
 		signal: AbortSignal.timeout(timeoutMs),
+		delivery: "caller",
 	});
 	try {
-		const result = await run.result;
+		const result = await activation.result;
 		if (result.stopReason !== "completed") {
 			const tail = result.output
 				.filter((block) => block.type === "text")
@@ -144,7 +153,7 @@ async function runSubagent(
 		if (text === "") throw new Error("子代理没有产出文本");
 		return text;
 	} finally {
-		await run.dispose();
+		await activation.dispose();
 	}
 }
 

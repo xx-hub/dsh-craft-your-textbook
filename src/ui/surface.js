@@ -136,6 +136,23 @@ const READ_FAILED_LIST_TEXT = "书单这次没读回来。可以重试，重试�
 const IDENTITY_LOST_TEXT =
 	"刚才那本书打不开了：它可能已被删除，或者不属于当前会话。盘上若还在，重试就能读回来。";
 
+/**
+ * **接管了另一本**那一帧的状态条告知（票 `ui-systematic-fixes/13`，ADR-0021 决策 13 修订）。
+ *
+ * 2026-10-29 的裁决逐字是「刚才那本打不开了，现在打开的是《X》」，形态是**状态条一行**、
+ * 可关、**不拦**接管（⛔ 不是 toast、⛔ 不是确认框、⛔ 不是第四个状态词）。
+ *
+ * - `name` 空（书单与 core 都没给名字）时退成不带书名的那半句：⛔ 不印「《》」、⛔ 不印 `undefined`。
+ * - ⛔ 它**不是**工作台状态词（三词上限：轮到你／我正在做／已完成）：这是一条告知，不是「这一步走到哪」。
+ * - 与 `IDENTITY_LOST_TEXT` 同族：文案只住这里，壳与组件都从这里取（⛔ 不在两处各写一份）。
+ */
+export function identityTakeoverNotice(name) {
+	const title = typeof name === "string" ? name.trim() : "";
+	return title === ""
+		? "刚才那本打不开了，现在打开的是另一本"
+		: `刚才那本打不开了，现在打开的是《${title}》`;
+}
+
 /** 加载多久之后追加出口（spec 实现决策 §4 不变式 4：`elapsedMs > 30_000`）。 */
 const LOADING_RETRY_AFTER_MS = 30_000;
 

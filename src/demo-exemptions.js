@@ -282,15 +282,16 @@ export const DEMO_EXEMPTIONS = [
 	},
 	{
 		id: 'chapter-level-inspection-family',
-		what: '章级验货族：正文拼装件一致性、审计结论（`passed` 按 issues 现算）、脚手架残留＋练习答案、范例章拼装件、**字数兜底下限**（⚠️ 原来的「抽查意见」那半句**已不再成立**，见 `why`）',
-		why: '演示通道不派真小助手 ⇒ 没有分片可拼、没有审计件，这一族那几格在它身上无对象。⚠️ **票 `word-budget-ineffective/02` 起**多一格「正文汉字数低于 `targetWords` 兜底就拒收」：演示正文由机器确定性生成（几十字，`content-lib.js` 的 `demoChapterWrite`），与真书的兜底不可比 ⇒ 这一格在演示通道同样不判（它落在下面第 4 个守卫 `const chapterText` 那一块里，与本节其余内容验货同一条 `subMeta.demo !== true` 口径）。⚠️ **票 `demo-channel-full/06` 起**演示书**自带一条**抽查意见（落在「已处置」那一档，由 `content-lib.js` 的 `demoChapterReviews` 注入、`engine.seedDemoChapterReviews` 按 id 幂等合入）⇒ 「演示通道没有抽查意见」这半句**不再成立**：那一族在演示书上**看得见、翻得动案**。⚠️ 但用户**自己**写的那条照旧只能撤回——演示通道没有 AI 去改稿后销号，本票没有假装有（`why` 的边界就在这句）。⛔ 本条那四个守卫点一个都没动：它们守的是拼装件／审计件／脚手架／范例章（新增的字数下限落在第 4 个守卫那一块里），与抽查意见无关。',
-		origin: 'findings §B #8（半：拼装＋脚手架那两格明写为有意，`audit-skip` 那一支原本无注释）；**收窄**：票 `demo-channel-full/06`；**扩一格**：票 `word-budget-ineffective/02`',
+		what: '章级验货族：正文拼装件一致性、审计结论（`passed` 按 issues 现算）、脚手架残留＋练习答案、范例章拼装件、**字数兜底下限**（⚠️ 原来的「抽查意见」那半句**已不再成立**，见 `why`）、**章末带读手册 G1′／G2′／G3′**（票 `chapter-teaching-handbook/03`）',
+		why: '演示通道不派真小助手 ⇒ 没有分片可拼、没有审计件，这一族那几格在它身上无对象。⚠️ **票 `word-budget-ineffective/02` 起**多一格「正文汉字数低于 `targetWords` 兜底就拒收」：演示正文由机器确定性生成（几十字，`content-lib.js` 的 `demoChapterWrite`），与真书的兜底不可比 ⇒ 这一格在演示通道同样不判（它落在下面第 4 个守卫 `const chapterText` 那一块里，与本节其余内容验货同一条 `subMeta.demo !== true` 口径）。⚠️ **票 `demo-channel-full/06` 起**演示书**自带一条**抽查意见（落在「已处置」那一档，由 `content-lib.js` 的 `demoChapterReviews` 注入、`engine.seedDemoChapterReviews` 按 id 幂等合入）⇒ 「演示通道没有抽查意见」这半句**不再成立**：那一族在演示书上**看得见、翻得动案**。⚠️ 但用户**自己**写的那条照旧只能撤回——演示通道没有 AI 去改稿后销号，本票没有假装有（`why` 的边界就在这句）。⚠️ **票 `chapter-teaching-handbook/03` 起**又多一格「章末带读手册的三条形状判据」：演示章正文由机器确定性生成、不写带读手册 ⇒ 三条在它身上无对象；它们同样落在第 4 个守卫那一块里（同一句 `subMeta.demo !== true`）。⛔ 本条那四个原守卫点一个都没动：新增的字数下限与手册三条都落在第 4 个守卫那一块里，与抽查意见无关。',
+		origin: 'findings §B #8（半：拼装＋脚手架那两格明写为有意，`audit-skip` 那一支原本无注释）；**收窄**：票 `demo-channel-full/06`；**扩一格**：票 `word-budget-ineffective/02`；**再扩一格**：票 `chapter-teaching-handbook/03`',
 		guardKind: 'demo-guard',
 		guards: [
 			{ file: 'src/workflow/actions/chapters.js', contains: 'if (subMeta.demo !== true) {\n            const assembled = verifyChapterAtSubmit(project, gN)' },
 			{ file: 'src/workflow/actions/chapters.js', contains: 'if (subMeta.demo !== true) {\n            const assembled = verifyChapterAtSubmit(project, n)' },
 			{ file: 'src/workflow/actions/chapters.js', contains: 'if (subMeta.demo !== true) {\n            const audit = readChapterAudit(project, n)' },
 			{ file: 'src/workflow/actions/chapters.js', contains: 'if (subMeta.demo !== true) {\n            const chapterText = readFileSync(chapterPath, \'utf8\')' },
+			{ file: 'src/workflow/actions/chapters.js', contains: 'const handbook = chapterHandbookReading(project, chapterText, subMeta)' },
 		],
 	},
 	{

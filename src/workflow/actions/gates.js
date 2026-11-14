@@ -18,7 +18,7 @@
 // 章节正文路径／审计记录路径：正文那份在 `domain-rules.js`（票 `depth-review-2026-10/05`），
 // 审计记录那份同处（票 `context-budget/18` 复核把 `工作区/audit-NN.md` 的拼法也收进单点）；
 // `gateHuman` 是闸门名的唯一读法（票 `walkthrough-fixes/19` 那一族）。
-import { chapterRel, auditRel, readingName, knowledgeShardName, WORK_DIR_NAME, DETAIL_DIR_REL, PROPOSAL_DIR_REL, gateHuman, checkBlocksDelivery } from '../../domain-rules.js'
+import { chapterRel, auditRel, readingName, knowledgeShardName, WORK_DIR_NAME, DETAIL_DIR_REL, PROPOSAL_DIR_REL, gateHuman, checkBlocksDelivery, READER_QUESTIONNAIRE_TEXT_FILE_NAME } from '../../domain-rules.js'
 // 票 `rcb-build/04`：站 2 确认动作的**载荷与落点唯一写点**（共享件）——`values` 那一格的形状闸
 // （出口闭集；票 11 收窄成两条，退役的 `answerer`／`draft` 当场点名）都从它读（⛔ 本文件不另写枚举）。
 // ⚠️ 票 11：收卷人的写点**已搬走**（回卷动作 `reader-questionnaire-submit` 写 `meta.answerer`），
@@ -102,8 +102,14 @@ export function gateAlreadyDecidedError(current) {
  * ⚠️ 票 03 之后它只管**两份固定名**的件；精读派发按材料落下的 `reading-NN.md` /
  * `knowledge-map-NN.json` 由 {@link exploreRedoArtifactNames} 现场枚举（份数随材料数变，
  * 写死清单装不下）——重做那一圈两份都不搬的话，新旧分片会混在同一本书的 `工作区/` 里。
+ *
+ * ⚠️ 票 `reader-questionnaire-ai-authoring/02` 起多一份：**AI 写的题面**（`工作区/问卷题面.json`，
+ * 文件名取自 `domain-rules` 的唯一出处）。它确实由**这一站**产出（`stage-submit` 的 `stage=explore`）
+ * ⇒ 不归档的话，重做之后渲染侧（票 `03`）会把上一轮那份题面当成这一轮的问法印上去，
+ * 而新那一轮既没交也没过闸——那正是「新旧混账」，同上面那两族的理由。
+ * （它在盘上与否不影响本清单：`archiveWorkArtifacts` 按存在性跳过。）
  */
-const EXPLORE_REDO_ARTIFACTS = Object.freeze(['explore.md', 'knowledge-map.json'])
+const EXPLORE_REDO_ARTIFACTS = Object.freeze(['explore.md', 'knowledge-map.json', READER_QUESTIONNAIRE_TEXT_FILE_NAME])
 
 /**
  * 票 03 · ADR-0030 决策 2：精读派发落下的两族**按材料分号**的产物（`NN` = 材料序号，两位）。

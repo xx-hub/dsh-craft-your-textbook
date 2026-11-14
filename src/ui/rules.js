@@ -157,6 +157,12 @@ export function deriveStallJudgment(input) {
 			!progressing &&
 			idleMs >= STALL_THRESHOLD_MS,
 		idleMs,
+		// 票 `real-machine-walkthrough-20261114/05`：**有子助手在跑**这件事要跟着判定一起出去。
+		// 真机那一屏同时写着「🔎 5 个小助手在跑」与「⏱ 8 分钟没动静了 🔁 从断点继续」——
+		// 两句各自都真（子助手在跑是真的；账本 8 分钟没写也是真的），但**摆在一起就自相矛盾**，
+		// 而且那颗「从断点继续」在有人干活时点下去会**与正在跑的子助手撞车**（重复派章、重复写）。
+		// ⇒ 判定里带上 `subagentsRunning`，由活性行决定「说不说那颗键」（见 `ActivityLine`）。
+		subagentsRunning,
 	};
 }
 

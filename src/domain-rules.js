@@ -111,6 +111,45 @@ export const READER_QUESTIONNAIRE_ISSUED_REL = `${WORK_DIR_NAME}/${READER_QUESTI
 /** 回卷件的**书夹相对**路径（唯一出处；形状判据与下游代笔都引它）。 */
 export const READER_QUESTIONNAIRE_RETURNED_REL = `${WORK_DIR_NAME}/${READER_QUESTIONNAIRE_RETURNED_FILE_NAME}`;
 
+// ── 读者问卷的**题面**（票 `reader-questionnaire-ai-authoring/02`）────────────────────────
+//
+// 第三份问卷侧落点：AI 写的那份**题面**（每一问问什么、为什么问、提示是什么）。
+// 它**只经探查交工（`stage-submit` 的 `stage=explore`）那一条路写**（`readerQuestionnaireProblem(s)`
+// 是它的形状闸、唯一出处）；渲染侧只读它（票 `03` 的读侧入口）。
+//
+// ⚠️ 它与上面两份同一档：**可选动作的产物** ⇒ ⛔ 不进 `BOOK_PRODUCT_FAMILIES`（「应当有什么」），
+// 而是进 `SWEEP_EXCLUDED`。理由逐字同上面那两行：声明进「应当有什么」等于给每一本新书凭空多一条
+// **恒缺件**；不排掉又会让盘上真多出来的那一份以「多件」身份把形状对账**永远弄红**。
+/** 「题面」的文件名（书夹 `工作区/` 下；AI 写的那一份）。 */
+export const READER_QUESTIONNAIRE_TEXT_FILE_NAME = "问卷题面.json";
+/** 「题面」的书夹相对路径（唯一出处；交工写点与渲染读侧都引它）。 */
+export const READER_QUESTIONNAIRE_TEXT_REL = `${WORK_DIR_NAME}/${READER_QUESTIONNAIRE_TEXT_FILE_NAME}`;
+
+/**
+ * 「意图件」的文件名（书夹 `工作区/` 下；写卷小助手交的**第二份**，票 `reader-questionnaire-ai-authoring/04`）。
+ *
+ * 它是**写卷与读卷之间唯一能带过去的东西**（两者之间隔着真人填写，可能是几天）：
+ * 每片一段，写「这一片探的是哪个缺口、为什么这么问、哪句是提示、提示允许被理解到哪」。
+ * ⇒ 回卷之后那一路（票 `05`）**必读它**，否则读卷的人不知道当初为什么这么问。
+ * ⚠️ 它**不是**机器判据的输入面（机器一个字都不读它的内容）——它只给读卷那一路（AI）用。
+ */
+export const READER_QUESTIONNAIRE_INTENT_FILE_NAME = "问卷意图.md";
+/** 意图件的**书夹相对**路径（唯一出处；派单值块与读卷交办都引它）。 */
+export const READER_QUESTIONNAIRE_INTENT_REL = `${WORK_DIR_NAME}/${READER_QUESTIONNAIRE_INTENT_FILE_NAME}`;
+
+/**
+ * 「问卷判断」的文件名（书夹 `工作区/` 下；**读卷子代理**交的那一份，票 `reader-questionnaire-ai-authoring/05`）。
+ *
+ * 形状 `{ drop: [{title, why}], skip: [{title, reason}] }`：`drop` ＝回卷件上**明确勾了「已经会」**的
+ * 条目（主笔照它逐条发 `graph-opinion` 落进剔除记录）；`skip` ＝「不确定」／未勾／片级没答的那一批
+ * （**只作读数，⛔ 一条都不落记录**）。
+ * ⚠️ 机器**只验形状**（是不是这个对象形状、两条数组），⛔ 不验它读得对不对（归真机层与人工边界
+ * `docs/测试信任边界.md`）。
+ */
+export const READER_QUESTIONNAIRE_VERDICT_FILE_NAME = "问卷判断.json";
+/** 问卷判断的**书夹相对**路径（唯一出处；读卷交办与界面／账本读数都引它）。 */
+export const READER_QUESTIONNAIRE_VERDICT_REL = `${WORK_DIR_NAME}/${READER_QUESTIONNAIRE_VERDICT_FILE_NAME}`;
+
 /**
  * 结论件（每个确认点一份「站结论」）所在的那一层目录名（票 `confirm-points-redesign-build/01`）。
  * ⛔ **不拿主题当文件名**——主题名已经改过一次（给谁用 → 这本书怎么学），站号才稳。
@@ -482,6 +521,20 @@ export const BOOK_PRODUCT_FAMILIES = Object.freeze([
 		onlyWhen: "sources",
 	},
 	{
+		// 票 `.scratch/chapter-teaching-handbook/issues/05`：**章级切片**的伴生交付件。
+		// 机器从知识地图 ＋ 章节安排确定性派生（零 LLM，见 `workflow/knowledge-structure.js`），
+		// 跟着 book.md 一起交付，但⛔ **不拼进 book.md**（书的正文边界不变）。
+		// `onlyWhen: 'sources'`：没有知识地图的书本来就没有可派生的结构 ⇒ 不凭空多一条恒缺件。
+		family: "知识结构",
+		role: "知识地图",
+		path: `${WORK_DIR_NAME}/知识结构.md`,
+		producer: "machine",
+		scope: "book",
+		disclose: "pointer",
+		deliverable: true,
+		onlyWhen: "sources",
+	},
+	{
 		family: "知识地图分片",
 		role: "知识地图",
 		path: `${WORK_DIR_NAME}/knowledge-map-${NUMBERED_SEGMENT}.json`,
@@ -680,6 +733,16 @@ export const SPEC_ROWS = Object.freeze([
 	// ——它同样是**派发面代填的形状出处**（`dispatch-assembly.js` 的 `templateRel()` 按这一行取 rel，
 	// 这一行不在就当场抛「产物清单里没有这一行」），不是给主笔常驻读的正文。
 	{ role: SPEC_ROLE, path: "resources/references/subagent-prompts/graph-review-prompt.md", producer: "machine", scope: "reference", disclose: "pointer", deliverable: false, manages: { what: "知识点图审校派发模板（图的语义那一半的唯一读者）", when: "派图审校小助手时按它填" } },
+	// 票 `reader-questionnaire-ai-authoring/04`：**写卷**那一档的派发模板（探查交工之后、发卷之前派一路
+	// 续接型小助手，交题面 JSON ＋ 意图 `.md`，`childId` 记进 `meta.questionnaireAgentId`）。
+	// 判 `pointer` 与另几份同档——它同样是**派发面代填的形状出处**（`dispatch-assembly.js` 的
+	// `templateRel()` 按这一行取 rel，这一行不在就当场抛「产物清单里没有这一行」），不是给主笔常驻读的正文。
+	{ role: SPEC_ROLE, path: "resources/references/subagent-prompts/questionnaire-author-prompt.md", producer: "machine", scope: "reference", disclose: "pointer", deliverable: false, manages: { what: "写卷小助手派发模板（把知识点标签逐条翻成收卷人自答得了的问话）", when: "探查交工之后、发卷之前派写卷小助手时按它填" } },
+	// 票 `reader-questionnaire-ai-authoring/05`：**读卷**那一档的派发模板（回卷件落盘之后，冷恢复同一个
+	// 写卷人；唤不醒就新起一路上下文干净的读卷子代理）。判 `pointer` 与另几份同档——它同样是**派发面
+	// 代填的形状出处**（`dispatch-assembly.js` 的 `templateRel()` 按这一行取 rel，这一行不在就当场抛
+	// 「产物清单里没有这一行」），不是给主笔常驻读的正文。
+	{ role: SPEC_ROLE, path: "resources/references/subagent-prompts/questionnaire-analyze-prompt.md", producer: "machine", scope: "reference", disclose: "pointer", deliverable: false, manages: { what: "读卷小助手派发模板（读完回卷件判「哪几条可以不讲」的条目级结论）", when: "问卷回卷件落盘之后派读卷小助手时按它填" } },
 	// 编排脚本骨架（票 `chapter-audit-orchestration/03`）：铺章那一跳的审计改由宿主 `workflow` 工具驱动，
 	// 主笔照这一份填脚本。判 `pointer`——它**不是**给成员读的派发模板，而是主笔「写脚本时回读一次」的
 	// 形状出处；正文不常驻（常驻那一档仍然只有工具纪律 §九 那一页纸）。
@@ -726,6 +789,11 @@ export const SPEC_ROWS = Object.freeze([
 	// ── 本仓判它不进上下文的（`disclose === "never"`）──
 	// ⚠️ 这一族**不进对账差集**（`scope === "reference"`），所以这里的 `*` 是**声明**、不是匹配器；
 	// 判据（`test-book-shape.mjs`）断的是「每个 `never` 声明至少解析得出一份真文件」，防它腐烂成死声明。
+	// 票 `skill-sync-from-hermes/01`：从技能库收回来的两份造书方法（D 档、整份直通发布包）。
+	// 它们**不进注入面**（`never`）：没有哪一份 brief 需要常驻读它；读者按 `resources/SKILL.md`
+	// 的「参考文件按需加载」表点名时按路径回读——与模式卡同一档（入口 pointer、本体 never）。
+	{ role: SPEC_ROLE, path: "resources/references/knowledge-list-organization.md", producer: "machine", scope: "reference", disclose: "never", deliverable: false, manages: { what: "《知识点清单》的合并方法（何时做、四步组织、三道自检）", when: "全部精读回来之后、章节骨架之前，要把证据合并成一张清单时" } },
+	{ role: SPEC_ROLE, path: "resources/references/novel-mode.md", producer: "machine", scope: "reference", disclose: "never", deliverable: false, manages: { what: "小说体教材写法（四件契约、每章三件、分批派活、三级审计）", when: "用户要「企业职员视角讲知识、全虚构」的小说体时（human 路线下的一种写法）" } },
 	{ role: SPEC_ROLE, path: "resources/references/patterns/*/*.md", producer: "machine", scope: "reference", disclose: "never", deliverable: false, manages: { what: "21 张教学板块模式卡（按教学问题翻，经 patterns/README.md 那一行进）", when: "关卡②选教学模式、给每章设计板块结构时（经 README 那一行，卡本身不进上下文）" } },
 ]);
 
@@ -1037,7 +1105,7 @@ export const SWEEP_EXCLUDED = Object.freeze([
 	{
 		// 票 `reader-cognition-boundary-build/03`：「给出那一份」在书夹里的副本。
 		path: READER_QUESTIONNAIRE_ISSUED_REL,
-		reason: "**可选动作「发一份读者情况问卷」写出的那一份**（票 rcb/03，纸屏两用的 `.md` 抄本）："
+		reason: "**可选动作「发一份读者情况问卷」写出的那一份**（票 rcb/03，屏一用的 `.md` 抄本）："
 			+ "没发过卷的书本来就不该有它 ⇒ 声明进「应当有什么」会给每一本新书凭空多一条**恒缺件**"
 			+ "（一个恒红的判据比没有判据更坏）；而它真的会落到 `工作区/` 里 ⇒ 不进这张排除表，"
 			+ "它就会以「多件」的身份让产物形状对账**永远红**。⚠️ 它**不是**第二份事实源：只是给出那一刻的"
@@ -1054,7 +1122,38 @@ export const SWEEP_EXCLUDED = Object.freeze([
 			+ "下游（AI 逐条读、代笔落剔除记录）归票 `06`。",
 	},
 	{
-		// 票 `premature-announce/02`：**已退役的产物族**在盘上的遗留副本。
+		// 票 `reader-questionnaire-ai-authoring/02`：AI 写的那份**题面**（`工作区/问卷题面.json`）。
+		path: READER_QUESTIONNAIRE_TEXT_REL,
+		reason: "**可选件：AI 写的读者问卷题面**（票 `reader-questionnaire-ai-authoring/02`）：\n"
+			+ "它只在**探查交工**那一条路上被写（`stage-submit` 的 `stage=explore`，形状闸\n"
+			+ "`readerQuestionnaireProblem` 是唯一判据），而**不交也合法**（卷子退回今天的确定性版）⇒\n"
+			+ "声明进「应当有什么」会给每一本没写题面的书凭空多一条**恒缺件**（一个恒红的判据比没有\n"
+			+ "判据更坏）；而它真的会落到 `工作区/` 里 ⇒ 不进这张排除表，它就会以「多件」的身份让\n"
+			+ "产物形状对账**永远红**（「多件任何时候都是红的」，见 `book-shape.js` 文件头）。\n"
+			+ "⚠️ 它**不是**第二份事实源：题面写的是「怎么问」，机器印的行型与回卷解析一个字不动；\n"
+			+ "它是否在盘上**不作任何放行条件**（不在＝按条退回干清单印）。",
+	},
+	{
+		// 票 `reader-questionnaire-ai-authoring/04`：写卷小助手交的**意图件**（`工作区/问卷意图.md`）。
+		path: READER_QUESTIONNAIRE_INTENT_REL,
+		reason: "**可选件：写卷小助手交的那份意图件**（票 `reader-questionnaire-ai-authoring/04`）：\n"
+			+ "它是写卷与读卷之间唯一能带过去的东西（两者之间隔着真人填写）——只有派过写卷小助手、\n"
+			+ "且它真交了这一份的书才有它。⇒ 声明进「应当有什么」会给每一本没派过写卷小助手的书凭空\n"
+			+ "多一条**恒缺件**；不进这张排除表，它就会以「多件」的身份让产物形状对账**永远红**。\n"
+			+ "⚠️ 机器**一个字都不读**它的内容（它不是判据的输入面）；它在不在也不作任何放行条件——\n"
+			+ "缺它时读卷那一路不跑（退回今天的教学句），⛔ 不拿空意图硬读。",
+	},
+	{
+		// 票 `reader-questionnaire-ai-authoring/05`：读卷子代理交的**问卷判断**（`工作区/问卷判断.json`）。
+		path: READER_QUESTIONNAIRE_VERDICT_REL,
+		reason: "**可选件：读卷子代理交的那份问卷判断**（票 `reader-questionnaire-ai-authoring/05`）：\n"
+			+ "只有「回卷件在盘上＋意图件在盘上＋派过写卷小助手」三个条件同时成立、且那一路真交了\n"
+			+ "这一份的书才有它。⇒ 声明进「应当有什么」会给每一本没走过读卷那条路的书凭空多一条\n"
+			+ "**恒缺件**；不进这张排除表，它就会以「多件」的身份让产物形状对账**永远红**。\n"
+			+ "⚠️ 机器只验形状（`drop`／`skip` 两条数组），⛔ 不验它读得对不对；它也不作任何放行条件\n"
+			+ "（落记录仍由主笔发 `graph-opinion`，那份件只当读数的出处）。",
+	},
+	{
 		path: `${WORK_DIR_NAME}/outline-contract.md`,
 		reason: "**老书里那份已退役的「大纲契约」遗留件**（票 `premature-announce/02` 把它从"
 			+ "`BOOK_PRODUCT_FAMILIES` 退役：`src/**` 里零生产者，它当年的职责已并进 `工作区/outline.md`"
@@ -3442,6 +3541,7 @@ export function productOpenMode(rel) {
 		isGoalDocRel(path) || // 站 3「学完能做到什么」的正文（带版本号）
 		path === "工作区/style-spec.md" || // 写作规范（同为设计文档，步清单把它当产物列出）
 		path === "工作区/book.md" || // 成品
+		path === "工作区/知识结构.md" || // 章级切片（给 AI 老师备课先看的那一层）
 		path === "过程记录.md" // 流水账（写给人读的全局产物；ADR-0015 决策 1：从「不给人读」那一族挪回这里）
 	) {
 		return "preview";

@@ -115,8 +115,16 @@ function defineToolLocal(options) {
   }
 }
 /**
- * 工作台 base 从哪来：`DSH_WEB_URL`（宿主给受管 shell 的那个变量）> 预设行 `config.baseUrl`
- * > 宿主 `webApp` 服务的 `getAdvertisedUrl()`（票 `dsh-contract-drift/14`）> **不知道**。
+ * 工作台 base 从哪来：`DSH_WEB_URL`（**只在它与本宿主广告地址同源、或本宿主没有广告地址时**）
+ * > 预设行 `config.baseUrl` > 宿主 `webApp` 服务的 `getAdvertisedUrl()`（票 `dsh-contract-drift/14`）
+ * > **不知道**。
+ *
+ * ⚠️ **票 `real-machine-walkthrough-20261114/03`（2026-11-14 真机改）**：`DSH_WEB_URL` 原来是**无条件**
+ * 第一优先，而它是**受管 shell 的变量**、会被**子进程继承**。在「dsh 会话里再起一台 dsh 宿主」时，
+ * 新宿主的 env 里带的是**上一台**的地址（实测：3090 那台宿主 env 里逐字 `http://127.0.0.1:44893`），
+ * 于是插件把本宿主的 session id 发给另一台宿主 ⇒ 工具恒 `hasBook:false`。
+ * ⇒ 今天 env 只在**与本宿主 `getAdvertisedUrl()` 同源**时才用；不同源一律用本宿主的。
+ * 判据：`test-agent-tool.mjs`「票 walkthrough/03」那一节（三种组合各一格 ＋ 不同源时不用 env）。
  *
  * ⚠️ **票 `dsh-contract-drift/08`（2026-10-29 改）**：第三段原来是**写死的
  * `http://127.0.0.1:3080`**。在 `dsh web` 默认端口那台宿主上它恰好是对的（所以一路活着），
@@ -141,17 +149,41 @@ function defineToolLocal(options) {
  * @returns {string|null} 去掉尾部斜杠的 base，或 `null`（不知道工作台在哪）
  */
 function resolveBaseUrl(config, ctx) {
-  if (typeof process !== 'undefined' && process.env !== undefined) {
-    const env = process.env.DSH_WEB_URL
-    if (typeof env === 'string' && env.trim() !== '') {
-      const clean = env.trim().replace(/\/+$/, '')
-      if (/^https?:\/\//.test(clean)) return clean
-    }
-  }
+  const advertised = advertisedBaseUrl(ctx)
+  const env = envBaseUrl()
+  // ⚠️ **票 `real-machine-walkthrough-20261114/03`（2026-11-14 真机）**：`DSH_WEB_URL` 是**受管 shell
+  // 的变量**，会被**子进程继承**——在「dsh 会话里再起一台 dsh 宿主」时，新宿主的 env 里带的是
+  // **上一台**的地址（实测：3090 那台宿主的 env 里逐字是 `http://127.0.0.1:44893`）。于是插件把
+  // **本宿主**的 session id 发给**另一台宿主**，那台不认识 ⇒ 工具恒 `hasBook:false`，AI 花了 50+ 步
+  // 去查地址、阶段二停摆 12 分钟。
+  // ⇒ **本宿主自己报的地址（`webApp.getAdvertisedUrl()`）才是事实源**：env 与它**同源**时才信 env；
+  //   两者都有而**不同源**时，用本宿主的、丢掉 env（⛔ 不静默用继承来的地址）。
+  // 只在**拿不到**本宿主地址时才退回 env（纯 CLI／headless 面没有 webApp 服务，那时 env 是唯一来源）。
+  if (env !== null && (advertised === null || sameOrigin(env, advertised))) return env
   if (config !== undefined && typeof config.baseUrl === 'string' && config.baseUrl.trim() !== '') {
     return config.baseUrl.trim().replace(/\/+$/, '')
   }
-  return advertisedBaseUrl(ctx)
+  return advertised
+}
+
+/** `DSH_WEB_URL`（受管 shell 变量）——**可能是继承来的**，用之前必须过 {@link sameOrigin} 那道核对。 */
+function envBaseUrl() {
+  if (typeof process === 'undefined' || process.env === undefined) return null
+  const raw = process.env.DSH_WEB_URL
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  const clean = raw.trim().replace(/\/+$/, '')
+  return /^https?:\/\//.test(clean) ? clean : null
+}
+
+/** 两个 base 是不是**同一台宿主**（protocol ＋ host ＋ port）。解析不出来一律判不同源。 */
+function sameOrigin(a, b) {
+  try {
+    const left = new URL(a)
+    const right = new URL(b)
+    return left.protocol === right.protocol && left.host === right.host
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -319,6 +351,22 @@ const ACTION_PARAM_RULES = Object.freeze({
           body.readerSlices = args.readerSlices
         },
       },
+      // 票 `reader-questionnaire-ai-authoring/02`：读者问卷的**题面**（AI 写的那一份）。
+      // **可选**——不交也合法（卷子退回今天的确定性版）；但**写了的型别错当场抛**（同上面那几格）：
+      // 静默不带会让 AI 以为自己交成功了，而卷上那一问就永远还是机器印的干清单。
+      // ⚠️ 这里**只判「是不是对象」**；片名／成员／字数／纸面暗示／禁问项那七条判据住服务端那份
+      // 形状闸（`workflow/reader-questionnaire-text.js` 的 `readerQuestionnaireProblems`，**唯一出处**）
+      // ——工具面看不到合并件，重不起那份量法，⛔ 不在这里另写一半。
+      readerQuestionnaire: {
+        write(body, args) {
+          if (args.readerQuestionnaire === undefined) return
+          const value = args.readerQuestionnaire
+          if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+            throw new Error('readerQuestionnaire（问卷题面）需要对象 {estimate?, slices:[{slice, lead?, items:[{title, ask, why, hint?}]}]}（⛔ 不是字符串、不是数组；不写就整格别带）')
+          }
+          body.readerQuestionnaire = value
+        },
+      },
       // gate 三段共用一句文案（今天就是一句：缺哪一段报的都是它）。
       title: { msg: '交工 gate 需要 title/summary/detail 三段', ...textField('title') },
       summary: { msg: '交工 gate 需要 title/summary/detail 三段', ...textField('summary') },
@@ -392,7 +440,9 @@ const ACTION_PARAM_RULES = Object.freeze({
     byStage: {
       // 票 `reader-cognition-boundary-build/01`：`readerSlices`（片）是**可选**书级键——
       // 「主笔没产」合法（退化归消费侧现算），所以不进 `required`；交了的形状由服务端 400。
-      explore: { required: ['teachingFocus', 'chapterSuggestion'], optional: ['readerSlices'] },
+      // 票 `reader-questionnaire-ai-authoring/02`：`readerQuestionnaire`（题面）同一条口径——
+      // **可选**（不交就发今天的确定性卷），交了的形状由服务端那一道闸 400 点名。
+      explore: { required: ['teachingFocus', 'chapterSuggestion'], optional: ['readerSlices', 'readerQuestionnaire'] },
       gate: { required: ['title', 'summary', 'detail'] },
       outline: { required: ['chaptersJson'], optional: ['goldChapter', 'goldChapterReason'] },
       // 票 `goals-handoff-missing/01`：**站 3 这一格此前整行缺席**（`byStage` 里没有 `goal`）
@@ -784,11 +834,13 @@ async function fetchProjectDetail(fetchImpl, base, sessionId, projectId) {
  *   传输递进来，而不是替换 `globalThis.fetch`。**不进任何 caller 要知道的 interface**——
  *   照 `src/ui/artifact-read.js:35-36` 的既有口径（`createArtifactReader({ fetchImpl })`）。
  *
- *   ⚠️ **`resolveBaseUrl` 的优先级链今天是 `DSH_WEB_URL` > `config.baseUrl`
- *   > 宿主 `webApp.getAdvertisedUrl()` > 响亮失败**（票 `dsh-contract-drift/08`，2026-10-29；
- *   第三段由票 `dsh-contract-drift/14` 补上）：最后那句「回落到写死的 `3080`」不再有了——那在
- *   桌面版（随机端口）上是另一个宿主／死端口。拿不到 base 时**一次请求都不发**、回一句说清原因
- *   的错误。判据是 `test-agent-tool.mjs` 「票08／票14」两节（零请求 ＋ 原因句）。
+ *   ⚠️ **`resolveBaseUrl` 的优先级链今天是 `DSH_WEB_URL`（**仅当它与本宿主广告地址同源，或本宿主
+ *   没有广告地址时**）> `config.baseUrl` > 宿主 `webApp.getAdvertisedUrl()` > 响亮失败**
+ *   （票 `dsh-contract-drift/08`，2026-10-29；第三段由票 `dsh-contract-drift/14` 补上；
+ *   第一段那个「同源」条件是票 `real-machine-walkthrough-20261114/03` 2026-11-14 加的——
+ *   env 会被子进程继承，不同源时它是**另一台宿主**的地址）：最后那句「回落到写死的 `3080`」不再有了——
+ *   那在桌面版（随机端口）上是另一个宿主／死端口。拿不到 base 时**一次请求都不发**、回一句说清原因
+ *   的错误。判据是 `test-agent-tool.mjs` 「票08／票14」两节（零请求 ＋ 原因句）与「票 walkthrough/03」那一节。
  *
  *   ⚠️ **地址分两拍解析**（票 14）：`apply` 时先解析一次（探针／离线夹具靠这一刻的 env 把请求
  *   钉在闭端口上）；**那一刻拿不到**才在每次 `execute` 重试——宿主 `webApp` 服务可能比 preset 行
@@ -940,7 +992,7 @@ function apply(ctx, config, deps) {
 
   ctx.tools.register(defineToolLocal({
     name: 'workbench_act',
-    description: '与造书工作台交互。三类用法：① 流水线内务（机器派给你的活）：stage-brief 领任务说明、progress 上报进度、audit-submit 把范例章审计结论交给机器即时验形状、chapter-assemble 让机器把这一章的分片拼成正文（写作小助手只落分片，章正文由机器拼；**派审计小助手之前**先叫这一步，审计读的就是拼出来的那一份）、agent-assign **派单**（九份派发模板 ＋ 最后检查分查那一档对应的那一族小助手：你只给 dispatchKind ＋ 章号/材料号/分路号 ＋ 一句叮嘱，**整份派单 prompt 由机器按模板与本书实际值代填**，你不再自己手抄——`tool/call` 的入参永不被剪枝，所以那一笔是整场永久占着上下文的）、stage-submit 交工——这几类直接调用，不需要征求用户同意；② 代用户操作（改书名/改目标/改并发上限/建书/拍板/探查确认/范例章定稿/回退/重试/删除/最后检查认可）——仅在用户明确同意后调用。③ **代笔**（`graph-opinion`）：读者情况问卷回卷之后，把回卷件（工作区/读者情况回卷.md）上**明确勾了「已经会」**的条目逐条落进那份**人的**剔除记录（`verdict=不讲`、`verdictReason=已经会`）——与用户在工作台图上那把划子**同一支动作、同一份记录**；⛔「不确定」与未勾一律不落、⛔ 不自己手写那份 JSON。action 取值：stage-brief、stage-submit、progress、chapter-assemble、audit-submit（真实模式下，范例章审计结论落盘后先交这里：机器当场验 5 个必读文件各一行 {file, quote} 与 quote 逐字、passed 判定，不合格当场把机器看到的行键/样例/缺口说清；可带 auditJson 正文由机器落盘，不带就验书里那份 工作区/audit-NN.md）、final-redo-items（最后检查被用户驳回后**先**做这一步：把用户那句意见拆成条目落账 `redoItems:[…]`，每段照原文逐字抄、按原文顺序；拆好后交工时用 redoCheck 逐条交代去向）、agent-assign（派单：dispatchKind=writing|gold-writing|audit|gold-audit|material-survey|close-reading|alignment|graph-review|cross-audit|final-check；只有这十档走机器代填，改章小助手那类模板没覆盖的派单仍用你自己的 subagent 工具派）、create（建书，需 name/goal，可选 route/science/maxConcurrentSubagents）、rename（改书名，需 name）、set_goal（改学习目标，需 goal）、set-knobs（改并发上限 maxConcurrentSubagents——用户在拍板前想改这个旋钮时替他落；篇幅档位已删除，⛔ 不再有 length）、gate（拍板，需 gate/version/approved，可选 note）、rollback（回退，需 snapshot 序号）、resume（重试/继续）、delete（删除这本书）。协作动作：style-note（记风格线）、intervene（留言）、pause（暂停）、nudge（催办：把用户一句话以 notice 唤醒主 AI，不中断不 cancel）为内务可直接调用；waive（豁免，必须先引导用户在界面手输原因；豁免「其他」还要点名放行的是哪一条检查）、explore-confirm（探查结果确认：用户在探查结果卡点「满意，继续设计」时用，需 approved=true；approved=false 是让 AI 重做，**可带**一句哪里不满意（note，可选——用户在工作台里就是「勾个理由或写一句，不填也能重做」））、outline-confirm、chapters-review-confirm（全章过目确认：全章写完后替用户点「都过了」时用，需 approved=true）、final-approve（最后检查结果认可：最后检查全过后用户在最后检查结果卡点「认可/不满意」时用，需 approved=true/false；approved=false 必须带 note 改进意见）、gold-opinion/gold-revise/gold-chapter-set/gold-draft-approve（站 8「这一稿行不行」：用户点「✅ 就用这一稿」时 approved=true、点「🔁 不满意，重写这一章」时 approved=false；两支都只落站 8 的结论件，⛔ 不定稿）、gold-approve（范例章定稿确认：用户在谈判桌点「确认，定稿」时用，需 approved=true/false；approved=false 是推翻重写）必须用户明确同意后调用。以下动作需用户操作，AI 不可调用：review、review-revoke、gold-target-words-set（抽查／撤销抽查／定每章目标字数）——它们只在工作台界面由用户自己点。定点修改（改历史）：deep-modify（用户在界面上点定点修改时走这条，需 segment/note）、deep-undo（撤销最近一次深改）；对话里用户说改历史也必须引导走工作台的定点修改流程，不要自己改账本或产物。',
+    description: '与造书工作台交互。三类用法：① 流水线内务（机器派给你的活）：stage-brief 领任务说明、progress 上报进度、audit-submit 把范例章审计结论交给机器即时验形状、chapter-assemble 让机器把这一章的分片拼成正文（写作小助手只落分片，章正文由机器拼；**派审计小助手之前**先叫这一步，审计读的就是拼出来的那一份）、agent-assign **派单**（十一份派发模板 ＋ 最后检查分查那一档对应的那一族小助手：你只给 dispatchKind ＋ 章号/材料号/分路号 ＋ 一句叮嘱，**整份派单 prompt 由机器按模板与本书实际值代填**，你不再自己手抄——`tool/call` 的入参永不被剪枝，所以那一笔是整场永久占着上下文的）、stage-submit 交工——这几类直接调用，不需要征求用户同意；② 代用户操作（改书名/改目标/改并发上限/建书/拍板/探查确认/范例章定稿/回退/重试/删除/最后检查认可）——仅在用户明确同意后调用。③ **代笔**（`graph-opinion`）：读者情况问卷回卷之后，把回卷件（工作区/读者情况回卷.md）上**明确勾了「已经会」**的条目逐条落进那份**人的**剔除记录（`verdict=不讲`、`verdictReason=已经会`）——与用户在工作台图上那把划子**同一支动作、同一份记录**；⛔「不确定」与未勾一律不落、⛔ 不自己手写那份 JSON。action 取值：stage-brief、stage-submit、progress、chapter-assemble、audit-submit（真实模式下，范例章审计结论落盘后先交这里：机器当场验 5 个必读文件各一行 {file, quote} 与 quote 逐字、passed 判定，不合格当场把机器看到的行键/样例/缺口说清；可带 auditJson 正文由机器落盘，不带就验书里那份 工作区/audit-NN.md）、final-redo-items（最后检查被用户驳回后**先**做这一步：把用户那句意见拆成条目落账 `redoItems:[…]`，每段照原文逐字抄、按原文顺序；拆好后交工时用 redoCheck 逐条交代去向）、agent-assign（派单：dispatchKind=writing|gold-writing|audit|gold-audit|material-survey|close-reading|alignment|graph-review|questionnaire-author|questionnaire-analyze|cross-audit|final-check；只有这十二档走机器代填，改章小助手那类模板没覆盖的派单仍用你自己的 subagent 工具派）、create（建书，需 name/goal，可选 route/science/maxConcurrentSubagents）、rename（改书名，需 name）、set_goal（改学习目标，需 goal）、set-knobs（改并发上限 maxConcurrentSubagents——用户在拍板前想改这个旋钮时替他落；篇幅档位已删除，⛔ 不再有 length）、gate（拍板，需 gate/version/approved，可选 note）、rollback（回退，需 snapshot 序号）、resume（重试/继续）、delete（删除这本书）、reader-questionnaire-analyze（读者问卷**回卷之后**派读卷那一路：先冷恢复当初那个写卷小助手，唤不醒就新起一路上下文干净的读卷子代理，三件注入由机器补齐；你照它交回的 `工作区/问卷判断.json` 逐条发 `graph-opinion` 落记录）。协作动作：style-note（记风格线）、intervene（留言）、pause（暂停）、nudge（催办：把用户一句话以 notice 唤醒主 AI，不中断不 cancel）为内务可直接调用；waive（豁免，必须先引导用户在界面手输原因；豁免「其他」还要点名放行的是哪一条检查）、explore-confirm（探查结果确认：用户在探查结果卡点「满意，继续设计」时用，需 approved=true；approved=false 是让 AI 重做，**可带**一句哪里不满意（note，可选——用户在工作台里就是「勾个理由或写一句，不填也能重做」））、outline-confirm、chapters-review-confirm（全章过目确认：全章写完后替用户点「都过了」时用，需 approved=true）、final-approve（最后检查结果认可：最后检查全过后用户在最后检查结果卡点「认可/不满意」时用，需 approved=true/false；approved=false 必须带 note 改进意见）、gold-opinion/gold-revise/gold-chapter-set/gold-draft-approve（站 8「这一稿行不行」：用户点「✅ 就用这一稿」时 approved=true、点「🔁 不满意，重写这一章」时 approved=false；两支都只落站 8 的结论件，⛔ 不定稿）、gold-approve（范例章定稿确认：用户在谈判桌点「确认，定稿」时用，需 approved=true/false；approved=false 是推翻重写）必须用户明确同意后调用。以下动作需用户操作，AI 不可调用：review、review-revoke、gold-target-words-set（抽查／撤销抽查／定每章目标字数）——它们只在工作台界面由用户自己点。定点修改（改历史）：deep-modify（用户在界面上点定点修改时走这条，需 segment/note）、deep-undo（撤销最近一次深改）；对话里用户说改历史也必须引导走工作台的定点修改流程，不要自己改账本或产物。',
     parameters: {
       action: {
         type: 'string', required: true,
@@ -998,6 +1050,19 @@ function apply(ctx, config, deps) {
           additionalProperties: false,
         },
         description: '交工 explore 时：书级的「片」`readerSlices: [{name, description?, members:[知识点 title]}]`——把这本书按**读者语域**切成几块（读者情况问卷外层的作答单位）。每本 3–5 片为目标；**同片不混语域**是硬约束（语域块多于 5 片时片数可以更多）；片名与说明用读者的话写；`members` 按知识点 `title` 引用（⛔ 不能写 kp.id）。⛔ 不要求覆盖全部知识点、⛔ 不设「其他」垃圾桶片。机器只验形状（片数 ≥1 且每片有名有成员、members 按 title 归一化能在知识点图上对上），对了形状的坏值会 400 点名；**不交这一件也合法**（问卷侧会退化成「整本书一片」并如实说明）。',
+      },
+      // 票 `reader-questionnaire-ai-authoring/02`：读者问卷的**题面**（AI 写的那一份）。
+      // 形状的七条判据（片名在册、title 是片成员、字数、why 必填、纸面暗示、禁问项、不交也合法）
+      // 住服务端那一道闸（唯一出处）；这里只说「交什么」，⛔ 不把七条再抄一遍。
+      //
+      // ⚠️ **声明面只有两格**（`type: 'object'` ＋ 那一句 description）：七条判据里有四条
+      // （片名在册／title 是片成员／字数上限／why 必填）**要拿合并件与你交的片比**，工具面看不到
+      // 合并件、重不起那份量法；把形状在 schema 里抄一遍只会多出一份会漂的副本
+      // （`shorthandToJsonSchema` 只搬 `type`／`description`／`enum`／`items` 四个键，嵌套 properties
+      // 本来也搬不进去）。⇒ 形状的唯一出处是服务端那道闸，本格只声明「这一格是对象」。
+      readerQuestionnaire: {
+        type: 'object',
+        description: '交工 explore 时（可选）：读者情况问卷的**题面** `readerQuestionnaire: {estimate?, slices:[{slice, lead?, items:[{title, ask, why, hint?}]}]}` —— 由你（AI）按这本书的内容写的问话，机器把它印进固定行型（行型一个字不变）。`slice` 逐字写一个**在册的片名**（同 readerSlices 的 name）；`items[].title` 逐字写该片某个知识点的 title（⛔ 不是 kp.id）；`ask` 一句话 ≤ 60 字（读者自己答得了的「会不会」，⛔ 不问「理解到哪一层」）；`why` **必填** ≤ 25 字，写「为什么值得认真答」（⛔ 不是提示，两件不许合并）；`hint` 可选 ≤ 60 字（帮人答得准）；三处都不许出现纸面暗示（打印／方框／写在旁边／手写——回卷只走「在文件上改完粘回工作台」一条路）。机器只验形状（超一个字就 400 点名，⛔ 不截断）；**不交这一件也合法**（卷子退回今天的确定性版并如实说明）。',
       },
       chaptersJson: { type: 'string', description: '交工 outline 时：JSON 数组字符串 [{"title":"…","outline":"…","source":"资料N：…","targetWords":6000,"points":["知识点…"],"volumeReason":"体量依据"}]；targetWords 是**字数兜底下限**（至少要有这么多汉字，低于它交工会被拒收；不设上限）' },
       goldChapter: { type: 'number', description: '交工 outline 时：建议的样例章章号（1 基，默认 1）；outline-confirm 时：用户改选的样例章章号' },
@@ -1374,6 +1439,13 @@ function apply(ctx, config, deps) {
           break
         case 'resume':
           body = { action: 'resume' }
+          break
+        // ── 票 `reader-questionnaire-ai-authoring/05`：读卷那一路的派单（零参数）──────────────
+        // 主笔先试冷恢复 `meta.questionnaireAgentId` 那一个子助手，唤不醒就新起一路上下文干净的读卷子代理。
+        // ⚠️ 不带任何参数：三件注入由机器现算（提示词原文重建 ＋ 两份盘上件），档位由服务端写 `meta`。
+        // ⚠️ **不新开“收卷人”那一格**：收卷人仍由回卷动作 `reader-questionnaire-submit` 写。
+        case 'reader-questionnaire-analyze':
+          body = { action: 'reader-questionnaire-analyze' }
           break
         case 'nudge':
           // 催办：把用户的一句话以 notice 唤醒主 AI（不中断、不 cancel）；留空则用默认催办语。

@@ -132,7 +132,7 @@ export function exploreReportBlocks(mdText) {
 
 // 票 `ui-systematic-fixes/01`：**正文出口** `bodyOf`（spec 实现决策 §1·2、§3·1）。──────
 //
-// 病（57 屏逐屏观察 `../ui-page-audit/shots/04`、`shots/13`）：正文**直接吃原文**——AI 报告的
+// 病（57 屏逐屏观察 `.scratch/_archive/2026-11/ui-page-audit/shots/04`、`shots/13`）：正文**直接吃原文**——AI 报告的
 // `# 标题`／`**加粗**`、关卡那份「完整方案」、站 2 卡尾那三条如实说明里的排版标记**逐字印在屏上**。
 // 处置：一段以上的正文只有一个入口，两档分派（spec §1·2）：
 //   · `markdown` → **既有报表块**（`exploreReportBlocks`：`# `/`## ` 标题、`**加粗**`、`- ` 列表，

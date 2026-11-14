@@ -149,7 +149,7 @@ const ACTION_DEFINITIONS = [
 	// `workbenchExposure: 'callable'`：它只在工作台界面由用户点（那张屏由票 12 落在阶段页）。
 	['knowledge-graph-backfill', 'chapters', 'session-book', 'callable', false, null, null],
 	// 票 `reader-cognition-boundary-build/03`：**读者情况问卷的往返通道**——`issue` 给出那一份
-	// （服务端把纸屏两用的 `.md` 写进书夹，界面再走通用下载路由交给收卷人）、`submit` 收回卷
+	// （服务端把屏一用的 `.md` 写进书夹，界面再走通用下载路由交给收卷人）、`submit` 收回卷
 	// （造书用户把整段文字手粘回来，内容逐字落成书夹一份 `.md`）。
 	// ⚠️ 两条都 `agentCallable: false`：发卷／粘回卷是**造书用户本人**的动作（与 `review`／
 	//    `skip-step` 同一条理由——谁填的／谁粘的＝人，AI 不能代）。
@@ -160,6 +160,12 @@ const ACTION_DEFINITIONS = [
 	//    （新族＝新 module ＋ 族闭包三处同改，而语义上它并不比 `chapters` 更窄）。
 	['reader-questionnaire-issue', 'chapters', 'session-book', 'callable', false, null, null],
 	['reader-questionnaire-submit', 'chapters', 'session-book', 'callable', false, null, null],
+	// 票 `reader-questionnaire-ai-authoring/05`：**读卷那一路的派单**（回卷件落盘之后由主笔叫）：
+	// 先冷恢复 `meta.questionnaireAgentId` 那一个子助手（`resumed`），唤不醒就新起一路上下文干净的
+	// 读卷子代理（`rehydrated`，三件注入补齐），哪一档走过写进 `meta.questionnaireAgentResume`。
+	// ⚠️ `agentCallable: true`：这是主笔自己的内务（与 `agent-assign` 同一档），不是用户按的键。
+	// ⚠️ `workbenchExposure: null`：用户看到的不是这颗键，而是它派出去的那一路回来后的读数。
+	['reader-questionnaire-analyze', 'chapters', 'session-book', null, true, 'reader-questionnaire-analyze', null],
 ]
 
 /**

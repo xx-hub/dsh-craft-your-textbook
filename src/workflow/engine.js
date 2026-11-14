@@ -105,6 +105,9 @@ import {
 //    不是对外能力（`deep-module-scan/08` 收窄过导出面，别再把它撑回去）。
 import { PROJECT_ID_RE, goldN, paragraphOpinion, paragraphReviewText, WAIVER_ITEMS, PHASE_LABELS, GATE_LABELS, STAGE_LABELS, stageLabel, EXPLORE_DONE_HINT, STATION_GOALS_DONE_HINT, STATION_VALUE_EDIT_HINT, FINAL_CHECK_DONE_HINT, finalCheckDoneHint, REPORT_WORDING_RULE } from './engine/labels.js'
 import { dshHome, projectsRoot, registryPath, readRegistry, writeRegistry, registerProject, sessionWorkspace, sanitizeFolderName, freeBookDir, projectDir, timelinePath, metaPath, processLogPath, workDir, workFile, chapterArtifacts, detailDir, reportDir, proposalDir, processDir, archiveDir, materialDir, convertedDir, bookRelOnDisk, legacyDirConflicts } from './engine/paths.js'
+// 票 `chapter-teaching-handbook/03`：章末带读手册的形状判据（G1′／G2′／G3′）与两档形态常量。
+// ⚠️ 常量与纯判据住在 `chapter-handbook.js`（不读盘），这里只再导出并把「读 style-spec」那一半接上。
+import { HANDBOOK_FORM_BY_ROUTE, handbookPositionExpectation, handbookProblems, h2Sections, isTeachingAreaTitle } from './chapter-handbook.js'
 // ⚠️ `writeMeta` **只进不出**：store.js 导出它（appendEvent 至今仍住在本文件，是账高与「最后动静
 //   时刻」的唯一写入者，必须够得着它），但下面那个 export 块**不列**它——ADR-0016 决策 2 的两半。
 //   防回潮断言（`key in engine`）见 test-ledger-seq-integrity.mjs。
@@ -2187,6 +2190,31 @@ function handoffAndDrive(ctx, projectId, stage, gate = null, snapshotReason = nu
  * @param {string} stage 章级阶段（`CHAPTER_PROGRESS_STAGES` 里的取值）
  * @returns {boolean} 落了没有
  */
+/** 把 `chapterPipeline` 的**长度对齐到大纲的章数**（票 `real-machine-walkthrough-20261114/04`）。
+ *
+ *  病（2026-11-14 真机，九章的书）：`chapterPipeline` 盘上是**长度 4 的数组、3 个 `null`**——
+ *  因为 {@link recordChapterStage} 只在**某章真的上报过**时才把数组长到那个下标；九章里只有
+ *  第 4 章报过，于是「每章一条轨」实际上只对**报过的那几章**成立，第 5 章起**没有位置**，
+ *  「每章都审过吗」这个判断在 5 章以后失去依据（并行铺章时多章还会抢同一个槽位）。
+ *  ⇒ 章数一确定（大纲落盘那一刻）就把数组**按章数铺满 `null`**：`null` 的意思是「这一章还没上报」，
+ *  不是「没有这一章」。
+ *
+ *  ⚠️ 只**加长**不缩短：已经报过的章不许因为大纲变短而被抹掉（`deep-modify` 回退时另有清理点）。
+ *
+ *  @param {object} state `updateMeta` 闭包里那份 meta
+ *  @param {number} chapterCount 章数（非正整数＝不动）
+ *  @returns {boolean} 改了没有
+ */
+export function ensureChapterPipelineSize(state, chapterCount) {
+  const count = Number(chapterCount)
+  if (state === null || typeof state !== 'object' || !Number.isSafeInteger(count) || count < 1) return false
+  const pipeline = Array.isArray(state.chapterPipeline) ? state.chapterPipeline.slice() : []
+  if (pipeline.length >= count) return false
+  while (pipeline.length < count) pipeline.push(null)
+  state.chapterPipeline = pipeline
+  return true
+}
+
 export function recordChapterStage(projectId, chapterN, stage) {
   const n = Number(chapterN)
   if (!Number.isSafeInteger(n) || n < 1) return false
@@ -2511,10 +2539,39 @@ function isRunning(projectId) {
 /** 「正文里有乱码（U+FFFD）」的**同一份判据**：阶段一转换稿与阶段六成品共用。
  *
  *  ⚠️ 票 `flow-audit-2026-10/02` 的明令：阶段一推进前的转换稿内容检查与 `runQualityChecks`
- *  的「成品无乱码（U+FFFD）」**不许各写一套阈值**。这里只判「出现即不合格」——与阶段六那一格
- *  逐字同一个条件（不是「成规模才算」，也不是比例阈值）。 */
+ *  的「成品无乱码（U+FFFD）」**不许各写一套阈值**。判据收在 {@link classifyReplacementChars} 一处。
+ *
+ *  ⚠️ **票 `real-machine-walkthrough-20261114/01`（2026-11-14 真机改）**：原来是「出现即不合格」，
+ *  在真机上把一本 175 页的书整个卡死在阶段一——源 PDF 的**章节标题里带 emoji**（🎬🧭📌🔧🌐），
+ *  MinerU 把这些字形转成 `U+FFFD`：213,850 字里 91 处，**90 处在 `##` 标题行、全部是单字**，
+ *  正文一个字没坏，而判据判整份不合格、给的出口（补传／删掉）都走不通。
+ *  ⇒ 今天按**形状**分两档：**成片坏**（连续 ≥3 个，或占比 > 0.2%）判不合格；
+ *  **零星单字**（全部是单字替换、占比很小）判「装饰字形丢失」，**不拦**，但逐份点名告知。
+ *  这一档没有放宽到「比例阈值可以随便调」：两个数都是**当场的读数**，改它们要连带改这一节的判据与票。 */
+function classifyReplacementChars(text) {
+  const source = String(text)
+  let count = 0
+  let maxRun = 0
+  let run = 0
+  for (const character of source) {
+    if (character === '\uFFFD') {
+      count += 1
+      run += 1
+      if (run > maxRun) maxRun = run
+    } else {
+      run = 0
+    }
+  }
+  const ratio = source.length === 0 ? 0 : count / source.length
+  const level = count === 0
+    ? 'clean'
+    : (maxRun >= 3 || ratio > 0.002 ? 'garbled' : 'decorative')
+  return { level, count, maxRun, ratio, chars: source.length }
+}
+
+/** 旧名保留（两处调用点与判据注释都引它）：今天只回答「**成片坏**」那一种。 */
 function hasReplacementChar(text) {
-  return String(text).includes('\uFFFD')
+  return classifyReplacementChars(text).level === 'garbled'
 }
 
 
@@ -2530,10 +2587,13 @@ function hasReplacementChar(text) {
  *
  *  @param {string} projectId
  *  @param {Array<object>} sources `meta.sources`
- *  @returns {Array<{file: string, why: string, detail: string}>}
+ *  @returns {{problems: Array<{file: string, why: string, detail: string}>, warnings: Array<{file: string, why: string, detail: string}>}}
+ *   `problems` 是**拦**的那一档（缺件／空／成片乱码／原件不在）；`warnings` 是**不拦但要点名**的那一档
+ *   （票 `real-machine-walkthrough-20261114/01`：零星替换字符＝装饰字形丢失，正文没坏）。
  */
 function convertedSourceProblems(projectId, sources) {
   const problems = []
+  const warnings = []
   for (const source of sources) {
     if (convertedState(source) !== 'ok') continue
     const file = typeof source?.file === 'string' && source.file !== '' ? source.file : '（未命名的材料）'
@@ -2563,18 +2623,47 @@ function convertedSourceProblems(projectId, sources) {
       problems.push({ file, why: '空', detail: `转换稿是空的（${rel}）` })
       continue
     }
-    if (hasReplacementChar(text)) {
-      problems.push({ file, why: '乱码', detail: `转换稿里有替换字符 U+FFFD（${rel}）` })
+    const garble = classifyReplacementChars(text)
+    if (garble.level === 'garbled') {
+      problems.push({
+        file,
+        why: '乱码',
+        detail: `转换稿里有成片的替换字符 U+FFFD（${rel}：${garble.count} 处，最长连续 ${garble.maxRun}，占比 ${(garble.ratio * 100).toFixed(2)}%）`,
+      })
+    } else if (garble.level === 'decorative') {
+      // 票 `real-machine-walkthrough-20261114/01`：不拦，但要**点名告知**——
+      // 用户有权知道「这份转换稿掉了几个装饰字形」，而不是被静默放过。
+      warnings.push({
+        file,
+        why: '装饰字形丢失',
+        detail: `转换稿里有 ${garble.count} 个替换字符 U+FFFD（${rel}），全部是零星单字、占比 ${(garble.ratio * 100).toFixed(2)}%，正文没坏——多半是源文件标题里的 emoji／符号在转换时丢了，不影响后续各阶段`,
+      })
     }
   }
-  return problems
+  return { problems, warnings }
 }
 
+
+/** 每一维坏法**给用户的那一条路**（票 `real-machine-walkthrough-20261114/02`）。
+ *
+ *  病（真机 2026-11-13）：错误卡只说「乱码：转换稿里有替换字符 U+FFFD」，用户不知道那是什么、
+ *  不知道影响面、而唯一给的出口（补传同一份）**结果不变**、另一个（删掉）等于没材料。
+ *  ⇒ 今天按 `why` 给病因与可走的路；认不出的维度回落到原来那句通用话（⛔ 不编）。 */
+function guidanceFor(problem) {
+  if (problem.why === '乱码') {
+    return '这多半是原件没有文字层（扫描件），或原件里有转换器读不出的特殊字符。可以：① 用别的工具把原件另存成带文字层的 PDF 再补传；② 换一份同类材料；③ 删掉这份材料继续。'
+  }
+  if (problem.why === '空') return '这份材料转换出来是空的，通常是原件本身没有可提取的文字。请换一份，或删掉这份材料继续。'
+  if (problem.why === '缺件') return '这份材料的原件或转换稿在盘上找不到了（可能被移动或清理过）。请补传这一份，或删掉这份材料继续。'
+  if (problem.why === '原件不在') return '原件已经从材料目录里消失了。请补传这一份，或删掉这份材料继续。'
+  return '请补传这一份，或删掉这份材料后再继续。'
+}
 
 /** 把阶段一的内容级坏源转成 `failed` 并让书停在 error；返回给用户逐份点名的话。 */
 function markConvertedSourceFailures(projectId, problems) {
   const detail = problems.map((problem) => `${problem.file}（${problem.why}：${problem.detail}）`).join('；')
-  const message = `这些材料的转换稿不合格：${detail}。请补传这一份，或删掉这份材料后再继续。`
+  const routes = [...new Set(problems.map(guidanceFor))].join(' ')
+  const message = `这些材料的转换稿不合格：${detail}。${routes}`
   updateMeta(projectId, (state) => {
     for (const problem of problems) {
       const target = (state.sources ?? []).find((source) => source?.file === problem.file)
@@ -2619,9 +2708,17 @@ async function runPhase1(_ctx, projectId, meta) {
         // 全都会推进到阶段 2。这里逐份做四维内容检查（与阶段六无乱码同一份判据），不合格的源转
         // `failed`、书停在阶段 1，走既有的「补传这一份／删掉这份」出口——⛔ 不静默推进。
         const okSources = currentSources.filter((source) => convertedState(source) === 'ok')
-        const contentProblems = convertedSourceProblems(projectId, okSources)
-        if (contentProblems.length > 0) {
-          markConvertedSourceFailures(projectId, contentProblems)
+        const contentReport = convertedSourceProblems(projectId, okSources)
+        if (contentReport.warnings.length > 0) {
+          // 不拦，但逐份点名（票 `real-machine-walkthrough-20261114/01`／`02`）：
+          // 「转换稿里有几个装饰字形丢了、正文没坏」这件事用户有权知道。
+          appendEvent(projectId, 'textbook/hint', {
+            text: `这些材料的转换稿有小瑕疵，不影响继续：${contentReport.warnings.map((w) => `${w.file}（${w.why}）`).join('；')}`,
+            details: contentReport.warnings,
+          })
+        }
+        if (contentReport.problems.length > 0) {
+          markConvertedSourceFailures(projectId, contentReport.problems)
           return 'error'
         }
         // ── 票 `confirm-points-redesign-build/15`：**站 1（材料就绪）的写点** ─────────────────────
@@ -4042,6 +4139,36 @@ function styleSpecDeclaresNoExercises(projectId) {
   return /不设练习|无练习|不设习题|无习题|不写练习|不要练习/.test(spec)
 }
 
+/**
+ * 章末带读手册的**读盘一半**（票 `chapter-teaching-handbook/03`）：从 style-spec 读板块白名单与
+ * 位置声明，再喂给 `chapter-handbook.js` 的纯判据。判据本体不在这里，⛔ 别在调用点重写一份。
+ *
+ * ⚠️ **枚举面窄处**（与纯模块文件头同一份）：位置声明只认「位置：…倒数第 N 节／末节／第 N 节」；
+ * 板块白名单只认 `parseDesignBoards`／`parseStyleSpecList` 读得出来的写法。读不出 ⇒ 该半条**不判**
+ * （不是默认通过：`readings.boards`＝0 会如实回给调用方）。
+ *
+ * @param {string} projectId
+ * @param {string} chapterText 章正文全文
+ * @param {{route?: string}|null} [meta]
+ * @returns {{problems: object[], readings: object, bodyText: string, boards: string[], position: object|null, route: string|null}}
+ */
+export function chapterHandbookReading(projectId, chapterText, meta = null) {
+  const specPath = workFile(projectId, 'style-spec.md')
+  const spec = existsSync(specPath) ? readFileSync(specPath, 'utf8') : ''
+  const boards = parseDesignBoards(spec) ?? parseStyleSpecList(spec, '必含板块') ?? []
+  const position = handbookPositionExpectation(spec)
+  const route = typeof meta?.route === 'string' && meta.route.trim() !== '' ? meta.route.trim() : null
+  // 本书有没有**采纳**手册形态：style-spec 的板块表里声明了教学区，或正文里有「章末教学区规范」。
+  // 没声明 ⇒ 三条都不判（老书／还没写到这一项的书），⛔ 不误杀；练习闸门也照旧扫全章。
+  const declared = boards.some((board) => /教学区|带读手册|教师手册/.test(board)) || /章末教学区/.test(spec)
+  const { problems, readings } = handbookProblems({ chapterText, route, boards, position, enabled: declared })
+  // 正文＝教学区之前的那一段；没有教学区（或本书没采纳手册形态）时退回全文——练习闸门照旧扫全章。
+  const sections = h2Sections(chapterText)
+  const index = sections.findIndex((section) => isTeachingAreaTitle(section.title))
+  const bodyText = index === -1 ? chapterText : chapterText.slice(0, sections[index].start)
+  return { problems, readings, bodyText: declared ? bodyText : chapterText, boards, position, route, declared }
+}
+
 
 // ── 票 `pre-gold-build/16`：交付清单那四道（债-14／16／20／22）──────────────────────────
 //
@@ -4577,12 +4704,16 @@ function runQualityChecks(projectId) {
     //    契约类检查全部挂豁免，机器误判时用户不被卡死）。**须逐条点名**（票 `walkthrough-fixes/23`）。
     //    ⚠️ 票 `flow-audit-2026-10/02`：判据收进 `hasReplacementChar`，与阶段一推进前对转换稿的
     //    内容检查**同一份**——两处各写一个 `includes` 正是「同一口径」两句空话的来源。
-    const garbled = hasReplacementChar(bookText)
+    const garble = classifyReplacementChars(bookText)
     checks.push({
       name: '成品无乱码（U+FFFD）',
-      ok: !garbled,
-      otherDetail: garbled ? '成品里有乱码字符' : undefined,
-      note: garbled ? '成品里有乱码字符，需要清理' : '没有乱码',
+      ok: garble.level !== 'garbled',
+      otherDetail: garble.level === 'garbled' ? '成品里有成片的乱码字符' : undefined,
+      note: garble.level === 'garbled'
+        ? `成品里有成片的乱码字符（${garble.count} 处，最长连续 ${garble.maxRun}），需要清理`
+        : (garble.level === 'decorative'
+          ? `有 ${garble.count} 个零星替换字符（占比 ${(garble.ratio * 100).toFixed(2)}%），多半是 emoji／符号丢了，不拦`
+          : '没有乱码'),
     })
     // ② 章节数符合大纲（从 outline 读，非硬编码）
     const chapterHeadings = (bookText.match(/^#{1,3}\s*第\s*\d+\s*章/gm) ?? []).length
@@ -4919,7 +5050,11 @@ function runQualityChecks(projectId) {
         name: '字数兜底读数',
         ok: true,
         note: problems.length === 0
-          ? `${wordFloorRows.length} 章都达到兜底：兜底 ${floorTotal} 汉字 / 实际 ${actualTotal} 汉字（超了不限，不设上限）`
+          // 票 `real-machine-walkthrough-20261114/06`：把**超写比例**印出来。
+          // 真机那本九章实测 156%（单章最高 207%），而旧文案只说「超了不限，不设上限」——
+          // 用户看不到自己比目标多写了多少。这一格仍是**读数不判红**（超写不是驳回理由），
+          // 但比例必须可见。
+          ? `${wordFloorRows.length} 章都达到兜底：兜底 ${floorTotal} 汉字 / 实际 ${actualTotal} 汉字（${floorTotal > 0 ? Math.round((actualTotal / floorTotal) * 100) : 100}%，超了不限、不判红——超写比例只报数）`
           : `字数兜底读数：${problems.slice(0, 3).join('；')}——这些章在逐章交工处应已被拒；旧账本/绕过交工到达这里时只报数，不在这里重复拦`,
       })
     }
@@ -5534,7 +5669,9 @@ export const STAGE_STATE_INJECTIONS = [
     why: '这一步该有的产物还不在盘上（artifact）——缺件时最该给的是它的形状契约',
     reason: 'artifact',
     // 票 `injection-face-fixes/02`：关卡按 (`pendingStage`, `pendingGate`) 取节（gate 一站三关三节）。
-    inject: (meta) => [{ rel: SHAPE_DOC, headings: shapeHeadingsFor(meta.pendingStage, meta.pendingGate) }],
+    // `shapeContract`：这一根接的是**这一关的题面**⇒ 不过体积线（票 `skill-canon/01`，
+    // 理由见 `isShapeContractWiring()` 头上那段）。⛔ 别的接线要免检得自己声明，别靠文件名继承。
+    inject: (meta) => [{ rel: SHAPE_DOC, headings: shapeHeadingsFor(meta.pendingStage, meta.pendingGate), shapeContract: true }],
   },
   {
     id: '旧审计过期',
@@ -5611,7 +5748,8 @@ export const STAGE_STATE_INJECTIONS = [
       const next = NEXT_STAGE[meta.pendingStage] ?? meta.pendingStage
       // 下一站是**另一个站**：它的关卡号还没定下，所以传 null（gate 那一格退回关卡③那一节；
       // 今天 `NEXT_STAGE` 里没有一站指向 gate，这一支是形状兜底，不是活路径）。
-      return [{ rel: SHAPE_DOC, headings: shapeHeadingsFor(next, null) }]
+      // `shapeContract`：同一类豁免（下一站的题面也不许被指针化）。
+      return [{ rel: SHAPE_DOC, headings: shapeHeadingsFor(next, null), shapeContract: true }]
     },
   },
 ]
@@ -5844,18 +5982,45 @@ function pointerMarks(rel) {
  * 以下的留正文。」
  *
  * ⚠️ 那个 `~` 是原文自己的措辞，权威源**没有**给可执行阈值 ⇒ 本实现**当场把一个数冻在这里**：
- * **1000**（`>=` 即过线）。取它的理由（2026-10-16 现跑读数，见票面 `## Answer`）：今天过线那一族最小的
- * 是 §十·gold **1,033c**，没过线那一族最大的是 `file-contracts.md`「章节骨架」**947c** ⇒ 947–1033 之间
- * **没有任何一节**，取 1000 与取「~1,000」附近任何整数结果完全相同，而 1000 正好是人读得懂的那个整千。
+ * **1000**（`>=` 即过线）。取它的理由（2026-10-16 现跑读数，见票面 `## Answer`）：**当时**过线那一族
+ * 最小的是 §十·gold **1,033c**，没过线那一族最大的是 `file-contracts.md`「章节骨架」**947c**
+ * ⇒ 947–1033 之间没有任何一节，取 1000 与取「~1,000」附近任何整数结果完全相同。
+ * ⚠️ **那两个读数已过期**（票 `skill-canon/01`，2026-11-05 复采）：`## 章节骨架` 涨到 **1,132c**，
+ * 这一份里另有三节也过了线（`## 章末带读手册` 1,073c／`## 知识点三套载体` 1,172c／`## 章正文与分片` 1,062c）。
+ * 阈值本身**没有跟着调**——1000 仍是那个整千；过线之后的处置由下面那条 `shapeContract` 豁免承接。
  * ⛔ **不抄业界的「200 行」**（spec §5.2 末：那是外部量纲；压的是体积、不是信息量）。
  *
  * ⚠️ **判的是体积，不是行名**：阈值看的是 `pickSections(...)` 切出来那一段的字符数——文档长胖了自动
  * 过线、瘦了自动回正文。⛔ 不写「哪几节过线」的黑名单（那会随文档漂而静默失效）。
+ * ⚠️ 唯一的例外是**接线自己声明**的 `shapeContract`（下面那个谓词）——它不是黑名单，是
+ * 「这一根接的是这一关的题面」这一件**结构性事实**；没声明的一律按现量过线。
  * 判据侧正相反：期望值是**手写**的那份清单（⛔ 不从本常量反解）。
  * **我的枚举面比现实窄在哪里**：只量 `pickSections` 切出来那一段，不量它在 brief 里的最终增量
  * （那 3 行口径本身也有体积）。
  */
 const INJECTION_POINTER_MIN_CHARS = 1000
+
+/**
+ * **不过体积线的那一类接线：形状契约**（`file-contracts.md` 里「这一关要产出的东西长什么样」的节）。
+ *
+ * 为什么它不能跟别的节一起指针化（票 `skill-canon/01` 撞出来的连带，2026-11-05）：
+ * 体积线压的是「**说明**」那一半——正文在盘上、按需回读不丢信息量。但形状契约是**这一关被要求
+ * 产出的东西的题面**：gate③ 要交章节骨架，指针化之后主笔拿到的只有「去读 §章节骨架」，
+ * **题面本身没到场**（`test-shape-heading-by-gate.mjs` 与 `test-gate3-knowledge-map.mjs` 的 R4
+ * 都断这一节以**正文**进 brief）。⇒ 它与 C1／C4 同族（spec §5.3：机器要验的口径必须在派单件里），
+ * 只是它不在那张六格表上——那张表列的是「压不下去的**常驻**面」，这一条是**按接线**的豁免。
+ *
+ * ⚠️ **它按「接线」豁免，不按「文件」豁免**（收口 review 订正）：谓词读的是接线对象上自己声明的
+ * `shapeContract: true`（见 `STAGE_STATE_INJECTIONS` 那两行），**不是** `rel === SHAPE_DOC`
+ * ——后者会把这一份里**每一节**都免检，而今天真过 1,000c 的已有四节（`## 章末带读手册` 1,073c／
+ * `## 章节骨架` 1,132c／`## 知识点三套载体` 1,172c／`## 章正文与分片` 1,062c），其中三节今天
+ * **没有接线**、也就不该被这条豁免顺带放行。⇒ 将来给那一份里别的节补接线时，**要自己声明**
+ * `shapeContract` 才免检；不声明就按现量过线（⛔ 不静默继承）。
+ *
+ * 判据侧（`test-tool-discipline.mjs` 的 `INJECTION_VOLUME_EXPECT`）是**手写的期望**（`exempt` 列），
+ * 并按盘上正文**现量**复核那一行的 `over`——过线的事实不因为豁免就改口；⛔ 不从本谓词反解。
+ */
+const isShapeContractWiring = (wiring) => wiring.shapeContract === true
 
 /**
  * 过线那一节的「**3 行口径**」（票 12 · R1）。
@@ -5920,8 +6085,9 @@ function sectionMismatchLine(rel) {
  * **三种接线形状**（票 11 加了第三种，票 12 给第一种加了体积线）：
  * ① `{ rel, headings }` —— 取那几节正文（默认形状）。⚠️ **票 12 起按体积二次分流**：那几节合起来的
  *    字符数 `>= INJECTION_POINTER_MIN_CHARS` 时**不再 push 正文**，改印「3 行口径 ＋ 指针」
- *    （`injectionPointerLines()`）；以下的照旧进正文。`rel`／`headings` 两种情形都照旧登记进
- *    `rels`（挂载面闭包与指针兜底的 `§节号` 都不许因此少一格）。
+ *    （`injectionPointerLines()`）；以下的照旧进正文。⚠️ **例外**：接线自己带 `shapeContract: true`
+ *    的那几根**不适用这条线**（下文 `isShapeContractWiring()`：它是这一关的题面），一律留正文。
+ *    `rel`／`headings` 两种情形都照旧登记进 `rels`（挂载面闭包与指针兜底的 `§节号` 都不许因此少一格）。
  * ② `{ rel, full: true }` —— 整份正文（**今天零处**：原来的三处已改转发，见下）；
  * ③ `{ rel, forward: '<dispatchKind>' }` —— **转发**：`rel` 照旧登记进 `rels`（挂载面闭包不变），
  *    但**不拼正文**，只印一条「档名 ＋ 路径 ＋ 全文去哪了」的标记。今天恰好三处，都在
@@ -6018,11 +6184,13 @@ export function resolveInjections(rows, meta, facts, state) {
         ensureRel(wiring.rel)
         const secNames = wiring.headings.map((h) => `§${h.replace(/^#{2,3} /, '')}`)
         mark = `${wiring.rel} ${secNames.join('、')}`
-        if (section.length >= INJECTION_POINTER_MIN_CHARS) {
+        if (section.length >= INJECTION_POINTER_MIN_CHARS && !isShapeContractWiring(wiring)) {
           // 票 12 · R1：过线 ⇒ **只留口径 ＋ 指针**。⚠️ 这里**不 `continue`**：`rels.push` 与上面的
           // `mark` 都已发生——挂载面闭包、指针兜底的 `§节号`、「同一串标记只印一遍」那几道既有
           // 闭包吃的都是这两样，删了任何一样都会让它们以「少一格」红（与票 11 的 `forward` 同一手法，
           // 只是票 11 少了「留节号标记」那一半，本票要留）。
+          // ⚠️ 声明了 `shapeContract` 的那几根接线**不过这条线**：它是这一关的题面，
+          // 指针化＝题面没到场（票 `skill-canon/01` 的连带，理由写在那个谓词头上）。
           overPointer = injectionPointerLines(wiring.rel, secNames, section.length)
         } else {
           const key = `${wiring.rel}\u0000${[...wiring.headings].sort().join('\u0000')}`
@@ -6429,6 +6597,22 @@ function attachInvariants(brief, stageKey, ctx) {
 }
 
 /**
+ * 写章两站（`gold`／`chapters`）共用的一句：让主 AI **交工前**就知道 G3′ 的存在与形状。
+ *
+ * ⛔ **不抄第二份规则文本**（ADR-0033 决策 2：转抄必然漂）：这里只有判据名＋形状＋后果，
+ * 判据正文仍只在 `resources/references/subagent-prompts/writing-agent-prompt.md` 与
+ * `resources/references/invariants.md` 一处。⛔ 不新增注入节、不新增恒载——落在既有的
+ * 随阶段变的 `hints` 里（票 `chapter-handbook-gate/03`）。
+ * ⚠️ 枚举面窄处：只点名基线那三种形状（加粗标签行／纯标签行／用板块名起头的表格单元格），
+ * 标题行那一档没写进去；这句的强度＝「让 AI 知道有闸」，⛔ 不是 G3′ 的完整形状表。
+ * ⚠️ 后果句点名**章交工验**：G3′ 的唯一调用点在 `actions/chapters.js` 的
+ * `chapterHandbookReading`（`stage-submit(chapters)`）；`gold` 站自己的交工**不跑这道闸**
+ * （范例章那一章被 `chapterDone` 过滤出 `remaining`），所以这里不写「机器交工时就拒」——
+ * 那句话在 gold 站不成立，会让 AI 以为本站有闸。
+ */
+const CHAPTER_BODY_G3_HINT = '章正文（教学区之前）写散文与内容表格；加粗的标签行、纯标签行、用板块名起头的表格单元格，章交工验时按 G3′ 拒收。'
+
+/**
  * 一张 **stage → facts** 的表（票 `depth-round-3/08`）。
  *
  * ⚠️ 它是 **implementation 的内部组织，⛔ 不导出**：每一格只声明**自己那几个键**（返回的对象字面量
@@ -6480,7 +6664,16 @@ const STAGE_FACTS = Object.freeze({
         + `落记录走**既有**那条图上「意见」通路 \`graph-opinion\`（\`verdict=不讲\`、\`verdictReason=已经会\`）`
         + '——与图上那把划子是**同一支动作、同一份剔除记录**（⛔ 不给问卷另设一条写路）。'
         + '⛔ **不要自己手写**那份 `工作区/knowledge-map-exclusions.json`：它只经那支动作写，读的时候按人产物读。'
-        + '记错了的用户能在图上照旧按 ↩ 放回来；这一步只把回卷件上那几条勾选落成记录，⛔ 不改图、⛔ 不改覆盖闸门。']
+        + '记错了的用户能在图上照旧按 ↩ 放回来；这一步只把回卷件上那几条勾选落成记录，⛔ 不改图、⛔ 不改覆盖闸门。'
+        // 票 `reader-questionnaire-ai-authoring/05`：**先派读卷那一路**（冷恢复同一个写卷人；
+        // 唤不醒就新起一路上下文干净的读卷子代理）。⚠️ 意图件不在盘上时那一跳自己会跳过
+        // （回包 `skipped: 'no-intent'`）——那时就照上面这条既有教学句自己逐条读。
+        + `⚠️ 走法：先叫 \`workbench_act(action=reader-questionnaire-analyze)\`——它会先冷恢复当初写卷那个小助手`
+        + '（它带着自己当初为什么这么问），唤不醒就新起一路上下文干净的读卷子代理（三件注入由机器补齐），'
+        + '哪一档走过写进书账本 `meta.questionnaireAgentResume`；它交 `工作区/问卷判断.json`'
+        + '（`drop` ＝明确勾了「已经会」的；`skip` ＝不确定／没勾的，**只作读数**）。'
+        + '**你照 `drop` 逐条发 `graph-opinion` 落记录**（子助手自己发不了：它有独立 sessionId，会被归属闸拒，那是设计）。'
+        + '意图件不在盘上时那一跳回 `skipped`：那时就照上面这条路自己逐条读。']
     }
     facts.task = '读上一站拍下的那份材料报告与它给你划掉的那几条，写下「**学完要能做到什么**」：'
       + `${'3–5 条'}具体、可检验的目标，一条一句话（读者学完能独立做到什么，不是这本书讲了什么）。`
@@ -6490,6 +6683,24 @@ const STAGE_FACTS = Object.freeze({
     facts.outputs = 'goals（字符串数组，一条一句）通过 stage-submit（stage=goal）提交：'
       + '机器把它落成 工作区/目标-v<版本>.md（带版本号），并停在你那一屏等用户逐条改／删／加之后**整批一次过**；'
       + '用户「让 AI 重写这几条」时你会拿到他的意见，那一趟写的是**下一版**（目标-v<版本+1>.md）。'
+    // ── 票 `reader-questionnaire-ai-authoring/04`：**发卷前派一路写卷小助手** ────────────────
+    // 为什么住在这一站（goal）：合并件是**探索段交工那一刻**才由机器拼出来的（`stage-submit(explore)`），
+    // 所以写卷最早只能落在下一段；而 goal 这一步的登记行里正好有 `工作区/knowledge-map.json`
+    // （`STEP_INPUT_ROWS.goal`）——那是「值从哪来」这件事本身。⚠️ 它与站 2 那一屏上的「发问卷」两颗键
+    // 同在用户看得见的那一屏前后：**题面没交回也不阻塞发卷**（用户点发卷照发今天的确定性版）。
+    facts.hints = [...(facts.hints ?? []),
+      '读者问卷的**题面**：发卷之前先派一路写卷小助手（`workbench_act(action=agent-assign, dispatchKind=questionnaire-author)`）'
+      + '——机器按 `resources/references/subagent-prompts/questionnaire-author-prompt.md` 代填（合并件、两个交付路径、'
+      + '**机器已选好的条目清单**、三条字数上限都在值块里），它交 工作区/问卷题面.json 与 工作区/问卷意图.md。'
+      + '它交回的题面要过机器那道形状闸（不过 ⇒ 你拿到 400 的原文与点名，**按原文重派一次**，⛔ 不许你自己改题面代交）。'
+      + '⚠️ 它没回来／整份没交都**不阻塞发卷**：用户点「发问卷」时照发今天的确定性版。',
+      // 票 `reader-questionnaire-ai-authoring/05`：**回卷之后**那一路（两档：冷恢复同一个写卷人／干净重派）。
+      '读者问卷的**读卷**：如果这本书已经有回卷件（`工作区/读者情况回卷.md`），就叫 '
+      + '`workbench_act(action=reader-questionnaire-analyze)`——它先冷恢复当初写卷那个小助手，'
+      + '唤不醒就新起一路上下文干净的读卷子代理（三件注入由机器补齐），它交 `工作区/问卷判断.json`；'
+      + '你照它 `drop` 逐条发 `graph-opinion` 落记录（⛔ `skip` 一条不落）。'
+      + '意图件不在盘上 ⇒ 那一跳回 `skipped`，就照既有那条教学句自己逐条读。',
+    ]
     facts.materials = sources
     facts.methodology = mtl('SKILL.md')
     // 站 3 驳回之后的「让 AI 重写这几条」：用户上一句意见随这一趟交办件读
@@ -6601,7 +6812,7 @@ const STAGE_FACTS = Object.freeze({
       // 站 4 吃它要走的指针也归那一票接线（本票只改这一关**怎么做**，不替上游编一个还不存在的路径）。
       '1': '复核并细化学习目标（这一关**不再从零推导**）：对着上游那一站已经拍定的 3–5 条目标逐条过一遍，把这一关要动的地方记成三条——新增哪一条、把哪一条改写成什么、删掉哪一条；这三条随本关提案一起交给用户拍板。另外答一句：这本书主要怎么学（用户会在这张卡上把这一项拍定）。最大的坑是什么？',
       '2': '教学模式选型与板块语法：读了模式库，考虑过哪些、拒绝哪些、为什么；选中的模式解决本书哪个教学问题；设计每章的板块结构。',
-      '3': '整书教学架构：知识链主线、卷/部划分、特殊章、跨章引用机制、附录策略、贯穿案例约定（每章的**锚定知识点来自知识地图**：探查段合并件 工作区/knowledge-map.json；无源书没有知识点清单时，改写锚定的源任务或概念）。⚠️ **逐章骨架表不在这一关写**（票 `confirm-points-redesign-build/07`：它归「章节安排」那一站按本关定下的架构逐章落——两处各写一张表正是「一处说 10 章、另一处 12 章」那个打架实例的来路）。**另有两件在**这一步**就要答、不能拖到写范式章才答**：①本书第一读者是谁（AI 老师 / 人类读者）；②防螺旋铁律的**设计期禁令**——从这一关拍板到写作规范产出之间，不许自行加章/加附录/加机制级板块，真要加等用户走定点修改重新拍板（style-spec 里的「防螺旋铁律」那一项记的是**定稿之后**的回炉规则，两半不是一回事）。',
+      '3': '整书教学架构：知识链主线、卷/部划分、特殊章、跨章引用机制、附录策略、贯穿案例约定、跨章事实表（每章的**锚定知识点来自知识地图**：探查段合并件 工作区/knowledge-map.json；无源书没有知识点清单时，改写锚定的源任务或概念）。⚠️ **逐章骨架表不在这一关写**（票 `confirm-points-redesign-build/07`：它归「章节安排」那一站按本关定下的架构逐章落——两处各写一张表正是「一处说 10 章、另一处 12 章」那个打架实例的来路）。**另有两件在**这一步**就要答、不能拖到写范式章才答**：①本书第一读者是谁（AI 老师 / 人类读者）；②防螺旋铁律的**设计期禁令**——从这一关拍板到写作规范产出之间，不许自行加章/加附录/加机制级板块，真要加等用户走定点修改重新拍板（style-spec 里的「防螺旋铁律」那一项记的是**定稿之后**的回炉规则，两半不是一回事）。',
     }[String(gate)] ?? ''
     // 票 `pre-gold-build/09`（债-09 的场内标注）：上面那三段实质内容**一个字未删**，只在末尾补一条
     // 照实读数——三关的**实质内容**机器零内容判据，闸门今天判的是另一样东西（三段非空 ＋ 占位词表）。
@@ -6890,6 +7101,7 @@ const STAGE_FACTS = Object.freeze({
       if (customPatterns !== '') facts.methodology = `${facts.methodology}\n\n${customPatterns}`
     }
     facts.hints = [
+      CHAPTER_BODY_G3_HINT,
       // 票 04：原来这条要求主笔自己「找到对应材料小节通读，再动笔」——那正是 ADR-0030 决策 1
       // 「材料不搬运」的活体反例。现在 `brief.materials` 只当**路径清单**用：主笔据它 ＋ outline 的
       // source 合成一条定位交给执笔小助手，**材料正文留在执笔小助手的干净上下文里**。
@@ -6960,6 +7172,7 @@ const STAGE_FACTS = Object.freeze({
     facts.pendingReviews = (meta.pendingReviews ?? []).filter((r) => r.status !== 'revoked').map((r) => ({ id: r.id, chapter: r.chapter, comment: paragraphReviewText(r) }))
     facts.methodology = `${mtl('references/audit-and-testing.md')}\n${mtl('references/file-contracts.md')}\n${mtl('references/subagent-prompts/writing-agent-prompt.md')}\n${mtl(AUDIT_TEMPLATE_REL)}\n${mtl(CHAPTER_AUDIT_SCRIPT_REL)}`
     facts.hints = [
+      CHAPTER_BODY_G3_HINT,
       CHAPTER_PROGRESS_REQUIREMENT,
       // 票 03 · P34：上面那条只说了 stage 有哪些取值，没说**什么时候**必须报——实测 9.4 小时里
       // 「还剩 39 步」一字未变、▶ 指着 10 小时前就写完的第 1 章，因为 AI 一次都没带过
@@ -7557,6 +7770,9 @@ export {
   noteStyleSpecChange,
   parseStyleSpecList,
   styleSpecDeclaresNoExercises,
+  // 票 `chapter-teaching-handbook/03`：两档形态常量（**唯一出处**在 `chapter-handbook.js`，这里再导出）；
+  // ⛔ 它不是 `INVARIANTS_SECTIONS_BY_ROUTE`（那个是 `invariants.md` 的节标题串，动它会让不变量静默消失）。
+  HANDBOOK_FORM_BY_ROUTE,
   runQualityChecks,
   recordAgentError,
   runLoop,

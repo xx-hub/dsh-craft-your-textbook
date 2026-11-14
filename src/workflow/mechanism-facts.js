@@ -360,7 +360,9 @@ export function renderMechanism(facts) {
   lines.push('## 派发')
   lines.push(`- 派发档（${countOf(kinds)}）：${joinNames(kinds)}`)
   lines.push(`- 模板落点（\`dispatchKindSpec(kind).shapeRel\`）：${DISPATCH_TEMPLATES.map((item) => `${quote(item.kind)}→${quote(item.shapeRel)}`).join('、')}`)
-  lines.push('- 这十档的派单正文由机器按模板代填（`workbench_act(action=agent-assign, dispatchKind=…)`）。')
+  // ⚠️ 这一行的数**已经漂过一次**（票 `reader-questionnaire-ai-authoring/04` 添了第十一档时它仍写「十档」）
+  // ⇒ 现在从 `kinds.length` 现算，⛔ 不再手写一个数（同一个句子里已经有一个现算的数，两个数并存必漂）。
+  lines.push(`- 这 ${countOf(kinds)} 档的派单正文由机器按模板代填（\`workbench_act(action=agent-assign, dispatchKind=…)\`）。`)
   lines.push(`- 主笔可调用动作（${countOf(actions)}）：${joinNames(actions)}`)
   lines.push(`- 用户操作、AI 不可调用的 ${countOf(NON_CALLABLE_ACTIONS)} 个动作见 §工具面。`)
 

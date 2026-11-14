@@ -87,7 +87,7 @@ export const GOAL_EMPTY_NOTE = "这次没从报告里读出学习目标——要
 /**
  * 「✅ 就按这几条办」那颗主键的**后果说明**（票 `ui-systematic-fixes/09` 立的唯一出口）。
  *
- * ── 病（`.scratch/ui-page-audit/inv-decisions.md` §1 站 3 那一行）──────────────────────
+ * ── 病（`.scratch/_archive/2026-11/ui-page-audit/inv-decisions.md` §1 站 3 那一行）──────────────────────
  * 同一张卡上「🔁 让 AI 重写这几条」写明了后果（`哪里不行？`那块表单自述 AI 会照这句重拟），
  * 而「✅ 就按这几条办」**零后果说明**。
  *

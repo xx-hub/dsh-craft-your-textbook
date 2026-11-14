@@ -5,8 +5,11 @@
  *
  * **是**这条异步往返的两件纯活：
  *   1. `renderReaderQuestionnaire()` —— 把合并件里的「片」（`readerSlices`，票 `01`）与它的成员
- *      渲染成一份**纸屏两用**的 `.md`（题号 ＋ 明确填写位 ＋ 勾选方框 ＋ 顶部三行填写说明 ＋
+ *      渲染成一份 `.md`（题号 ＋ 明确填写位 ＋ 勾选框 ＋ 顶部三行电子填法 ＋
  *      每题都允许答「不确定」＋ **正文首行自带标题**，兜住下载文件名被硬编成 `<书名>.md` 那个坑）；
+ *      ⚠️ **屏一用，不是纸屏两用**（票 `reader-questionnaire-ai-authoring/06` 收窄 `ADR-0038` 决策 6）：
+ *      回卷只有「在文件上改完、粘回工作台」一条路，卷面⛔ 不许再教「打印／手写／口头代填」那几条
+ *      （见 `reader-questionnaire-text.js` 的 `READER_QUESTIONNAIRE_PAPER_HINTS`）；
  *   2. `readerQuestionnaireProblems()` —— 回卷件**有件时**的形状判据（件在就要非空）；
  *      外加一个读回卷原文的出口（下游 AI 逐条读它、代笔落剔除记录，归票 `06`）。
  *
@@ -40,6 +43,14 @@
  * - 片级「这片我基本都会」**⛔ 不产生剔除**（票 `15` 第 4 条）：本模块只把它印在卷上，
  *   盘上**没有任何一条从这个勾到剔除记录的写路**（问卷侧唯一的剔除入口是逐条勾「已经会」，
  *   而真正落盘那一条仍只在图上逐卡划／票 `06` 的护栏①里）。
+ * - **题面（AI 写的那一份）只按两种身份挂上去**（票 `reader-questionnaire-ai-authoring/03`）：
+ *   片名与知识点 `title`，两样都走 `normalizeTitle`（与片的形状闸、题的形状闸**同一把尺子**）。
+ *   题面里写了、这一卷**没列到**的条目⛔ 不印（那是逐条 ≤30 封顶的必然，不是漏印）；
+ *   盘上那份件若被人手改坏（缺 `ask` 之类），**认不出的那一格就不印**（按条退化到干清单），
+ *   ⛔ 本模块不重跑形状闸（闸在交工那一跳；读侧判红等于给「别人手改过的旧件」判红）。
+ * - **卷末那一节「还有什么我们没问到的？」缺口栏读不出来**：`src/ui/reader-gap.js` 只认固定行型
+ *   （三类缺口读数），散文归**读卷那一侧**逐字读（spec「结构面」第 3 条与「已知窄处」末条）。
+ *   ⛔ 不承诺它进得了界面那块。
  */
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -55,6 +66,10 @@ import {
 import { EXPLORE_CONFIRM_ANSWERERS } from '../explore-confirm-contract.js'
 import { workDir } from './engine/paths.js'
 import { effectiveReaderSlices } from './knowledge-map-assembly.js'
+// 票 `reader-questionnaire-ai-authoring/03`：AI 写的那份**题面**（`工作区/问卷题面.json`）的
+// **唯一读侧**就住这里（票 `02` 落的那一个出口）。⚠️ 不成环：那个模块只 import `domain-rules`／
+// `engine/paths.js`／`reader-questionnaire-vocab.js`，⛔ 不 import 本文件。
+import { readReaderQuestionnaireText } from './reader-questionnaire-text.js'
 // 票 `graph-read-one-answer/02`：「盘上那份合并件读出来是什么」只有一处口径（`readMergedMap`），
 // 本文件不再自己 `JSON.parse` 一份。⚠️ 不成环：那个模块只 import `domain-rules`／`engine/paths.js`
 // 与三个图侧叶子，⛔ 不 import `engine.js`。
@@ -237,15 +252,132 @@ export function readReaderQuestionnaireKnowledgeMap(projectId) {
 }
 
 /**
- * 渲染「给出那一份」——**纸屏两用**的读者情况问卷 `.md`。
+ * 逐条那一行的**总条数基准**（票 `03`「卷头写出预计用时」那句的分母）：
+ * 「30 条按 8–10 分钟估」——30 就是 {@link READER_QUESTIONNAIRE_ITEM_LIMIT}（⛔ 不另写一个 30）。
+ * 卷上的实数变，那句用时跟着变：3 条＝1 分钟、15 条＝4–5 分钟、30 条＝8–10 分钟
+ * （判据就盯「3 条」与「30 条」那两格）。
+ */
+export const READER_QUESTIONNAIRE_MINUTES_PER_30_ITEMS = Object.freeze([8, 10])
+
+/** 片级题面（`lead`）那一行的**抬头**（逐字；它压掉该片的 `description`）。
+ * ⚠️ **不导出**：它只在这一处用得上，卷面那三个字本身就是判据（判据手写期望值，从实现再取一份就不可靠了）。
+ */
+const READER_QUESTIONNAIRE_LEAD_LABEL = '> **这一片在问什么：**'
+
+/**
+ * 本卷条数 ⇒ 预计用时（分钟区间）。无条 ⇒ `null`（⛔ 不编一个数出来）。
  *
- * 版式（照 ADR-0038 决策 6 逐条）：
+ * ⚠️ **它是本卷实数折出来的，不是一个写死的常数**（票 `03` 验收：「与条数同源换算」）：
+ * 分母取 {@link READER_QUESTIONNAIRE_ITEM_LIMIT}，比例取
+ * {@link READER_QUESTIONNAIRE_MINUTES_PER_30_ITEMS}，两端各自取整、下限 1 分钟。
+ * AI 自己估的那一份（题面的 `estimate`）**另起一行印**，⛔ 不并进这一个数
+ * （两个来源混成一格，判据就盯不住「改条数 ⇒ 那句数跟着变」这一行）。
+ *
+ * @param {number} itemCount 卷上逐条那一层合计多少条
+ * @returns {{min: number, max: number}|null}
+ */
+export function estimateReaderQuestionnaireMinutes(itemCount) {
+	if (!Number.isSafeInteger(itemCount) || itemCount <= 0) return null
+	const base = READER_QUESTIONNAIRE_ITEM_LIMIT
+	const [low, high] = READER_QUESTIONNAIRE_MINUTES_PER_30_ITEMS
+	const min = Math.max(1, Math.round((itemCount * low) / base))
+	const max = Math.max(min, Math.round((itemCount * high) / base))
+	return { min, max }
+}
+
+/** 用时区间的**卷面写法**（`8–10 分钟`／`2 分钟`）。 */
+function minutesText({ min, max }) {
+	return min === max ? `${min} 分钟` : `${min}–${max} 分钟`
+}
+
+/**
+ * AI 题面的**只读索引**：片名 → `{lead, items: Map<知识点 title, {ask, why, hint}>}`。
+ *
+ * ⚠️ **它只认两种身份**：片名与知识点 `title`，两样都走 `normalizeTitle`（与片的形状闸、题的形状闸
+ * **同一把尺子**）。认不出的格子（缺 `ask`／缺 `why`／不是串）**不并进索引**⇒ 那一条照今天的干清单印
+ * （**按条退化**，不是整卷退化）。⛔ 本函数不判红、不抛：盘上那份件是过闸写下的，
+ * 读侧再判一次红等于给「别人手改过的旧件」判红（`reader-questionnaire-text.js` 文件头那条口径）。
+ *
+ * @param {unknown} questionnaireText `readReaderQuestionnaireText(...)` 的返回值
+ * @returns {Map<string, {lead: string, items: Map<string, {ask: string, why: string, hint: string}>}>}
+ */
+function questionnaireTextIndex(questionnaireText) {
+	const index = new Map()
+	const source = questionnaireText !== null && typeof questionnaireText === 'object' ? questionnaireText : null
+	if (source === null) return index
+	for (const slice of Array.isArray(source.slices) ? source.slices : []) {
+		const sliceName = normalizeTitle(slice?.slice)
+		if (sliceName === '') continue
+		const items = new Map()
+		for (const item of Array.isArray(slice?.items) ? slice.items : []) {
+			const title = normalizeTitle(item?.title)
+			const ask = normalizeTitle(item?.ask)
+			const why = normalizeTitle(item?.why)
+			// `why` 必填（票 `02` 判据 4）：缺它的那一格不印题面——那一行买的是「认真答」，不印它等于少一半。
+			if (title === '' || ask === '' || why === '') continue
+			if (!items.has(title)) items.set(title, { ask, why, hint: normalizeTitle(item?.hint) })
+		}
+		// 同名片（图上重叠的两片）取**先出现的那一片**：后一片只补它自己没有的格
+		// （与题的形状闸「同名片并集」不一样——那里验形状，这里不拿后一片篡前一片的 `lead`）。
+		const known = index.get(sliceName)
+		if (known === undefined) {
+			index.set(sliceName, { lead: normalizeTitle(slice?.lead), items })
+		} else {
+			if (known.lead === '') known.lead = normalizeTitle(slice?.lead)
+			for (const [title, block] of items) if (!known.items.has(title)) known.items.set(title, block)
+		}
+	}
+	return index
+}
+
+/**
+ * 一条题面的**卷面行**（逐字；`null`＝这一条没有题面）。
+ *
+ * ```text
+ * > **问：** 〈ask〉
+ * > 为什么问这个：〈why〉
+ * > （提示：〈hint〉）        ← 可缺
+ * ```
+ *
+ * ⚠️ 三行都是 `>` 引用行：`src/ui/reader-gap.js` 的解析面逐行按 `startsWith` 与一条严格正则
+ * 认行，**认不出的行直接跳过**——把题面塞进逐条那一行（`—— 问：… —— title`）才是改行型。
+ * ⛔ 这里一个字都不动行型。
+ *
+ * @param {{ask: string, why: string, hint: string}|undefined} block
+ * @returns {string[]|null}
+ */
+function questionBlockLines(block) {
+	if (block === undefined) return null
+	const out = [`> **问：** ${block.ask}`, `> 为什么问这个：${block.why}`]
+	if (block.hint !== '') out.push(`> （提示：${block.hint}）`)
+	return out
+}
+
+/** 把一条题面推到卷上（前后各留一个空行，免得 `>` 块与上一条的勾选框黏在一起）；`null` ⇒ 什么都不推。 */
+function pushQuestionBlock(lines, blockLines) {
+	if (blockLines === null) return
+	if (lines[lines.length - 1] !== '') lines.push('')
+	for (const line of blockLines) lines.push(line)
+	lines.push('')
+}
+
+/**
+ * 渲染「给出那一份」——**屏一用**（`.md` 可编辑文件）的读者情况问卷。
+ *
+ * 版式（照 `ADR-0038` 决策 6 及其 `## Amendment`（2026-11-02 收窄）逐条）：
  * - 正文首行自带标题：`# 《书名》· 读者情况问卷`；
- * - 顶部三行填写说明：可打印手写／可在电脑上直接改／可口头让人代填；
- * - 第一问＝谁填（收卷人；本票只印在纸上，**不落任何字段**——字段与路由归票 `04`）；
+ * - 顶部三行电子填法：下载这份文件 → 把 `[ ]` 改成 `[x]`、要说的写在题下 → 全选复制 → 粘回工作台
+ *   （**只有这一条路**：卷面⛔ 不出现打印／手写／口头这类纸面指引）；
+ * - 第一问＝谁填（收卷人；本票只印在卷首，**不落任何字段**——字段与路由归票 `04`）；
  * - 每一片一问：片级三态（这片我基本都会／说不准／这片不是问我的）＋ 逐条清单（已会／不确定 两态）；
  * - **每题都允许答「不确定」**（让「未知」成为合法答案，否则代理会编）；
- * - 没勾＝照常讲（spec §3.8 的保守方向，印在纸上让人看得见）。
+ * - 没勾＝照常讲（spec §3.8 的保守方向，印在卷上让人看得见）。
+ *
+ * ⚠️ 票 `03` 起多认一份 **AI 写的题面**（`input.questionnaireText`，盘上那份的唯一读侧是
+ * {@link readReaderQuestionnaireText}）：问话／「为什么问这个」／提示印在**每一条勾选框的正上方**，
+ * 片级 `lead` 印在片顶上并压掉该片的 `description`；**行型一个字节都不动**
+ * （`## 第 N 问 · <片名>`／`- [ ] <片级三态>`／逐条那一行照旧——缺口栏与「已经会 → 剔除」那条链
+ * 逐字认它们）。
  *
  * @param {object} input
  * @param {unknown} input.bookName 书名（拿不到时退「这本书」）
@@ -255,6 +387,8 @@ export function readReaderQuestionnaireKnowledgeMap(projectId) {
  * @param {unknown[]} [input.groups] 轮转的轴＝既有分组顺序（`readerQuestionnaireOrdering`；缺省＝没有分组）
  * @param {string[]} [input.cardOrder] 没有任何分组时的退化底＝卡片顺序
  * @param {number} [input.limit] 逐条合计封顶（默认 {@link READER_QUESTIONNAIRE_ITEM_LIMIT}）
+ * @param {object|null} [input.questionnaireText] AI 写的那份题面（{@link readReaderQuestionnaireText}
+ *   的返回值；缺席／坏形状 ⇒ 卷子退回今天的干清单，⛔ 不抛）
  * @returns {string}
  */
 export function renderReaderQuestionnaire({
@@ -265,16 +399,41 @@ export function renderReaderQuestionnaire({
 	groups = [],
 	cardOrder = [],
 	limit = READER_QUESTIONNAIRE_ITEM_LIMIT,
+	questionnaireText = null,
 } = {}) {
 	const name = typeof bookName === 'string' && bookName.trim() !== '' ? bookName.trim() : '这本书'
 	const list = Array.isArray(slices) ? slices : []
+
+	// ⚠️ 取条那一跳（封顶 ＋ 按组轮转）**只此一处**：纯函数，判据吃的是同一个。
+	//    票 `03` 起它要**先**算——卷头那句预计用时按**本卷实数**换算（⛔ 不写死「8–10 分钟」一个常数）。
+	const { slices: listed } = selectSliceItems(list, { limit, groups, cardOrder })
+	const listedItems = listed.reduce((sum, slice) => sum + slice.members.length, 0)
+	// 题面的只读索引（片名 → {lead, items}）：认不出的格子不印，于是**按条退化**到干清单。
+	const textIndex = questionnaireTextIndex(questionnaireText)
+	const estimate = estimateReaderQuestionnaireMinutes(listedItems)
+	// ⚠️ `estimate` 与 `aiEstimate` 是**两个来源**，⛔ 不合并：前者是按条数折的（改条数就变，判据盯它），
+	//    后者是 AI 出卷时**自己估的**（票 `02` 那一格，只在这一份题面带过 `estimate` 时才印）。
+	const aiEstimate = normalizeTitle(questionnaireText?.estimate)
 	const lines = []
 
 	lines.push(`# 《${name}》· 读者情况问卷`, '')
-	lines.push('> **怎么填（三行说明）**')
-	lines.push('> 1. 可以打印出来用笔填：在合适的方框里画 ✓ 就行。')
-	lines.push('> 2. 也可以在电脑上直接改这份文件：把 `[ ]` 改成 `[x]`。')
-	lines.push('> 3. 还可以口头说一遍，由造书的人替你填——你不用自己碰电脑。', '')
+	// ⚠️ 票 `reader-questionnaire-ai-authoring/06`：卷头那三行纸面口径**整段删掉**，换成电子一条路。
+	//    回卷只有「在文件上改完、粘回工作台」这一条（`ADR-0038` 决策 6 的 `## Amendment`）；
+	//    凡是教人走打印／手写／口头那几条的句子，收卷人照做之后那份卷子就**回不来**了。
+	lines.push('> **怎么填（电子一条路）**')
+	lines.push('> 1. 下载这份文件，用任何能改文字的软件打开。')
+	lines.push('> 2. 把要选的 `[ ]` 改成 `[x]`；要说的那句话直接写在题下。')
+	lines.push('> 3. 全选复制整份文字，粘回工作台那个框里。', '')
+	// 票 `03`：填写说明之后加**「怎么答」**那一块——预计用时（按本卷实数折算）＋「答一半也行」。
+	// async 场景下这句决定人会不会真的开始（spec「结构面」第 2 条）。
+	lines.push('> **怎么答**')
+	if (estimate !== null) {
+		// ⚠️ 这里**只印折算出来的那一个区间**，⛔ 不把基准（30 条 8–10 分钟）也抄上卷面：
+		//    那会把一个常数写上卷，而判据盯的正是「那句数是不是从本卷实数来的」。
+		lines.push(`> 预计用时：${minutesText(estimate)}（卷上 ${listedItems} 条）。`)
+	}
+	if (aiEstimate !== '') lines.push(`> 写这份问卷时另估过：${aiEstimate}（以你手上这一份的实际条数为准）。`)
+	lines.push('> 答一半也行，跳过的我们会照常讲。', '')
 	lines.push('> 每题都可以答「不确定」：不确定也是合法答案，不用猜。**没勾的条目我们默认照常讲。**')
 	if (degraded === true) {
 		lines.push('>')
@@ -303,15 +462,17 @@ export function renderReaderQuestionnaire({
 		lines.push(`（逐条那层是**抽样**：整份卷子合计最多列 ${limit} 条，按组轮转着取，没列到的一律照常讲。）`, '')
 	}
 
-	// ⚠️ 取条那一跳（封顶 ＋ 按组轮转）**只此一处**：纯函数，判据吃的是同一个。
-	const { slices: listed } = selectSliceItems(list, { limit, groups, cardOrder })
-
 	listed.forEach((slice, index) => {
 		const rawName = typeof slice?.name === 'string' ? slice.name.trim() : ''
 		const sliceName = rawName !== '' ? rawName : `第 ${index + 1} 片`
 		lines.push(`## 第 ${index + 2} 问 · ${sliceName}`, '')
+		// 票 `03`：片级题面（`lead`）印在片顶上，并**压掉**该片的 `description`（没 lead 才印 description
+		// ——**按片退化**，不是整卷退化）。
+		const sliceText = textIndex.get(normalizeTitle(rawName))
+		const lead = sliceText === undefined ? '' : sliceText.lead
 		const description = typeof slice?.description === 'string' ? slice.description.trim() : ''
-		if (description !== '') lines.push(description, '')
+		if (lead !== '') lines.push(`${READER_QUESTIONNAIRE_LEAD_LABEL} ${lead}`, '')
+		else if (description !== '') lines.push(description, '')
 		lines.push('**这一片的情况**（只能勾一个）：', '')
 		for (const state of READER_SLICE_STATES) lines.push(`- [ ] ${state}`)
 		lines.push('')
@@ -324,14 +485,20 @@ export function renderReaderQuestionnaire({
 				: '（这一片还没有逐条列出的知识点。）')
 		}
 		for (const member of slice.members) {
+			// 票 `03`：AI 的问话印在**这一条勾选框的正上方**（认不出的那条不印 ⇒ 照今天的干清单）。
+			pushQuestionBlock(lines, questionBlockLines(sliceText?.items.get(normalizeTitle(member))))
 			lines.push(`- [ ] ${READER_ITEM_STATES[0]}　- [ ] ${READER_ITEM_STATES[1]} —— ${member}`)
 		}
 		lines.push('')
 	})
 
+	// 票 `03`：卷末那一节＝「还有什么我们没问到的？」——**取代**了原先的「想补充的话」
+	// （同一件事⛔ 不摆两个框）。它**不带任何勾选框**：缺口栏只认固定行型、读不出来，
+	// 但它归读卷那一侧**逐字读整份回卷件**（spec「结构面」第 3 条）。
 	lines.push('---', '')
-	lines.push('## 想补充的话', '')
-	lines.push('这里可以随便写：跑题、只答一半、说「不确定」都行，不用管格式。', '')
+	lines.push('## 还有什么我们没问到的？', '')
+	lines.push('哪一条都不是问你的、想补充的直接写在下面。', '')
+	lines.push('（不用管格式：跑题、只答一半、只说一句都行。）', '')
 	lines.push('（写在这里）', '')
 	lines.push('> 填完把整份文字交回造书的人：由他粘回工作台，内容会原样存成书夹里的一份 `.md`。', '')
 	return lines.join('\n')
@@ -355,8 +522,10 @@ export function renderReaderQuestionnaireForBook(projectId, meta) {
 		return { text: '', degraded, note, problems: ['这本书的知识点还是空的——等探查挑出知识点之后才发得出问卷'] }
 	}
 	const { groups, cardOrder } = readerQuestionnaireOrdering(merged)
+	// 票 `03`：AI 写的那份题面经**唯一读侧**读（读不到 ⇒ `null` ⇒ 卷子退回今天的干清单）。
+	const questionnaireText = readReaderQuestionnaireText(projectId)
 	return {
-		text: renderReaderQuestionnaire({ bookName: meta?.name, slices, degraded, note, groups, cardOrder }),
+		text: renderReaderQuestionnaire({ bookName: meta?.name, slices, degraded, note, groups, cardOrder, questionnaireText }),
 		degraded,
 		note,
 		problems: [],

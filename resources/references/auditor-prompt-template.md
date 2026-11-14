@@ -1,6 +1,6 @@
 # 审计 subagent 派发模板
 
-> 用法：主 agent 需要独立审计时，**本仓造书工作台内**走 `workbench_act(action=agent-assign, dispatchKind=audit)`（章级）／`dispatchKind=gold-audit`（范例章）——派单正文由机器按模板代填；**Claude 独立运行时**用平台的 subagent 调度工具，把下方对应模板复制进工具、机械替换占位符即可——不要每次临场编 prompt，更**不允许自己代审**（"换个视角自审"不是独立审计，见 `audit-and-testing.md §6.1`）。
+> 用法：主 agent 需要独立审计时，**本仓＝造书工作台内**走 `workbench_act(action=agent-assign, dispatchKind=audit)`（章级）／`dispatchKind=gold-audit`（范例章），派单正文由机器按模板代填；**skill 侧（Claude 独立运行时）**＝用平台的 subagent 调度工具，把下方对应模板复制进工具、机械替换占位符即可——不要每次临场编 prompt，更**不允许自己代审**（"换个视角自审"不是独立审计，见 `audit-and-testing.md §6.1`）。
 > 独立性来源：审计员**只读**下方列出的输入，绝不携带造书推理上下文（它不知道这本书是怎么造的）。
 > 报告回来后按本文"派发后决策规则"逐条核实再改，不照单全收（`audit-and-testing.md §6.2`）。
 
@@ -12,7 +12,7 @@
 |---|---|
 | `{META_PATH}` | 写作规范（契约与铁律）所在路径——skill 侧是发布产物里的写作规范 `META.md`；本仓是 `工作区/style-spec.md`（两半合写在一份里） |
 | `{OUTLINE_PATH}` | 章节骨架所在路径——skill 侧 `OUTLINE.md`；本仓 `工作区/outline.md` |
-| `{STYLE_SPEC_PATH}` | 风格与语法所在路径——skill 侧是写作规范里「风格与语法」那一节；本仓与写作规范同一份 `工作区/style-spec.md` |
+| `{STYLE_SPEC_PATH}` | 风格与语法所在路径——skill 侧是写作规范里「风格与语法」那一节（`style-spec.md`）；本仓与写作规范同一份 `工作区/style-spec.md` |
 | `{SOURCE_INDEX_PATH}` | 源材料索引所在路径——skill 侧 `源材料索引.md`；本仓 `工作区/explore.md`＋`工作区/knowledge-map.json`（Mode A 无源时删掉该项） |
 | `{ROUTE}` | `blueprint`（AI 教学蓝本）或 `human`（人读教材）——这两个是机器 id（`meta.route` 只认它们），决定读哪些不变量 |
 | `{CHAPTER_FILE}` | 被审章节文件路径（模板 A） |

@@ -23,6 +23,8 @@ import {
   // **现读现抽**——抽取要读盘，而 `dispatch-assembly` 是纯函数（同输入同输出），所以读盘那一半在这儿。
   materialSurveyInput,
   goldN,
+  // 票 `real-machine-walkthrough-20261114/04`：大纲落盘那一刻把章级流水线**按章数铺满**（每章一条轨）
+  ensureChapterPipelineSize,
   stageLabel,
   projectDir,
   readMeta,
@@ -70,6 +72,9 @@ import {
   stripLoaderRegion,
   specFingerprint,
   styleSpecDeclaresNoExercises,
+  // 票 `chapter-teaching-handbook/03`：章末带读手册的 G1′／G2′／G3′ 判据（读 style-spec 的那一半；
+  // 纯判据住 `src/workflow/chapter-handbook.js`）。⛔ 不进 `runQualityChecks`：章级过目要当场看得见。
+  chapterHandbookReading,
   runQualityChecks,
   // 票 `walkthrough-fixes/36`：最后检查阶段改章之后由机器**重拼成品**（与合并那一跳同一个纯函数）。
   refreshBookAfterChapterAssemble,
@@ -85,6 +90,9 @@ import {
   // 票 `demo-channel-full/03`：章级流水线阶段的**唯一写入口**（真书这一跳与演示支那几步共用它）。
   recordChapterStage,
 } from '../engine.js'
+// 票 `chapter-teaching-handbook/05`：章级切片 `工作区/知识结构.md` 的确定性派生（零 LLM）。
+// 它跟着 book.md 一起交付，但⛔ 不拼进 book.md（书的正文边界不变）。
+import { writeKnowledgeStructure } from '../knowledge-structure.js'
 import { familyOf, reject, accept } from '../action-runner.js'
 // 票 `walkthrough-fixes/37`：驳回意见的逐条交代契约（拆条落账在 `gates.js` 的 `final-redo-items`；
 // 本文件只负责「交工那一刻与落账那份条目集逐条对齐」，判据形状住在 `final-redo.js` 一处）。
@@ -144,6 +152,16 @@ import { CHAPTER_PROGRESS_STAGES, normalizeTeachingFocus, normalizeKnowledgePoin
   READER_QUESTIONNAIRE_ISSUED_REL,
   READER_QUESTIONNAIRE_RETURNED_FILE_NAME,
   READER_QUESTIONNAIRE_RETURNED_REL,
+  // 票 `reader-questionnaire-ai-authoring/05`：三件注入里第②件的路径（意图件）——错误文案与交办正文引它，
+  // ⛔ 不在这里手拼第二份路径。
+  READER_QUESTIONNAIRE_INTENT_REL,
+  // 票 `reader-questionnaire-ai-authoring/02`：问卷**题面**的文件名与书夹相对路径（唯一出处）——
+  // 本文件是它的**唯一写点**（探查交工那一跳），文件名／路径⛔ 不在这里手拼第二份。
+  READER_QUESTIONNAIRE_TEXT_FILE_NAME,
+  READER_QUESTIONNAIRE_TEXT_REL,
+  // 票 `reader-questionnaire-ai-authoring/05`：读卷那一路交的**问卷判断**（`工作区/问卷判断.json`）
+  // ——它是那一路自己的落点，本文件只拿它进位回包与账本读数（⛔ **不在本文件写它**）。
+  READER_QUESTIONNAIRE_VERDICT_REL,
   // 票 `audit-gate-semantics/01`：审计读数落点的单一出处（清单那一行按它派生）。
   AUDIT_READINGS_FILE_NAME,
 } from '../../domain-rules.js'
@@ -199,7 +217,12 @@ import {
   renderReaderQuestionnaire,
   readReaderQuestionnaireKnowledgeMap,
   readerQuestionnaireOrdering,
+  selectSliceItems,
 } from '../reader-questionnaire.js'
+// 票 `reader-questionnaire-ai-authoring/02`：读者问卷的**题面**（AI 写的那一份）的**形状闸**与落盘
+// 归一化——本文件只接线（写点就在探索段交工这一跳；读侧归票 `03`），判据与归一化都住那个模块
+// （唯一出处，⛔ 不在这里另写一份「相似的量法」）。
+import { readerQuestionnaireProblems, normalizeReaderQuestionnaire, readReaderQuestionnaireText } from '../reader-questionnaire-text.js'
 // 票 `knowledge-graph-build/03`：合并件成形那一刻的形状闸（唯一的判据出处；拼装那半在上一行）。
 import { knowledgeMapGateProblems } from '../knowledge-map-gate.js'
 // 票 `knowledge-graph-build/06`：对齐结论（`body.alignment`）落成「一条卡 ＋ N 个位置索引」——
@@ -224,7 +247,84 @@ import { applyReaderBoundaryBackfillAccount } from '../reader-boundary-backfill.
 // 票 `knowledge-graph-build/13`：知识点图审校那一档的交办值（两条软读数 ＋ 把握档注意力清单）——
 // **读盘那一步在动作层**（`readGraphReviewTarget`），因为 `dispatchValues` 被钉成纯函数、不碰盘。
 import { readGraphReviewTarget } from '../knowledge-graph-review.js'
+// 票 `reader-questionnaire-ai-authoring/04`：写卷那一档要的那一份**机器已选好的条目清单**——
+// 读合并件与取条（`selectSliceItems` 那一份）都在这一层做，拼装器仍不碰盘。
+import { questionnaireAuthorSlices } from '../questionnaire-author.js'
+// 票 `reader-questionnaire-ai-authoring/05`：读卷那一档的**三件注入**（�� 提示词原文＝确定性重建；
+// ②③ 两份盘上件各自只判在不在）——判据住 `questionnaire-analyze.js`，本层只接线。
+import { questionnaireAnalyzeInjectionReading, questionnaireIntentOnDisk, readerQuestionnaireReturnOnDisk } from '../questionnaire-analyze.js'
 
+/**
+ * 读卷那一档的**三件注入**（票 `reader-questionnaire-ai-authoring/05`）。
+ *
+ * 三件（票面逐字）：
+ *   ① `authorPrompt`＝当初写卷那份派单提示词原文——由 `assembleDispatchPrompt('questionnaire-author', …)`
+ *      按模板 ＋ 盘上值**确定性重建**（⛔ 不存副本，模板是唯一出处）；
+ *   ② `intent`＝`工作区/问卷意图.md` 在不在；
+ *   ③ `returned`＝`工作区/读者情况回卷.md` 在不在。
+ *
+ * ⚠️ **重建失败不抛**（模板读不出／值拼不全 ⇒ `authorPrompt` 是空串）：三件缺一件的处置在拼装器那一跳
+ * （`dispatchValues('questionnaire-analyze')` 点名缺哪件并拒派）——两处各自守一件事：这里只回答
+ * 「拿得到什么」，那里回答「能不能派」。
+ *
+ * @param {string} project 书夹 id
+ * @returns {{authorPrompt: string, intent: boolean, returned: boolean}}
+ */
+export function readQuestionnaireAnalyzeTarget(project) {
+  let authorPrompt = ''
+  try {
+    const meta = readMeta(project) ?? {}
+    const brief = buildStageBrief(project)
+    const merged = readReaderQuestionnaireKnowledgeMap(project)
+    const { slices } = effectiveReaderSlices(merged)
+    const { groups, cardOrder } = readerQuestionnaireOrdering(merged)
+    const { slices: listed } = selectSliceItems(slices, { groups, cardOrder })
+    const questionnaireAuthor = { slices: questionnaireAuthorSlices(merged, { slices: listed }) }
+    const spec = dispatchKindSpec('questionnaire-author')
+    const raw = readResource(spec.shapeRel)
+    if (raw.ok) {
+      const values = dispatchValues('questionnaire-author', { meta, brief, questionnaireAuthor })
+      authorPrompt = assembleDispatchPrompt('questionnaire-author', { shapeText: raw.text, values })
+    }
+  } catch {
+    authorPrompt = ''
+  }
+  return {
+    authorPrompt,
+    intent: questionnaireIntentOnDisk(project),
+    returned: readerQuestionnaireReturnOnDisk(project),
+  }
+}
+
+
+/**
+ * 冷恢复那一跳的正文（票 `reader-questionnaire-ai-authoring/05`）。
+ *
+ * 它给**同一个**子助手（当初写卷那一个）：你的卷回来了，现在读它。
+ * ⚠️ 三件的路径与形状**全在里面**（它不用去猜自己当初写了什么：真记不得就按这三件读）；
+ * ⛔ 不复述判读口径（那在模板与意图件里）——那一句只指向它们。
+ *
+ * @param {{childId: string, injections: {intent: boolean, returned: boolean}}} input
+ * @returns {string}
+ */
+export function readerQuestionnaireAnalyzeResumePrompt(input = {}) {
+  return [
+    '你当初写的那份读者情况问卷，收卷人已经填完、造书的人粘回工作台了。现在请你读它。',
+    '',
+    `- 你当初写的卷：\`${READER_QUESTIONNAIRE_TEXT_REL}\``,
+    `- 你当初写的意图件（你自己那时的自述）：\`${READER_QUESTIONNAIRE_INTENT_REL}\``,
+    `- 收卷人交回的原样：\`${READER_QUESTIONNAIRE_RETURNED_REL}\``,
+    '',
+    '判读口径与你当初写卷时那四条硬约束一致：**只认明确勾了「已经会」的条目**；',
+    '「不确定」与未勾的一律不落记录；提示不等于会；片级那一勾不产生逐条剔除。',
+    '',
+    `交一份 \`${READER_QUESTIONNAIRE_VERDICT_REL}\`（严格 JSON）：`,
+    '`{ "drop": [{title, why}], "skip": [{title, reason}] }`——两条数组都要在（一条都没有就写 `[]`）。',
+    '',
+    '⛔ 你不落剔除记录：那份记录只经主笔发 `graph-opinion` 写（你有自己的 sessionId，直调会被拒）。',
+    '⛔ 不改回卷件、不改意图件。交完一句话回报：要剔几条、只作读数几条、落盘在哪。',
+  ].join('\n')
+}
 
 /**
  * 派单**输入值 → 读盘函数**（票 `depth-round-3/06`；读盘只住这一层，⛔ 没搬进 `dispatch-assembly.js`）。
@@ -249,6 +349,24 @@ export const DISPATCH_INPUT_READERS = Object.freeze({
   boundary: (project) => readReaderBoundary(project),
   edgeLedger: (project, meta) => readCrossAuditEdgeLedger(project, meta),
   survey: (project, meta) => materialSurveyInput(project, meta),
+  // 票 `reader-questionnaire-ai-authoring/04`：写卷那一档的条目清单。
+  // ⚠️ 取条那一跳**不重算**：`selectSliceItems` 与 `effectiveReaderSlices` 就是发卷那一跳吃的同一份
+  // （片由合并件折出、再按组轮转封顶）——两处各算一份就会“子代理写的”与“卷上印的”不是同一批。
+  // ⚠️ 合并件读不出 ⇒ 空的片清单（不抛）：'没有题面'是合法的一档，由值块如实点名。
+  questionnaireAuthor: (project) => {
+    const merged = readReaderQuestionnaireKnowledgeMap(project)
+    const { slices } = effectiveReaderSlices(merged)
+    const { groups, cardOrder } = readerQuestionnaireOrdering(merged)
+    const { slices: listed } = selectSliceItems(slices, { groups, cardOrder })
+    return { slices: questionnaireAuthorSlices(merged, { slices: listed }) }
+  },
+  // 票 `reader-questionnaire-ai-authoring/05`：读卷那一档的**三件注入**。
+  // ⚠️ ① 提示词原文 = **确定性重建**（`assembleDispatchPrompt('questionnaire-author', …)`，
+  //    ⛔ 不存副本、模板是唯一出处）；②③ 两份盘上件各自只判**在不在**（内容归读卷那一路逐字读）。
+  // ⚠️ 重建失败（模板读不出／值拼不全）⇒ `authorPrompt` 是空串 ⇒ 拼装器点名「三件缺一件」、不派。
+  questionnaireAnalyze: (project) => ({
+    ...readQuestionnaireAnalyzeTarget(project),
+  }),
 })
 
 
@@ -279,6 +397,15 @@ const GRAPH_OPINION_VERDICTS = Object.freeze(['不讲', '要讲'])
  * 换一个就是「同一个模式里两种子代理」，孩子的形状、工具面与回灌通道都会分家。
  */
 const SUBAGENT_PROVIDER = 'spawn'
+
+/**
+ * 写卷那一档的 kind（票 `reader-questionnaire-ai-authoring/04`）。
+ *
+ * 它只在这一处用：`meta.questionnaireAgentId` 的写侧要判「是不是这一档」。⚠️ 名字**不从这里派生**
+ * （真正的声明面是 `DISPATCH_SPECS`）——这一枚只是一个便于读的本地常量；两处不一致时
+ * 那个格子会静默不写（哨兵：`test-agent-dispatch.mjs` 的 `meta.questionnaireAgentId` 那一格）。
+ */
+const QUESTIONNAIRE_AUTHOR_KIND = 'questionnaire-author'
 
 
 /** 票 `pipeline-wiring-gaps/13`：「机器改写了什么」提示里的**原值**展示——引号/JSON 化/截断
@@ -1333,6 +1460,17 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
           // 消费侧现算（`effectiveReaderSlices`），⛔ 不往合并件里编一片；老书也没有这个键（spec §3.9）。
           const sliceProblems = readerSliceProblems(bookSlices, merged.knowledgePoints)
           if (sliceProblems.length > 0) return rejectSubmit('explore', sliceProblems[0])
+          // ── 票 `reader-questionnaire-ai-authoring/02`：读者问卷的**题面**（AI 写的那一份）──────
+          // 同一条交工件里多认一个**可选**书级键（AI 刚读完材料、刚切完片，这是它唯一有上下文
+          // 写题面的时刻）——⛔ 不新开相位、⛔ 不新开产物流。
+          // 两件事按顺序：① 形状闸（七条，唯一出处 `readerQuestionnaireProblems`）——坏形状当场 400
+          // 、**一个字节都不写**（同片上那道闸）；② 过闸之后把归一化那一份写进 `工作区/问卷题面.json`
+          // ——**本文件是它的唯一写点**（渲染侧只读，票 `03`）。
+          // ⚠️ 片名对的是**刚过闸的那一份 `bookSlices`**（不是 `merged.readerSlices` 的副本）：
+          // 「这一片在不在册」的判据已经由上面那道闸咬过，这里吃同一份输入。
+          const questionnaire = Object.hasOwn(body, 'readerQuestionnaire') ? body.readerQuestionnaire : undefined
+          const questionnaireProblems = readerQuestionnaireProblems(questionnaire, { slices: bookSlices })
+          if (questionnaireProblems.length > 0) return rejectSubmit('explore', questionnaireProblems[0])
           // ── 票 17 · pipeline-wiring-gaps · ADR-0023：**材料分量**（standing）逐源表态 ──
           // 「这份材料在什么问题上说了算、在什么问题上不算数」由主笔 AI 逐源写一句声明，落
           // 各分片 materials[].standing（结构化字段是唯一出口——gate/gold 两关读不到 explore.md
@@ -1390,6 +1528,18 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
           }
           merged = landing.candidate
           const graphReduction = { removed: landing.removed }
+          // ── 票 `reader-questionnaire-ai-authoring/02`：题面的**唯一写点** ────────────────────
+          // 位置有意放在**合并件落地成功之后**：闸红之前（含图闸 payload-only 那条 400）盘上一个字节
+          // 都不写，于是不会留下一份「这一轮的题面已落、合并件却没落」的半成品。
+          // 过闸那一份在这里过一遍 {@link normalizeReaderQuestionnaire}（键序固定、可选格缺席不长出来）
+          // ——⛔ 不改任何文字、不补任何格；**不交这一格就不落文件**（老书／没写那一档：渲染侧
+          // 读不到 ⇒ 卷子退回今天的确定性版，`degraded` 先例照旧）。
+          // `undefined` 与 `null` 都算「不交」（形状闸判据 7 同一档）——⛔ 不把 `null` 写成一具空壳。
+          const questionnaireLanded = questionnaire !== undefined && questionnaire !== null
+          if (questionnaireLanded) {
+            writeWork(project, READER_QUESTIONNAIRE_TEXT_FILE_NAME,
+              `${JSON.stringify(normalizeReaderQuestionnaire(questionnaire), null, 2)}\n`)
+          }
           updateMeta(project, (state) => {
             state.pendingStage = null
             state.pendingGate = null
@@ -1417,7 +1567,7 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
           appendEvent(project, 'textbook/hint', {
             text: EXPLORE_DONE_HINT,
           })
-          return accept({ project, stage: 'explore', difficultyEdits, graphEdits: graphReduction.removed, standingHints: standing.hints, merge: mergeReadings })
+          return accept({ project, stage: 'explore', difficultyEdits, graphEdits: graphReduction.removed, standingHints: standing.hints, merge: mergeReadings, ...(questionnaireLanded ? { readerQuestionnaire: READER_QUESTIONNAIRE_TEXT_REL } : {}) })
         }
         case 'gate': {
           const gate = subMeta.pendingGate ?? '1'
@@ -1744,6 +1894,9 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
               state.goldChapterReason = ''
             }
             state.outline = { chapters: cleaned }
+            // 票 `real-machine-walkthrough-20261114/04`：章数这一刻定下来 ⇒ 章级流水线按章数铺满 `null`
+            // （`null` ＝「这一章还没上报」，不是「没有这一章」）。真机九章的书原来只有 4 格。
+            ensureChapterPipelineSize(state, cleaned.length)
             // 票 `kn-unowned-silent/02`：**这次交工真放弃了哪几条**（按章记），供面板读「豁免放弃 M」。
             // 为什么要有这一格：豁免记录是「人点了名」的**授权**，但它未必带章号（书级记录 + 只给 title
             // 时机器根本推不出这个点归哪一章）；而「本章的 points 里少了哪几条」这件事，只有**交工那一刻**
@@ -2019,12 +2172,38 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
                 return rejectSubmit('chapters', `第${n}章正文残留 ${kinds}：${hits.slice(0, 3).join('；')}。先拆干净再交工（豁免「保留 AI 的笔记不删」可跳过）。`)
               }
             }
+            // ── 票 `chapter-teaching-handbook/03` · 章末带读手册（G1′／G2′／G3′）──────────────
+            // 挂点＝**章交工验的前置验货**（与「练习与答案齐全」同层），⛔ 不进 `runQualityChecks`
+            // （它只在终检／交付／急验三处调用，10 章一起在终检爆——那正是主笔上下文最紧的一刻）。
+            // 只判形状与在场：题量、字数只出读数；human 档只判教学区在场且非空（⛔ 不判散文、不判条数）。
+            // 豁免按章给：点名该检查自己的名字（`other` 的作用域口径见 `waived()`），放行时落一条 hint。
+            const handbook = chapterHandbookReading(project, chapterText, subMeta)
+            // ⚠️ 每个 `other` 读取点都要**点名**它放行的是哪一条检查（`test-gate-write-points.mjs`
+            // 从源码文本里认那个字面量）⇒ 这里按 code 分支写三个字面量，⛔ 不传 `problem.name` 变量。
+            const handbookWaivedFor = (problem) => {
+              switch (problem.code) {
+                case 'G1': return otherWaiverFor(project, '章末教学区在场且位置一致', n)
+                case 'G2': return otherWaiverFor(project, '带读手册形态齐全', n)
+                case 'G3': return otherWaiverFor(project, '正文没有板块表外的块头', n)
+                default: return false
+              }
+            }
+            const handbookOpen = handbook.problems.filter((problem) => !handbookWaivedFor(problem))
+            const handbookWaived = handbook.problems.filter((problem) => handbookWaivedFor(problem))
+            if (handbookWaived.length > 0) {
+              appendEvent(project, 'textbook/hint', {
+                text: `⚠️ 第${n}章按你的豁免放行章末带读手册：${[...new Set(handbookWaived.map((problem) => `「${problem.name}」`))].join('、')}。`,
+              })
+            }
+            if (handbookOpen.length > 0) {
+              return rejectSubmit('chapters', `第${n}章章末带读手册没过（${chapterRel(n)}）：${handbookOpen.map((problem) => `${problem.name}——${problem.message}`).join('；')}。手册住在章末已有的 H2 教学区里（⛔ 不新开一节）；确因本书设计不适用，经用户同意后让 AI 调 waive（item=other、scope.check=该检查名、章号 ${n}）再交工。`)
+            }
             // 契约原则（Q9）：style-spec 声明「本书不设练习」→ 练习/答案检查自动跳过；否则仍要齐全。
             // 票 `walkthrough-fixes/23`：「其他」豁免在这里是**按章**读的（点名「练习与答案齐全」＋ 章号 N）
             // ——点名到第 1 章的豁免管不到第 2 章（作用域真的进判定，见 `test-flow-transitions-chapters.mjs`）。
-            // ⚠️ `main` 那一线此处是 `waived(project, 'other')`（旧的一票整族形状）——并集口径下**不许回退**：
-            // 那条形状会被 `test-gate-write-points.mjs` 当场判红（见上面 import 处那条注）。
-            if (!otherWaiverFor(project, '练习与答案齐全', n) && !styleSpecDeclaresNoExercises(project) && !/练习|答案|习题/.test(chapterText)) {
+            // ⚠️ 票 `chapter-teaching-handbook/03` 把扫描面**收窄到正文**（教学区之前）：带读手册里的
+            // 「练习／答案」会替正文满足这条闸门，而正文自己仍然必须有练习与答案（真书 10/10 章收窄后仍绿）。
+            if (!otherWaiverFor(project, '练习与答案齐全', n) && !styleSpecDeclaresNoExercises(project) && !/练习|答案|习题/.test(handbook.bodyText)) {
               // 同上：文案里是**书夹相对路径** ⇒ `chapterRel`（`工作区/audit-NN.md` 那一行属
               // audit 族、由 `auditRel` 单点——见上面那两条拒收文案；票 `context-budget/18` 复核）。
               return rejectSubmit('chapters', `第${n}章正文没有练习或答案（成品要求练习与答案齐全；若本书设计为不设练习，请在 style-spec 写明「不设练习」）：${chapterRel(n)}`)
@@ -2197,6 +2376,9 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
           // 合稿这一刻把读数刷成最新快照（派生件；闸门刚才的判定已从 audit-NN.md 现算过）。
           refreshAuditReadings(project, subMeta)
           writeWork(project, 'preface.md', preface)
+          // 票 `chapter-teaching-handbook/05`：伴生交付件（章级切片）——从知识地图 ＋ 章节安排
+          // **确定性派生**，随 book.md 一起交付；⛔ 不拼进 book.md。老书的清单没声明这一族 ⇒ 不补。
+          writeKnowledgeStructure(project, subMeta)
           const chapters = subMeta.outline?.chapters ?? []
           // 票 `walkthrough-fixes/36`：拼装口径收进**一个纯函数**（`book-assembly.js`）——成品重拼
           // （`chapter-assemble` 之后）与成品判据（`runQualityChecks`）读的是同一个函数，
@@ -2494,14 +2676,14 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
         if (error instanceof DispatchShapeError) return reject(500, error.message)
         return reject(400, String(error instanceof Error ? error.message : error))
       }
-      if (ctx.subagents === undefined || typeof ctx.subagents.startContinuable !== 'function') {
-        return reject(500, '宿主没有小助手服务（ctx.subagents.startContinuable），这一档派单派不出去——升级宿主或先按老路自己用 subagent 工具派')
+      if (ctx.subagents === undefined || typeof ctx.subagents.startActivation !== 'function') {
+        return reject(500, '宿主没有小助手服务，这一档派单派不出去——升级宿主或先按老路自己用 subagent 工具派')
       }
       // ── 票 `pre-gold-build/13`（债-15）：并发上限从**承诺**变成**真判据** ────────────────────────
       // 承诺面：九份派发模板（`resources/references/subagent-prompts/` 各带那一节）与各段交办件都逐字写着
       // 「到上限就等一个回来再派下一路——**这是硬约束不是建议**」（模板侧那九份一个字不动；
       // `material-survey` 那一份是书级一路，同一句话换了措辞照旧写着）。
-      // 这一跳从前零计数零比较，只会校验档位／章号／材料号就 `startContinuable`——超派没人拦。
+      // 这一跳从前零计数零比较，只会校验档位／章号／材料号就起子代理——超派没人拦。
       //
       // 上限**同源**：逐字取本轮 `buildStageBrief` 的那个字段（`brief.maxConcurrentSubagents`，
       // 由 `workbench-knobs.readMaxConcurrentSubagents(meta.maxConcurrentSubagents)` 派生）
@@ -2524,9 +2706,16 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
             + '（交办件与派发模板里那句「到上限就等一个回来再派下一路」就是这一条）。')
         }
       }
-      // ⚠️ **父级必须是主笔本人**（票 `context-budget/18` 落地时实测钉死的一条）：宿主这一端是
-      // `backgroundMode: continuable`（`preset/textbook.patch.yml` 的 tool-subagent）——
-      // 续接型子代理**没有 run 句柄**，它的结果由宿主的 `notifySettlement` 送回**它的直接父级**，
+      // ⚠️ **父级必须是主笔本人**（票 `context-budget/18` 落地时实测钉死的一条）：这一跳要的是
+      // **续接型**子代理（宿主 `startActivation` ＋ `delivery: 'parent'`）。
+      // ⚠️ **接口沿革（0.2.1 起）**：旧的「续接型专用起法」已并进
+      // `startActivation({ provider, label, request, signal, delivery })`——`delivery` 决定拿回来
+      // 的是哪一种：`'parent'` 才把结算报告送回直接父级（续接型那一支），`'caller'` 只把结果交给
+      // 调用方。本仓另外两处一次性调用（`content-lib.js`／`patterns-ops.js`）用的正是后者。
+      // ⛔ 别照旧字段名硬套。
+      // 另：出货 `standard` 已撤掉 `backgroundMode: continuable` 那个配置键（可续接直接写在实现里），
+      // 所以 `preset/textbook.patch.yml` 的 tool-subagent 那一行**不再有**这一项。
+      // 续接型子代理**没有 run 句柄**，它的结果由宿主在结算时送回**它的直接父级**，
       // 而 `send_message`（中途引导）的许可判据也是「发送者的直接父级／直接续接子代理」。
       // 所以只有把子代理挂在主笔自己的会话下，「报告回得来 + 中途引导够得着」这两条才同时成立。
       // ⛔ 不另造第二套接线：`parents`/`getParent` 那一套是给「一次性子代理 ＋ 调用方自己 await 结果」
@@ -2537,19 +2726,32 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
       }
       let started
       try {
-        started = await ctx.subagents.startContinuable({
+        started = await ctx.subagents.startActivation({
           provider: SUBAGENT_PROVIDER,
           label: values.label,
           request: { prompt: [{ type: 'text', text: prompt }], parent },
           // 这个 signal 只掌「入队握手」那一段（上游：`owning the operation only until inbox acceptance`），
           // **不是子代理的寿命上限**——子代理被收下之后照旧自己跑完。
           signal: AbortSignal.timeout(60 * 1000),
+          // **续接型那一支**：结算报告送回直接父级（主笔），本地孩子进父级目录、可跨重启冷恢复。
+          delivery: 'parent',
         })
       } catch (error) {
         return reject(500, `派子代理失败：${String(error instanceof Error ? error.message : error)}`)
       }
       // 派单记录进账本（`label` 那一栏照用）：工作台照旧看得见每一路，产物入口照旧按 label 派生。
       appendEvent(project, 'textbook/agent-start', { label: values.label, ...artifactDataForLabel(values.label, goldN(assignMeta)) })
+      // ── 票 `reader-questionnaire-ai-authoring/04`：**写卷那一档的 `childId` 要落账** ─────────────
+      // 回卷之后靠它找回**同一个**子助手（票 `05`：冷恢复 `send_message(agent_id=meta.questionnaireAgentId)`）。
+      // ⛔ 不落 `state`（那是会话层临时态，宿主机一重启就没了）、⛔ 不另开账本、⛔ 不写进
+      // `project.json` 之外的地方——就这一格。
+      // ⚠️ 只在**写卷那一档**写：其它十档的 `childId` 不需要回卷后找回（一次性小助手）。
+      // ⚠️ 只写真拿到的那个（`childId` 缺失⇒ 不写一个 `null` 冒充“已记着”）；下一次派写卷小助手会覆盖它
+      // （那是**对**的：旧那一份的意图件已被新一轮替代，回卷该由写这一份卷的人来读）。
+      const startedChildId = typeof started?.childId === 'string' && started.childId !== '' ? started.childId : null
+      if (spec.kind === QUESTIONNAIRE_AUTHOR_KIND && startedChildId !== null) {
+        updateMeta(project, (state) => { state.questionnaireAgentId = startedChildId })
+      }
       return accept({
         project,
         agentId: started?.childId ?? null,
@@ -2689,7 +2891,11 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
       // 既有的分组顺序（`chapterSuggestion`）；没有任何分组时退化成按卡片顺序（`knowledgePoints`）。
       // ⚠️ 两样都只从**这一个合并件**现读（⛔ 不在动作层另算一份）。
       const { groups, cardOrder } = readerQuestionnaireOrdering(merged)
-      const text = renderReaderQuestionnaire({ bookName: questionnaireMeta.name, slices, degraded, note, groups, cardOrder })
+      // 票 `reader-questionnaire-ai-authoring/03`：AI 写的那份题面（`工作区/问卷题面.json`）经
+      // **唯一读侧**读（`readReaderQuestionnaireText`）——读不到（没交／被归档走）⇒ `null` ⇒ 卷子
+      // 退回今天的干清单（⛔ 不抛、⛔ 不卡发卷）；读到了就插进固定行型（**行型一个字不改**）。
+      const questionnaireText = readReaderQuestionnaireText(project)
+      const text = renderReaderQuestionnaire({ bookName: questionnaireMeta.name, slices, degraded, note, groups, cardOrder, questionnaireText })
       writeWork(project, READER_QUESTIONNAIRE_ISSUED_FILE_NAME, text)
       // 「给出方式」＝写进书夹，交给**通用下载路由**（`/textbook/download`，书夹内任何文件都能下载；
       // 文件名会被硬编成 `<书名>.md`，正文首行的标题兜住可读性）。
@@ -2720,8 +2926,123 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
         meta.answerer = answerer
         meta.answererAt = answererAt
       })
+      // ⚠️ 票 `reader-questionnaire-ai-authoring/05`：这一跳**不派子代理**——它只是把回卷件落盘。
+      // 「读卷那一路」是主笔下一步叫的那支动作 `reader-questionnaire-analyze`（冷恢复／干净重派两档），
+      // ⛔ 不在人粘完回卷的同一发里附带起子代理（那一跳的失败该让主笔看见并处置）。
       // 回包给「落在哪 ＋ 多长 ＋ 这一次的收卷人/时刻」：不给正文（正文在盘上；下游读它走同一个文件）。
       return accept({ file: READER_QUESTIONNAIRE_RETURNED_REL, chars: raw.length, answerer, answererAt })
+    }
+    // ── 票 `reader-questionnaire-ai-authoring/05`：**读卷那一路**（回卷件落盘之后由主笔叫）──────
+    //
+    // 两档，判读口径与结论形状**完全相同**：
+    //   · `resumed`——冷恢复 `meta.questionnaireAgentId` 那**一个**子助手（`send_message`，票 `01` 实测可行）；
+    //   · `rehydrated`——唤不醒（未知 id／历史没了）就新起一路 `questionnaire-analyze`，
+    //     交办里注入三件（① 提示词原文可确定性重建／② 意图件／③ 回卷件）。
+    // ⚠️ **退回确定性卷不是退路**：题面是 AI 写的，判读也必须是 AI 的（spec「退化与已知窄处」）。
+    // ⚠️ **意图件不在盘上 ⇒ 这一路不跑**（退回站 3 `brief.hints` 那条既有教学句）：不拿空意图硬读。
+    // ⚠️ **落记录仍由主笔**：这一跳只把「读卷」这一路派出去，`graph-opinion` 一条不在这里发。
+    // ⚠️ **判据强度**（票面验收最后一条）：⛔ 不断它读得对，只断「意图件被要求读、结论形状合法、
+    //   落笔走同一条路」。
+    case 'reader-questionnaire-analyze': {
+      assertSessionOwned(project, sessionId)
+      const analyzeMeta = readMeta(project)
+      if (analyzeMeta === null) return reject(404, '项目不存在')
+      // ① 回卷件不在盘上 ⇒ 没得读（不是本票新造的：今天的教学句也是「有件才写」）。
+      if (!readerQuestionnaireReturnOnDisk(project)) {
+        return reject(409, `这本书还没有回卷件（\`${READER_QUESTIONNAIRE_RETURNED_REL}\` 不在盘上）——先等收卷人交回、你粘回工作台，再来叫读卷这一路`)
+      }
+      // ② 意图件不在盘上 ⇒ **这一路不跑**，退回今天的教学句（⛔ 不拿空意图硬读）。
+      //    ⚠️ 不走派单：那不是错误，是一个合法的「没有可判依据」——所以 200 ＋ `skipped`。
+      if (!questionnaireIntentOnDisk(project)) {
+        return accept({
+          project,
+          skipped: 'no-intent',
+          message: `写卷那份意图件（\`${READER_QUESTIONNAIRE_INTENT_REL}\`）不在盘上 ⇒ 读卷这一路不跑：`
+            + '不拿空意图硬读（不知道当初为什么这么问，判出来的「已经会」就只是字面猜）。'
+            + '回卷件仍照旧由你逐条读（站 3 交办里那条既有教学句说的就是那一路）。',
+        })
+      }
+      // ③ 三件注入齐不齐（缺一件 ⇒ 不派，点名缺哪件）。
+      const target = readQuestionnaireAnalyzeTarget(project)
+      const injections = questionnaireAnalyzeInjectionReading({ ...target })
+      if (!injections.ok) return reject(409, injections.message)
+      // ④ 冷恢复优先：`meta.questionnaireAgentId` 那**一个** id。
+      const childId = typeof analyzeMeta.questionnaireAgentId === 'string' ? analyzeMeta.questionnaireAgentId : ''
+      const parent = typeof ctx.agents?.get === 'function' ? ctx.agents.get(sessionId) : undefined
+      if (parent === undefined) {
+        return reject(500, '读卷那一路派不出去：找不到这个会话的主 AI（子代理要挂在主笔自己的会话下，报告才回得来）——确认主笔正活着再重试')
+      }
+      // 冷恢复那一跳的正文：把「你上一轮写的那份卷回来了」＋ 三件的路径 ＋ 形状交给它。
+      const resumePrompt = readerQuestionnaireAnalyzeResumePrompt({ childId, injections })
+      let resumeTier = null
+      let coldError = null
+      if (childId !== '' && typeof ctx.subagents?.sendMessage === 'function') {
+        try {
+          await ctx.subagents.sendMessage(parent, childId, [{ type: 'text', text: resumePrompt }], {
+            signal: AbortSignal.timeout(60 * 1000),
+          })
+          resumeTier = 'resumed'
+        } catch (error) {
+          coldError = String(error instanceof Error ? error.message : error)
+        }
+      } else if (childId !== '') {
+        coldError = '宿主没有小助手服务（ctx.subagents.sendMessage），冷恢复那一档派不出去'
+      } else {
+        coldError = '书账本里没有 `meta.questionnaireAgentId`（没派过写卷小助手）'
+      }
+      if (resumeTier === null) {
+        // ⑤ 唤不醒 ⇒ 新起一路上下文干净的重派（三件注入补齐）。
+        if (ctx.subagents === undefined || typeof ctx.subagents.startActivation !== 'function') {
+          return reject(500, '宿主没有小助手服务，读卷那一路派不出去——升级宿主再试')
+        }
+        let prompt
+        try {
+          const spec = dispatchKindSpec('questionnaire-analyze')
+          const raw = readResource(spec.shapeRel)
+          if (!raw.ok) {
+            return reject(500, `读卷模板读不出来：resources/${spec.shapeRel}（${raw.reason}）——模板是这一档形状的唯一出处，读不到就不许给半份骨架`)
+          }
+          const values = dispatchValues('questionnaire-analyze', {
+            meta: analyzeMeta,
+            brief: buildStageBrief(project),
+            questionnaireAnalyze: target,
+          })
+          prompt = assembleDispatchPrompt('questionnaire-analyze', { shapeText: raw.text, values })
+        } catch (error) {
+          if (error instanceof DispatchShapeError) return reject(500, error.message)
+          return reject(400, String(error instanceof Error ? error.message : error))
+        }
+        try {
+          await ctx.subagents.startActivation({
+            provider: SUBAGENT_PROVIDER,
+            label: '读读者情况问卷',
+            request: { prompt: [{ type: 'text', text: prompt }], parent },
+            signal: AbortSignal.timeout(60 * 1000),
+            // 与派单那一跳同一支：**续接型**（报告回直接父级、可跨重启冷恢复）。
+            delivery: 'parent',
+          })
+        } catch (error) {
+          return reject(500, `重派读卷子代理失败：${String(error instanceof Error ? error.message : error)}`)
+        }
+        resumeTier = 'rehydrated'
+      }
+      // ⑥ **哪一档走过要留账**：`meta.questionnaireAgentResume`（界面与账本两处都读它）。
+      updateMeta(project, (state) => { state.questionnaireAgentResume = resumeTier })
+      // 账本那一处：沿用既有事件型（⛔ 不新增事件类型、⛔ 不改三处登记面）。
+      appendEvent(project, 'textbook/hint', {
+        text: resumeTier === 'resumed'
+          ? '问卷读卷那一路：冷恢复原来那个写卷小助手（它带着自己当初为什么这么问）。'
+          : `问卷读卷那一路：唤不醒原来那个（${coldError ?? '原因读不出'}）⇒ 新起一路上下文干净的读卷子代理，三件注入已补齐。`,
+        questionnaireResume: resumeTier,
+      })
+      return accept({
+        project,
+        tier: resumeTier,
+        childId: resumeTier === 'resumed' ? childId : null,
+        verdictPath: READER_QUESTIONNAIRE_VERDICT_REL,
+        injections: { authorPrompt: true, intent: true, returned: true },
+        coldError,
+      })
     }
   }
 })
