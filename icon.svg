@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36" fill="none">
+  <!-- 造书工作台图标：一本摊开的书（左页＝教学蓝本，右页＝成书），书脊上方一点暖色「起笔」。
+       纯几何、无字、无背景磁贴（磁贴由 Plugin Manager 自己画）。 -->
+  <g transform="translate(0,1.8)"><path d="M18 12.1C15.3 10.4 10.9 9.8 7.3 10.9V25.1C10.9 24 15.3 24.6 18 26.3Z" fill="#4C7DF0"/>
+  <path d="M18 12.1C20.7 10.4 25.1 9.8 28.7 10.9V25.1C25.1 24 20.7 24.6 18 26.3Z" fill="#3A63D2"/>
+  <path d="M18 12.1V26.3" stroke="#2A4AA8" stroke-width="1.1" stroke-linecap="round"/>
+  <rect x="9.9" y="13.9" width="5.8" height="1.15" rx="0.575" fill="#FFFFFF" fill-opacity="0.92"/>
+  <rect x="9.9" y="16.5" width="4.9" height="1.15" rx="0.575" fill="#FFFFFF" fill-opacity="0.76"/>
+  <rect x="9.9" y="19.1" width="5.3" height="1.15" rx="0.575" fill="#FFFFFF" fill-opacity="0.6"/>
+  <rect x="20.3" y="13.9" width="5.8" height="1.15" rx="0.575" fill="#FFFFFF" fill-opacity="0.92"/>
+  <rect x="20.3" y="16.5" width="4.4" height="1.15" rx="0.575" fill="#FFFFFF" fill-opacity="0.76"/>
+  <rect x="20.3" y="19.1" width="5.1" height="1.15" rx="0.575" fill="#FFFFFF" fill-opacity="0.6"/>
+  <path d="M18 4.9L18.95 7.15L21.2 8.1L18.95 9.05L18 11.3L17.05 9.05L14.8 8.1L17.05 7.15Z" fill="#F5B32E"/>
+</g>
+</svg>

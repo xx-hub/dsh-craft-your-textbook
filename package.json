@@ -1,6 +1,6 @@
 {
   "name": "dsh-craft-your-textbook",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "造书工作台：把教材 PDF 加工成「AI 教学蓝本」的 6 阶段流水线（dsh 插件包）。主 AI 统筹跑流水线（亲自做或派小助手分头干），用户只做五类事：上传材料、确认探查结果、在关卡拍板、确认章节安排、抽查提意见。全程中文，无需技术知识。",
   "type": "module",
   "main": "./src/index.js",
@@ -21,10 +21,26 @@
     "lib/client.js",
     "resources",
     "preset",
-    "scripts",
+    "scripts/setup.mjs",
+    "assets",
+    "icon.svg",
+    "screenshots.json",
     "README.md",
     "LICENSE"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xx-hub/dsh-craft-your-textbook.git"
+  },
+  "homepage": "https://github.com/xx-hub/dsh-craft-your-textbook#readme",
+  "bugs": {
+    "url": "https://github.com/xx-hub/dsh-craft-your-textbook/issues"
+  },
+  "author": {
+    "name": "xx-hub",
+    "url": "https://github.com/xx-hub"
+  },
+  "icon": "icon.svg",
   "dsh": {
     "bundle": {
       "patch": [
@@ -53,11 +69,19 @@
   },
   "keywords": [
     "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
     "plugin",
     "textbook",
     "教材",
     "教育",
-    "AI教学"
+    "AI教学",
+    "education",
+    "teaching",
+    "socratic",
+    "ai-education",
+    "workbook",
+    "courseware"
   ],
   "dependencies": {
     "adm-zip": "^0.6.0",

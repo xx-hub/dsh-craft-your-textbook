@@ -6490,17 +6490,19 @@ function stageBriefContext(projectId, meta, stage) {
   /**
    * 登记一份挂载文档（`methodologyDocs` 那一份；一页纸的行由 `mountMethodology` 从它派生）。
    *
-   * ⚠️ **票 12 · R8（`spec §5.7` 第 3 条／规划票 17 §2 第 3 条）起它返回空串**：
-   * 各阶段分支原先写的是 `brief.methodology = \`${mtl('a')}\n${mtl('b')}\``——那些行于是
-   * **同时**落在 `base`（＝阶段分支拼出来的那一份）与**一页纸块**（`ONEPAGER_HEAD` 那一段，
-   * 由 `onepagerLines` 再拼一遍）**两处**，同一句话在一份 brief 里出现 2 次（零判据的浪费，
-   * spec §5.7 自陈并已裁**去重**）。⛔ **不是删信息量**：那一行仍一字不动地在一页纸块里
-   * （`mountMethodology` 照旧按 `docs` 派生 `onepagerLines`、`head` 照旧拼），这里只是**不再让它同时进 `base`**。
+   * ⚠️ **票 `arch-deepening-2026-11/02` 起它只留副作用、返回 `void`**（`mtl` 这个名字不改：
+   * `test/test-shared-artifacts.mjs` 的 `mtlArgsOf()` 用 `\bmtl\(` 反解**挂载面**，改名等于动一道
+   * 冻结判据的扫描面，换不到任何行为收益）。
+   * 来由：票 12 · R8（`spec §5.7` 第 3 条）把「同一句话同时进 `base` 与一页纸两处」那次去重之后，
+   * 本函数的返回值**恒为空串**，可 8 个阶段分支还在用模板串拼它 ⇒ `briefFacts().methodology`
+   * 在一份没有正文可交的阶段上交出的是 `"\\n\\n"`（**不是空串**，按「这个键有没有内容」写的
+   * 消费方会被它钓到）。⇒ 返回值收掉，`methodology` 这个键只由两处真写者给：
+   * `mountMethodology()`（拼装）与 `customPatternsBrief()`（自定义模式卡，只属于 `gate`／`gold`）。
+   * ⛔ **不是删信息量**：那些文档照旧由本函数登记，一页纸与指针兜底照旧从 `docs` 派生。
    */
   const mtl = (rel) => {
-    if (discloseOf(rel) === null) return ''
+    if (discloseOf(rel) === null) return
     methodologyDocs.push(rel)
-    return ''
   }
   /** 关卡当前盘上真实裁决（驳回重做事件的判据之一；只在这一步读一次，别在两处各读一遍）。 */
   const gateDecision = stage === 'gate' ? foldGate(projectId) : null
@@ -6702,7 +6704,7 @@ const STAGE_FACTS = Object.freeze({
       + '意图件不在盘上 ⇒ 那一跳回 `skipped`，就照既有那条教学句自己逐条读。',
     ]
     facts.materials = sources
-    facts.methodology = mtl('SKILL.md')
+    mtl('SKILL.md')
     // 站 3 驳回之后的「让 AI 重写这几条」：用户上一句意见随这一趟交办件读
     // （与 `outlineRedoNote` 同一先例；⛔ 不在 brief 里另造第二份措辞）。
     if (typeof meta.goalRedoNote === 'string' && meta.goalRedoNote.trim() !== '') {
@@ -6772,7 +6774,8 @@ const STAGE_FACTS = Object.freeze({
       reading: readingRel(n),
       shard: knowledgeShardRel(n),
     }))
-    facts.methodology = `${mtl('SKILL.md')}\n\n${mtl('references/source-material.md')}`
+    mtl('SKILL.md')
+    mtl('references/source-material.md')
     facts.hints = [
       '这是全书设计的基准，宁可多读、多整理，不要只读开头。',
       `精读派发模板：resources/references/subagent-prompts/close-reading-prompt.md —— 派每一路用 \`workbench_act(action=agent-assign, dispatchKind=close-reading, material=NN)\`（机器照这份模板代填：细目落盘 ${readingRel('NN')}、分片落盘 ${knowledgeShardRel('NN')}、最终回复 ≤2K token：结论／结构一句话／质量信号／落盘路径），你只给材料号 ＋ 一句叮嘱。按 parallelReads 逐份派、可并发；材料多时不要退回「自己从头读到尾再汇总」，那会把同一份内容搬两遍。`,
@@ -6895,15 +6898,16 @@ const STAGE_FACTS = Object.freeze({
       + '——⛔ 别把整份方案再内联一遍进上下文。'
       + '**正式拍板卡的入参来自真实方案，不许出现测试/占位字样**——三段都填了不等于内容是真的（真出过的一次三段全非空、内容全是占位件）；机器逐字段筛测试/占位词表（「测试标题」「测试摘要」「稍后重发」「占位」「TODO」…），命中当场 400 并点名是哪个词、在哪个字段，纪律见 resources/references/anti-patterns.md 的流程级反模式。'
     facts.materials = sources
-    facts.methodology = mtl({
+    mtl({
       '1': 'references/source-material.md', '2': 'references/patterns/README.md', '3': 'references/file-contracts.md',
     }[String(gate)] ?? 'SKILL.md')
     // 本书自定义模式库一并交给 AI（与内置模式库同等地位）：用户在拍板/驳回「换个风格」时
     // 粘贴的描述会变成自定义模式卡，任何一关（含修订）都要读到它。
-    {
-      const customPatterns = customPatternsBrief(projectId)
-      if (customPatterns !== '') facts.methodology = `${facts.methodology}\n\n${customPatterns}`
-    }
+    // ⚠️ 票 `arch-deepening-2026-11/02`：**无条件赋值**（空串也赋）——它今天是 `gate` 这个阶段
+    // `methodology` 的唯一真内容，无条件赋值让「gate 有 methodology 这个键」成为**静态事实**，
+    // 判据（`test-brief-doc-closure.mjs` 的 `STAGE_FACT_DECL`）才写得死。「这本书没有自定义模式」
+    // 本来就是一条真事实（空串），⛔ 别把它擦成「没有这个键」。
+    facts.methodology = customPatternsBrief(projectId)
     facts.hints = [
       '面向家长/老师，别用黑话；字符串里严禁英文双引号，引用一律用「」。',
       '若 previousDecision 是被驳回的方案，必须认真采纳用户意见再修订，并在摘要里说明采纳了哪些。',
@@ -7023,7 +7027,7 @@ const STAGE_FACTS = Object.freeze({
     // 换来的是「一卡一事／容器卡／复述名字／`testable` 判不判得出来」有人看。
     facts.hints = ['图审校（`cards[]` 存在时才派）：`workbench_act(action=agent-assign, dispatchKind=graph-review, note=…)` —— 机器按 resources/references/subagent-prompts/graph-review-prompt.md 代填，并把**两条软读数**（锚区间互相包含／孤岛清单）与**按把握档排的注意力清单**（先复核「待核」，再全量扫一遍）随派单现算给它。它只交**条目级清单**（点名到卡），⛔ 不下「合格／不合格」结论、⛔ 不改卡不加边——清单是第二双眼睛，处置仍归你与用户。']
     facts.materials = sources
-    facts.methodology = mtl('references/file-contracts.md')
+    mtl('references/file-contracts.md')
     const outlineRedo = meta.outlineRedoNote
     if (typeof outlineRedo === 'string' && outlineRedo.trim() !== '') {
       facts.userFeedback = outlineRedo
@@ -7091,15 +7095,14 @@ const STAGE_FACTS = Object.freeze({
       `${auditRelPath} —— 审计记录（四层审计 + 试教[条件触发]；**由那份额外派出的审计小助手产出**，严格 JSON：{"passed":true,"issues":[{"level":"错误|警告|提示","status":"open|fixed|accepted-risk","text":"具体问题"}]}；accepted-risk 还要写 reason 与 confirmedBy）。⚠️ 票 \`audit-gate-semantics/01\` 起 \`passed\` 由机器按 issues **现算**（错误/open ⇒ false；警告/open 超过阈值 ⇒ false；提示不阻断），审计员自报 true 不能洗绿。⚠️ 「四层审计 ＋ 试教」**只有承诺**、机器零判据：机器只验 matrix 对 5 个必读文件各正好一行 {file, quote}（quote 逐字）＋ 上面那份 issues 形状与现算 passed（\`checkGoldAudit\`／\`audit-semantics\`，写入侧 audit-submit 与交工侧共用同一份）；**L1–L5 那四层有没有逐层做、试教有没有触发，机器一个字都不读**——这几个词在 \`src/\` 里零命中，界面上也没有（界面词表把「审计」统一成「检查」）。`,
     ]
     facts.materials = sources
-    facts.methodology = `${mtl('references/file-contracts.md')}\n\n${mtl('references/audit-and-testing.md')}`
+    mtl('references/file-contracts.md')
+    mtl('references/audit-and-testing.md')
     // 票 workbench-transitions/19③（2026-09-24 裁决补充）：范例章也是写作任务，风格线同样必读。
     // 这一段原先**没有** `references` 字段（`gold` 是新建，不是「加一行」）。
     facts.references = ['工作区/style-line.md（写每一章前必读、逐条落实）']
     // 金标准写作规范：本书自定义模式库一并交给 AI（「模式选型」节须覆盖它们）。
-    {
-      const customPatterns = customPatternsBrief(projectId)
-      if (customPatterns !== '') facts.methodology = `${facts.methodology}\n\n${customPatterns}`
-    }
+    // ⚠️ 同 `gate` 那一支：**无条件赋值**（空串也赋）——它是 `gold` 这个阶段 `methodology` 的唯一真内容。
+    facts.methodology = customPatternsBrief(projectId)
     facts.hints = [
       CHAPTER_BODY_G3_HINT,
       // 票 04：原来这条要求主笔自己「找到对应材料小节通读，再动笔」——那正是 ADR-0030 决策 1
@@ -7170,7 +7173,11 @@ const STAGE_FACTS = Object.freeze({
     // F39（2026-08-20 走查）：段落级抽查意见也透出给 AI（整章意见带 comment，段落意见合成人话；已撤回的跳过）。
     // 票 09：**必须带 id**——没有 id，主笔 AI 交工时无从点名（handledReviews 按 id 销号）。
     facts.pendingReviews = (meta.pendingReviews ?? []).filter((r) => r.status !== 'revoked').map((r) => ({ id: r.id, chapter: r.chapter, comment: paragraphReviewText(r) }))
-    facts.methodology = `${mtl('references/audit-and-testing.md')}\n${mtl('references/file-contracts.md')}\n${mtl('references/subagent-prompts/writing-agent-prompt.md')}\n${mtl(AUDIT_TEMPLATE_REL)}\n${mtl(CHAPTER_AUDIT_SCRIPT_REL)}`
+    mtl('references/audit-and-testing.md')
+    mtl('references/file-contracts.md')
+    mtl('references/subagent-prompts/writing-agent-prompt.md')
+    mtl(AUDIT_TEMPLATE_REL)
+    mtl(CHAPTER_AUDIT_SCRIPT_REL)
     facts.hints = [
       CHAPTER_BODY_G3_HINT,
       CHAPTER_PROGRESS_REQUIREMENT,
@@ -7270,7 +7277,7 @@ const STAGE_FACTS = Object.freeze({
     facts.references = ['交工后工作台会生成 工作区/book.md（机器拼装成品）']
     // 挂载关系照旧（票 05 口径）：这一支仍挂 `references/audit-and-testing.md`，
     // 但**取法**用票 02 合并后的形态——`mtl(...)`（事件注入表已接管分阶段尾节，`mtlWithTail` 退役）。
-    facts.methodology = mtl('references/audit-and-testing.md')
+    mtl('references/audit-and-testing.md')
     facts.outputs = ['维护 工作区/progress.md（每章一行：写完/审计/验货）', `工作区/audit-cross.md —— 合并前跨章审计结论，由审计小助手自落（机器逐项验五项核对都有交代才放行）`]
     facts.hints = [
       '前言写给"拿到这本书的人"：这本书讲什么、怎么用（给 AI 老师上课还是人直接读）。',
@@ -7306,7 +7313,8 @@ const STAGE_FACTS = Object.freeze({
     facts.finalSummary = finalSummary === null
       ? { path: finalAuditSummaryRel(), ready: false, chars: null, unionSize: 0, items: [] }
       : { path: finalSummary.path, ready: true, chars: finalSummary.chars, unionSize: finalSummary.unionSize, items: finalSummary.items }
-    facts.methodology = `${mtl('references/delivery-checklist.md')}\n\n${mtl('references/audit-and-testing.md')}`
+    mtl('references/delivery-checklist.md')
+    mtl('references/audit-and-testing.md')
     facts.outputs = [
       '维护 工作区/progress.md（每章一行：写完/审计/验货）',
       ...FINAL_AUDIT_SCOPES.map(({ n, scope }) => `${finalAuditReportRel(n)} —— 最后检查第 ${n} 路分报告（${scope}）：由那一路的小助手自落，协调员不转写`),

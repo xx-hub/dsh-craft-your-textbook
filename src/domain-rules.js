@@ -2501,8 +2501,12 @@ export function judgeMaterialUploadSize({ name, size, autoSplit = false } = {}) 
 //
 // 2026-09-20 拍板（grill Q24）：界面上的字只此一份，但**服务端也要产出人话文本**——
 // 《过程记录.md》、交办唤醒消息（「【工作台派任务 · X】」）、提案正文的一级标题都是给人读的。
-// 所以「两侧都必须知道」的那部分界面词落在这里；纯 UI 专属映射（PHASE_UI / STAGE_HUMAN /
-// CHECK_UI / EVENT_UI）留在 src/ui/view-rules.js，由它把这里的共用件再导出给组件取词。
+// 所以「两侧都必须知道」的那部分界面词落在这里；其余仍留 src/ui/view-rules.js（PHASE_UI /
+// CHECK_UI / EVENT_UI——它们今天没有任何后端消费者），由它把这里的共用件再导出给组件取词。
+// ⚠️ `STAGE_HUMAN` 曾经在「留 view-rules」那一组里，2026-11-15 搬了过来（票
+// `arch-deepening-2026-11/01`）：`src/workflow/mechanism-facts.js` 那份**后端**机器事实投影要读它，
+// 而它留在界面层就把整个 `src/ui/**` 与 `react` 一起拖进后端模块的 import 闭包——「只有界面要读它」
+// 这个前提当时就已经不成立。搬的只是**定义**，界面取词路径不变（view-rules 再导出）。
 // 分工与本文件头部原则一致：**词表共享，句子行文各端自己写**（logEntryText / announceText /
 // cardText 各自的措辞与冗长仍是单侧展示）。
 //
@@ -2538,6 +2542,27 @@ export const PHASE_UI_SOURCE = Object.freeze({
 	4: "最佳范例章",
 	5: "写完整本",
 	6: "最后检查",
+});
+
+/**
+ * 机器阶段（stage 简称）→ 界面词。**零依赖、纯字面表**，与 `PHASE_UI_SOURCE`／`gateHuman`／
+ * `stageLabelHuman` 同一个 concern、同一区。
+ *
+ * ⚠️ 2026-11-15 从 `src/ui/view-rules.js` **搬过来**（票 `arch-deepening-2026-11/01`）：
+ * `src/workflow/mechanism-facts.js`（后端机器事实投影）要读这张表，它住界面层就会把整个
+ * `src/ui/**`（实测 17 个文件）＋ `react` 这个裸依赖拖进后端模块的 import 闭包。
+ * **七个键与七个取值一个字都不许改**（票 `audit-matrix-contract/05` 那两格逐格比键集与人话性），
+ * 这里只搬住处。展示派生（`stageHuman`，带兜底措辞与那段长注释）仍在 `src/ui/view-rules.js`。
+ * 依据：CONTEXT.md「界面用词表」（两侧共用部分住领域规则模块的「界面词」区、展示派生模块再导出）。
+ */
+export const STAGE_HUMAN = Object.freeze({
+	explore: "读材料挑重点",
+	gate: "拍板定方案",
+	outline: "章节安排",
+	gold: "最佳范例章",
+	chapters: "写完整本",
+	merge: "合并成书",
+	final: "最后检查",
 });
 
 /**

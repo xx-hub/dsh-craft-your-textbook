@@ -3,6 +3,7 @@
  *
  * 五个映射集中在此，纯函数、显式吃 (meta, workFiles) 输入，可独立测试：
  *   - STAGE_HUMAN / stageHuman：stage（机器内部简称）→ 界面全称
+ *     （表的**定义**在 `src/domain-rules.js` 的「界面词」区，本文件再导出；见下面那段注释）
  *   - workEntryAction / openableArtifacts：产物 → 「打开一份文件看看」该做什么（ADR-0010）
  *   - artifactName / artifactKind：产物路径 → **人读名字 / 类型词**（票 05：任何屏同一个名字）
  *   - workEntryForEvent / workPathForEvent：事件卡片 → 结果文件（"查看"入口；票 13：结构字段 →
@@ -33,6 +34,10 @@ import {
 	GATE_TOPIC,
 	PHASE_UI_SOURCE,
 	SEGMENT_PHASE,
+	// 票 `arch-deepening-2026-11/01`：阶段 → 界面词那张表的**定义**已搬进领域规则的「界面词」区
+	// （`stageHuman` 仍住本文件，见下面那段注释）。这里只为本文件的 `stageHuman` 建一个本地绑定；
+	// 对组件的出口是同文件下方的 `export { STAGE_HUMAN } from "../domain-rules.js"`。
+	STAGE_HUMAN,
 	// 票 `demo-flow-fidelity/06`：最后检查那句演示提示的项名单点（服务端 name，见 domain-rules）。
 	QUALITY_CHECKS_TAIL_NAMES,
 } from "../domain-rules.js";
@@ -185,15 +190,13 @@ export { segmentHuman };
 //     **不要**因为阶段片第 3 格叫「拍板定方案」就把 `outline` 也改成那一句。
 //   · ⚠️ **不叫「第 N 关」**（`CONTEXT.md` 的「设计关卡＝」那一句明写界面不叫那个；`ALT_GATE_NUMBER_RE` 会判红）。
 //     带关卡号的那一档是**另一份词**：`gateHuman(n)`→「第 N 次拍板 · <主题>」。
-export const STAGE_HUMAN = {
-	explore: "读材料挑重点",
-	gate: "拍板定方案",
-	outline: "章节安排",
-	gold: "最佳范例章",
-	chapters: "写完整本",
-	merge: "合并成书",
-	final: "最后检查",
-};
+//
+// ⚠️ 2026-11-15（票 `arch-deepening-2026-11/01`）：这张表的**定义**搬进了
+// `src/domain-rules.js` 的「界面词」区（那里与 `PHASE_UI_SOURCE`／`gateHuman`／`stageLabelHuman`
+// 同一个 concern），本文件只剩**再导出**——与同文件 `originalPreviewOpenable`／`okMaterialShards`
+// 同一处置。原因不是风格：`src/workflow/mechanism-facts.js` 那份后端投影要读它，它住这里就把
+// 整个 `src/ui/**` 与 `react` 拖进了后端模块的 import 闭包。**界面取词路径不变**。
+export { STAGE_HUMAN } from "../domain-rules.js";
 
 /**
  * 阶段名 → 界面词。

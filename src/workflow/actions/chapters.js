@@ -2708,8 +2708,10 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
       }
       // ⚠️ **父级必须是主笔本人**（票 `context-budget/18` 落地时实测钉死的一条）：这一跳要的是
       // **续接型**子代理（宿主 `startActivation` ＋ `delivery: 'parent'`）。
-      // ⚠️ **接口沿革（0.2.1 起）**：旧的「续接型专用起法」已并进
-      // `startActivation({ provider, label, request, signal, delivery })`——`delivery` 决定拿回来
+      // ⚠️ **接口沿革（0.2.2-rc.3）**：旧的「续接型专用起法」已并进
+      // `startActivation({ provider, label, prompt, parent, signal, delivery })`——`prompt`／`parent`
+      // **平铺在 spec 顶层**（rc.1 的 `request` 子对象上游已撤掉，出处见
+      // `docs/reference/dsh-subagent-contracts.md` §6），`delivery` 决定拿回来
       // 的是哪一种：`'parent'` 才把结算报告送回直接父级（续接型那一支），`'caller'` 只把结果交给
       // 调用方。本仓另外两处一次性调用（`content-lib.js`／`patterns-ops.js`）用的正是后者。
       // ⛔ 别照旧字段名硬套。
@@ -2729,7 +2731,8 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
         started = await ctx.subagents.startActivation({
           provider: SUBAGENT_PROVIDER,
           label: values.label,
-          request: { prompt: [{ type: 'text', text: prompt }], parent },
+          prompt: [{ type: 'text', text: prompt }],
+          parent,
           // 这个 signal 只掌「入队握手」那一段（上游：`owning the operation only until inbox acceptance`），
           // **不是子代理的寿命上限**——子代理被收下之后照旧自己跑完。
           signal: AbortSignal.timeout(60 * 1000),
@@ -3016,7 +3019,8 @@ export const actChapters = familyOf('chapters', async ({ ctx: ctx, action: actio
           await ctx.subagents.startActivation({
             provider: SUBAGENT_PROVIDER,
             label: '读读者情况问卷',
-            request: { prompt: [{ type: 'text', text: prompt }], parent },
+            prompt: [{ type: 'text', text: prompt }],
+            parent,
             signal: AbortSignal.timeout(60 * 1000),
             // 与派单那一跳同一支：**续接型**（报告回直接父级、可跨重启冷恢复）。
             delivery: 'parent',

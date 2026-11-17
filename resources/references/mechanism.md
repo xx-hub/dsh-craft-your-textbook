@@ -1,5 +1,5 @@
 <!-- 生成物，勿手改；改机器请改 src/ 的声明面，再跑 node scripts/gen-skill-mechanism.mjs --write -->
-来源：`src/domain-rules.js`、`src/workflow/engine.js`、`src/workflow/engine/labels.js`、`src/ui/view-rules.js`、`src/contract-actions.js`、`src/workflow/dispatch-assembly.js`、`src/workflow/artifact-fields.js`、`src/agent-tool.js`
+来源：`src/domain-rules.js`、`src/workflow/engine.js`、`src/workflow/engine/labels.js`、`src/contract-actions.js`、`src/workflow/dispatch-assembly.js`、`src/workflow/artifact-fields.js`、`src/agent-tool.js`
 判据：`test/test-skill-mechanism-drift.mjs`（`npm test` main 段）
 
 ## 工具面
@@ -103,10 +103,9 @@
 
 ## 窄处
 - 读了哪些声明面：
-  - src/domain-rules.js：ACT_STAGES、PHASES、GATE_TOPIC、gateHuman()、BOOK_PRODUCT_FAMILIES、QUALITY_CHECKS_TAIL_NAMES、LEGACY_DIR_RELS
+  - src/domain-rules.js：ACT_STAGES、PHASES、GATE_TOPIC、gateHuman()、BOOK_PRODUCT_FAMILIES、QUALITY_CHECKS_TAIL_NAMES、LEGACY_DIR_RELS、STAGE_HUMAN（界面 label）
   - src/workflow/engine.js：PER_CHAPTER、STEP_INPUT_ROWS、STEP_OUTPUT_ROWS、STEP_SUB_OUTPUT_ROWS、NEXT_STAGE_VALUES
   - src/workflow/engine/labels.js：STAGE_LABELS、stageLabel()
-  - src/ui/view-rules.js：STAGE_HUMAN（界面 label）
   - src/contract-actions.js：listContractActions()／listAgentActionInputs()
   - src/workflow/dispatch-assembly.js：dispatchKinds()／dispatchKindSpec()
   - src/workflow/artifact-fields.js：artifactDataForGate()

@@ -28,10 +28,10 @@ import {
   LEGACY_WORK_DIR_NAME,
   PHASES,
   QUALITY_CHECKS_TAIL_NAMES,
+  STAGE_HUMAN,
   gateHuman,
 } from '../domain-rules.js'
 import { STAGE_LABELS, stageLabel } from './engine/labels.js'
-import { STAGE_HUMAN } from '../ui/view-rules.js'
 import { listAgentActionInputs, listContractActions } from '../contract-actions.js'
 import { dispatchKindSpec, dispatchKinds } from './dispatch-assembly.js'
 import { artifactDataForGate } from './artifact-fields.js'
@@ -199,10 +199,9 @@ export function mechanismFacts() {
     },
     sources: {
       read: [
-        'src/domain-rules.js：ACT_STAGES、PHASES、GATE_TOPIC、gateHuman()、BOOK_PRODUCT_FAMILIES、QUALITY_CHECKS_TAIL_NAMES、LEGACY_DIR_RELS',
+        'src/domain-rules.js：ACT_STAGES、PHASES、GATE_TOPIC、gateHuman()、BOOK_PRODUCT_FAMILIES、QUALITY_CHECKS_TAIL_NAMES、LEGACY_DIR_RELS、STAGE_HUMAN（界面 label）',
         'src/workflow/engine.js：PER_CHAPTER、STEP_INPUT_ROWS、STEP_OUTPUT_ROWS、STEP_SUB_OUTPUT_ROWS、NEXT_STAGE_VALUES',
         'src/workflow/engine/labels.js：STAGE_LABELS、stageLabel()',
-        'src/ui/view-rules.js：STAGE_HUMAN（界面 label）',
         'src/contract-actions.js：listContractActions()／listAgentActionInputs()',
         'src/workflow/dispatch-assembly.js：dispatchKinds()／dispatchKindSpec()',
         'src/workflow/artifact-fields.js：artifactDataForGate()',
